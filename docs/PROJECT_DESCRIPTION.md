@@ -10,6 +10,10 @@ The system combines a React trip workspace, a FastAPI backend, PostgreSQL persis
 
 Cadensy is an AI-powered group travel coordination system that helps travelers build, discuss, and adapt one shared trip plan.
 
+## Demo Pitch
+
+Cadensy turns group travel planning from scattered discussion into a shared decision workflow. Members can express preferences and constraints, the system builds a living itinerary around them, and AI-assisted plan changes stay grounded in backend validation before the group approves them.
+
 ## 中文简介
 
 Cadensy 是一款面向团体旅行的 AI 协调系统，帮助不同偏好、预算、限制和旅行节奏的成员共同制定一个可以持续调整、让所有人都能接受的共享行程。
