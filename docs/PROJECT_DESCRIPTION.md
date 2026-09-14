@@ -18,6 +18,10 @@ Cadensy turns group travel planning from scattered discussion into a shared deci
 
 Cadensy treats AI as an assistant, not the final authority. The model can suggest and explain plan changes, but backend services validate candidate places, protect private constraints, classify decision paths, and require user approval before the current plan changes.
 
+## Success Metrics
+
+Cadensy is successful when groups reach an agreed itinerary faster, accept useful plan suggestions with fewer conflicts, and continue adapting the same current plan instead of moving decisions back into scattered group chats.
+
 ## 中文简介
 
 Cadensy 是一款面向团体旅行的 AI 协调系统，帮助不同偏好、预算、限制和旅行节奏的成员共同制定一个可以持续调整、让所有人都能接受的共享行程。
