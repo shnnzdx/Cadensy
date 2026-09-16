@@ -22,6 +22,10 @@ Cadensy treats AI as an assistant, not the final authority. The model can sugges
 
 Cadensy is successful when groups reach an agreed itinerary faster, accept useful plan suggestions with fewer conflicts, and continue adapting the same current plan instead of moving decisions back into scattered group chats.
 
+## User Value
+
+Cadensy helps travelers avoid losing important constraints in long message threads. The shared plan stays visible, editable, and connected to the reasons behind each decision, so the group can keep moving without asking one person to manually coordinate every tradeoff.
+
 ## Implementation Focus
 
 The project emphasizes practical coordination over generic content generation. AI outputs are connected to trip state, place data, and backend decision rules, so suggestions can become traceable product actions instead of isolated chat messages.
