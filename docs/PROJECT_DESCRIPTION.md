@@ -14,6 +14,10 @@ Cadensy is an AI-powered group travel coordination system that helps travelers b
 
 Cadensy turns group travel planning from scattered discussion into a shared decision workflow. Members can express preferences and constraints, the system builds a living itinerary around them, and AI-assisted plan changes stay grounded in backend validation before the group approves them.
 
+## Problem Fit
+
+Group trips often fail at the coordination layer: one person collects opinions, another remembers constraints, and decisions get buried across chats. Cadensy gives those moving pieces a shared home so planning can stay collaborative without becoming chaotic.
+
 ## AI Safety Notes
 
 Cadensy treats AI as an assistant, not the final authority. The model can suggest and explain plan changes, but backend services validate candidate places, protect private constraints, classify decision paths, and require user approval before the current plan changes.
