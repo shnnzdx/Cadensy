@@ -22,6 +22,10 @@ Group trips often fail at the coordination layer: one person collects opinions, 
 
 Cadensy treats AI as an assistant, not the final authority. The model can suggest and explain plan changes, but backend services validate candidate places, protect private constraints, classify decision paths, and require user approval before the current plan changes.
 
+## Decision Flow
+
+Plan changes move through a structured path instead of a free-form chat promise. Simple updates can become notices, contested changes can become voting rounds, settled decisions can be reopened, and booked or hard-constrained items can require confirmation from affected members.
+
 ## Success Metrics
 
 Cadensy is successful when groups reach an agreed itinerary faster, accept useful plan suggestions with fewer conflicts, and continue adapting the same current plan instead of moving decisions back into scattered group chats.
