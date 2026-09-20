@@ -22,6 +22,10 @@ Group trips often fail at the coordination layer: one person collects opinions, 
 
 Cadensy treats AI as an assistant, not the final authority. The model can suggest and explain plan changes, but backend services validate candidate places, protect private constraints, classify decision paths, and require user approval before the current plan changes.
 
+## Data Grounding
+
+AI suggestions are grounded in the current trip state, saved preferences, validated place candidates, and provider-backed venue data. This keeps recommendations tied to real planning context instead of letting the assistant invent standalone itinerary ideas.
+
 ## Decision Flow
 
 Plan changes move through a structured path instead of a free-form chat promise. Simple updates can become notices, contested changes can become voting rounds, settled decisions can be reopened, and booked or hard-constrained items can require confirmation from affected members.
