@@ -34,6 +34,10 @@ Plan changes move through a structured path instead of a free-form chat promise.
 
 Cadensy keeps humans in the decision loop. The assistant can reduce planning effort by preparing structured options, while the group still chooses what to accept and the backend records how each meaningful change was handled.
 
+## Auditability
+
+Every meaningful plan update is designed to leave context behind: what changed, why it changed, and which decision path handled it. This makes the itinerary easier to trust because the group can understand the reasoning instead of only seeing the final result.
+
 ## Success Metrics
 
 Cadensy is successful when groups reach an agreed itinerary faster, accept useful plan suggestions with fewer conflicts, and continue adapting the same current plan instead of moving decisions back into scattered group chats.
