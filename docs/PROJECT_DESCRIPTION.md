@@ -22,6 +22,10 @@ Group trips often fail at the coordination layer: one person collects opinions, 
 
 Cadensy treats AI as an assistant, not the final authority. The model can suggest and explain plan changes, but backend services validate candidate places, protect private constraints, classify decision paths, and require user approval before the current plan changes.
 
+## Privacy Boundary
+
+Cadensy separates private constraint handling from group-facing explanations. Sensitive requirement wording can influence planning and validation without being copied into shared updates, keeping the group informed without exposing details members did not intend to publish.
+
 ## Data Grounding
 
 AI suggestions are grounded in the current trip state, saved preferences, validated place candidates, and provider-backed venue data. This keeps recommendations tied to real planning context instead of letting the assistant invent standalone itinerary ideas.
