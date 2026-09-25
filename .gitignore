@@ -25,6 +25,7 @@ __pycache__/
 .agents/skills/aws-*/
 .agents/skills/launch-with-aws/
 .agents/skills/signing-in-to-aws/
+.tmp/
 .codex-temp-*.patch
 
 # Local backend traces and logs
