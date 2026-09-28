@@ -54,6 +54,10 @@ Cadensy helps travelers avoid losing important constraints in long message threa
 
 The trip workspace brings the current plan, map context, comments, member updates, and assistant drawer into one place. This makes planning feel like editing a shared product surface instead of switching between a chatbot, a spreadsheet, and a map.
 
+## Backend Reliability
+
+The backend keeps AI-assisted changes tied to explicit rules, validated place data, and structured decision records. This makes the system easier to debug because a proposed update can be traced through tools, validation, classification, and final user approval.
+
 ## Implementation Focus
 
 The project emphasizes practical coordination over generic content generation. AI outputs are connected to trip state, place data, and backend decision rules, so suggestions can become traceable product actions instead of isolated chat messages.
