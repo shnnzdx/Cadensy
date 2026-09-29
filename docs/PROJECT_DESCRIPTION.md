@@ -30,6 +30,10 @@ Cadensy separates private constraint handling from group-facing explanations. Se
 
 AI suggestions are grounded in the current trip state, saved preferences, validated place candidates, and provider-backed venue data. This keeps recommendations tied to real planning context instead of letting the assistant invent standalone itinerary ideas.
 
+## Planner Role
+
+The planner turns trip facts, member preferences, and real place candidates into a starting itinerary that the group can inspect and refine. Its job is to create a usable shared plan, not to make every later decision on behalf of the travelers.
+
 ## Decision Flow
 
 Plan changes move through a structured path instead of a free-form chat promise. Simple updates can become notices, contested changes can become voting rounds, settled decisions can be reopened, and booked or hard-constrained items can require confirmation from affected members.
