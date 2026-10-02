@@ -38,6 +38,10 @@ The planner turns trip facts, member preferences, and real place candidates into
 
 Plan changes move through a structured path instead of a free-form chat promise. Simple updates can become notices, contested changes can become voting rounds, settled decisions can be reopened, and booked or hard-constrained items can require confirmation from affected members.
 
+## Change Request Flow
+
+When a traveler asks to adjust the plan, Cadensy turns the request into a structured proposal before anything changes. The assistant can gather options and explain tradeoffs, while backend validation decides whether the proposal is safe to present for apply, vote, or confirmation.
+
 ## Collaboration Model
 
 Cadensy keeps humans in the decision loop. The assistant can reduce planning effort by preparing structured options, while the group still chooses what to accept and the backend records how each meaningful change was handled.
