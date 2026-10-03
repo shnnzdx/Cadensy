@@ -30,6 +30,10 @@ Cadensy separates private constraint handling from group-facing explanations. Se
 
 AI suggestions are grounded in the current trip state, saved preferences, validated place candidates, and provider-backed venue data. This keeps recommendations tied to real planning context instead of letting the assistant invent standalone itinerary ideas.
 
+## Place Data Strategy
+
+Cadensy uses provider-backed place results and cached venue records so planning can work with real candidates instead of fictional attractions. The cache improves repeat lookups while still allowing fresh destination coverage when the existing place library is not enough.
+
 ## Planner Role
 
 The planner turns trip facts, member preferences, and real place candidates into a starting itinerary that the group can inspect and refine. Its job is to create a usable shared plan, not to make every later decision on behalf of the travelers.
