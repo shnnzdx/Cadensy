@@ -130,4 +130,3 @@ branch:
 Before changing a Ruleset or Branch Protection, confirm the names shown in the
 GitHub UI and verify enforcement with an intentionally failing non-production
 branch. No such setting or test was performed here.
-
