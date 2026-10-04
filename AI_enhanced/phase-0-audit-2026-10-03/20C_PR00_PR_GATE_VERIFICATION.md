@@ -84,4 +84,3 @@ a Ruleset or Branch Protection configuration, use a non-production test branch
 to verify that a deliberately failing PR blocks merge and that the GitHub UI
 selects the three exact Job names above. That enforcement test and every
 protection setting remain outside PR-00.3.
-
