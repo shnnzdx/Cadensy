@@ -96,9 +96,10 @@ test("restoreTechnicalSession returns account session for token-only persisted s
   });
 });
 
-test("restoreTechnicalSession returns guest session for membership plus trip persisted state", () => {
+test("restoreTechnicalSession returns Guest session only when its bearer is persisted", () => {
   const runtime = createSessionRuntime({
     storage: createMemoryStorage({
+      "tripsync:guestToken": "gst-token-guest",
       "tripsync:membershipId": "m-guest",
       "tripsync:tripId": "t-guest",
     }),
@@ -109,6 +110,7 @@ test("restoreTechnicalSession returns guest session for membership plus trip per
   assert.deepEqual(restored, {
     facts: {
       kind: "guest",
+      guestAuth: true,
       membershipId: "m-guest",
       activeTripId: "t-guest",
     },
@@ -233,13 +235,15 @@ test("adoptAccountAuth keeps successful in-memory adoption when persistence writ
   });
   assert.deepEqual(adopted.warnings, [
     SESSION_RUNTIME_CODES.warnings.PERSISTENCE_WRITE_FAILED,
+    SESSION_RUNTIME_CODES.warnings.PERSISTENCE_CLEAR_FAILED,
   ]);
 });
 
-test("adoptTechnicalTripContext supports guest adoption, account trip switching, and invite cache writes", () => {
+test("Guest adoption, account trip switching, and invite cache writes remain separate", () => {
   const guestStorage = createMemoryStorage();
   const guestRuntime = createSessionRuntime({ storage: guestStorage });
-  const guestAdoption = guestRuntime.adoptTechnicalTripContext({
+  const guestAdoption = guestRuntime.adoptGuestAuth({
+    token: "gst-token-guest",
     activeTripId: "t-guest",
     membershipId: "m-guest",
     inviteToken: "invite-guest",
@@ -248,6 +252,7 @@ test("adoptTechnicalTripContext supports guest adoption, account trip switching,
   assert.deepEqual(guestAdoption, {
     facts: {
       kind: "guest",
+      guestAuth: true,
       activeTripId: "t-guest",
       membershipId: "m-guest",
     },
@@ -284,7 +289,7 @@ test("adoptTechnicalTripContext supports guest adoption, account trip switching,
   });
 });
 
-test("adoptTechnicalTripContext can force guest invite adoption over an existing account token", () => {
+test("adoptGuestAuth replaces an existing account token without retaining it", () => {
   const storage = createMemoryStorage();
   const runtime = createSessionRuntime({ storage });
   runtime.adoptAccountAuth({
@@ -293,16 +298,17 @@ test("adoptTechnicalTripContext can force guest invite adoption over an existing
     membershipId: "m-organizer",
   });
 
-  const adopted = runtime.adoptTechnicalTripContext({
+  const adopted = runtime.adoptGuestAuth({
+    token: "gst-token-invite",
     activeTripId: "t-invite",
     membershipId: "m-invite",
     inviteToken: "invite-guest",
-    forceGuest: true,
   });
 
   assert.deepEqual(adopted, {
     facts: {
       kind: "guest",
+      guestAuth: true,
       activeTripId: "t-invite",
       membershipId: "m-invite",
     },
@@ -311,6 +317,7 @@ test("adoptTechnicalTripContext can force guest invite adoption over an existing
   assert.equal(storage.dump()["tripsync:authToken"], undefined);
   assert.deepEqual(runtime.restoreTechnicalSession().facts, {
     kind: "guest",
+    guestAuth: true,
     activeTripId: "t-invite",
     membershipId: "m-invite",
   });
@@ -345,11 +352,8 @@ test("readInviteAdoption returns null for missing or malformed cache records", (
   });
 });
 
-test("requestIdentityFor derives account, trip, and membership-compat headers and reports missing-context codes", () => {
-  const runtime = createSessionRuntime({
-    storage: createMemoryStorage(),
-    emitCompatibilityMembershipHeader: true,
-  });
+test("requestIdentityFor derives only verified account or Guest bearer headers", () => {
+  const runtime = createSessionRuntime({ storage: createMemoryStorage() });
 
   const missingAccount = runtime.requestIdentityFor("account", { kind: "none" });
   assert.deepEqual(missingAccount, {
@@ -373,40 +377,28 @@ test("requestIdentityFor derives account, trip, and membership-compat headers an
     headers: {
       Authorization: "Bearer token-1",
       "X-Trip-Id": "t-1",
-      "X-Membership-Id": "m-1",
-    },
-  });
-  assert.deepEqual(runtime.requestIdentityFor("membership-compat", accountFacts), {
-    ok: true,
-    headers: {
-      "X-Membership-Id": "m-1",
     },
   });
 
   const guestFacts = createSessionRuntime({ storage: createMemoryStorage() })
-    .adoptTechnicalTripContext({
+    .adoptGuestAuth({
+      token: "gst-token-guest",
       activeTripId: "t-guest",
       membershipId: "m-guest",
     }).facts;
   const guestRuntime = createSessionRuntime({ storage: createMemoryStorage() });
-  guestRuntime.adoptTechnicalTripContext({
+  guestRuntime.adoptGuestAuth({
+    token: "gst-token-guest",
     activeTripId: "t-guest",
     membershipId: "m-guest",
   });
   assert.deepEqual(guestRuntime.requestIdentityFor("trip", guestFacts), {
     ok: true,
     headers: {
+      Authorization: "Bearer gst-token-guest",
       "X-Trip-Id": "t-guest",
-      "X-Membership-Id": "m-guest",
     },
   });
-  assert.deepEqual(guestRuntime.requestIdentityFor("membership-compat", guestFacts), {
-    ok: true,
-    headers: {
-      "X-Membership-Id": "m-guest",
-    },
-  });
-
   const tokenOnlyFacts = createSessionRuntime({ storage: createMemoryStorage() })
     .adoptAccountAuth({ token: "token-only" }).facts;
   const tokenOnlyRuntime = createSessionRuntime({ storage: createMemoryStorage() });
@@ -414,10 +406,6 @@ test("requestIdentityFor derives account, trip, and membership-compat headers an
   assert.deepEqual(tokenOnlyRuntime.requestIdentityFor("trip", tokenOnlyFacts), {
     ok: false,
     code: SESSION_RUNTIME_CODES.missingContext.MISSING_ACTIVE_TRIP_CONTEXT,
-  });
-  assert.deepEqual(tokenOnlyRuntime.requestIdentityFor("membership-compat", tokenOnlyFacts), {
-    ok: false,
-    code: SESSION_RUNTIME_CODES.missingContext.MISSING_MEMBERSHIP_IDENTITY,
   });
 });
 
@@ -464,7 +452,8 @@ test("invalidateTechnicalSession distinguishes account invalidation from members
   });
 
   const guestRuntime = createSessionRuntime({ storage: createMemoryStorage() });
-  const guestFacts = guestRuntime.adoptTechnicalTripContext({
+  const guestFacts = guestRuntime.adoptGuestAuth({
+    token: "gst-token-guest",
     activeTripId: "t-guest",
     membershipId: "m-guest",
   }).facts;
@@ -478,7 +467,7 @@ test("invalidateTechnicalSession distinguishes account invalidation from members
   });
 });
 
-test("logoutTechnicalSession attempts revoke only for account sessions, preserves invite caches, and does not let revoke failure block clear", async () => {
+test("logoutTechnicalSession attempts revoke for active account or Guest sessions, preserves invite caches, and does not let revoke failure block clear", async () => {
   const storage = createMemoryStorage();
   const runtime = createSessionRuntime({ storage });
   runtime.adoptAccountAuth({
@@ -549,7 +538,8 @@ test("logoutTechnicalSession attempts revoke only for account sessions, preserve
   });
 
   const guestRuntime = createSessionRuntime({ storage: createMemoryStorage() });
-  guestRuntime.adoptTechnicalTripContext({
+  guestRuntime.adoptGuestAuth({
+    token: "gst-token-guest",
     activeTripId: "t-g",
     membershipId: "m-g",
   });
@@ -564,8 +554,8 @@ test("logoutTechnicalSession attempts revoke only for account sessions, preserve
   });
   assert.deepEqual(guestLogout, {
     facts: { kind: "none" },
-    revokeAttempted: false,
-    revokeFailed: false,
+    revokeAttempted: true,
+    revokeFailed: true,
     warnings: [],
   });
 });

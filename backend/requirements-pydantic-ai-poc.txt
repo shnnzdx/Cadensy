@@ -1,0 +1,3 @@
+# PR-03 only. This is intentionally separate from production requirements.txt.
+# Reinstall from this file for the isolated compatibility environment.
+pydantic-ai-slim[openai]==2.54.0

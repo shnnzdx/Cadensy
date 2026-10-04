@@ -1,0 +1,23 @@
+{
+  "dataset_hash": "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f",
+  "dataset_version": "chat-change-preview-v1",
+  "deadline_contract": {
+    "provider_timeout_seconds": 20.0,
+    "request_timeout_seconds": 30.0,
+    "tool_timeout_seconds": 5.0
+  },
+  "git_commit": "6a55854d7899c77fa9fa6bab864b194abf4dd16c",
+  "grader_version": "chat-golden-grader-v1",
+  "model_configuration": {
+    "model": null,
+    "provider": "fake",
+    "thinking_mode": null
+  },
+  "prompt_version": "chat-agent-system-v1",
+  "runtime": {
+    "name": "legacy_custom_runtime",
+    "provider_mode": "fake",
+    "version": "source"
+  },
+  "tool_contract_version": "read-only-trip-tools-v1"
+}

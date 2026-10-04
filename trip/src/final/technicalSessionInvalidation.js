@@ -7,10 +7,6 @@ export const classifyTechnicalSessionInvalidation = ({ scope, facts, status }) =
     return SESSION_RUNTIME_CODES.invalidation.MEMBERSHIP_CREDENTIALS_INVALID
   }
 
-  if (scope === 'membership-compat') {
-    return SESSION_RUNTIME_CODES.invalidation.MEMBERSHIP_CREDENTIALS_INVALID
-  }
-
   if (facts?.kind === 'account') {
     return SESSION_RUNTIME_CODES.invalidation.ACCOUNT_CREDENTIALS_INVALID
   }

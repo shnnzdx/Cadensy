@@ -139,12 +139,21 @@ stronger support threshold.
 Only affected members must confirm. The proposal applies only after all required participants
 accept.
 
-If confirm deadlocks, the organizer can only:
+If Confirm deadlocks, the organizer can close the escalated proposal with one
+of three resolution actions:
 
-- split the slot
-- clear the slot
+- **keep** — reject the pending proposal and preserve the live Current Plan
+  item. The proposed patch is not applied, and this does not restore an old
+  snapshot over a later valid change.
+- **split** — split the block so the groups can follow separate plans and
+  regroup afterwards.
+- **clear** — remove the disputed activity from the shared itinerary.
 
-The organizer cannot simply impose one side's choice.
+Each action closes the deadlock and leaves an auditable Plan Change. `keep` is
+not a vote, does not give the organizer any additional member decision power,
+and does not bypass the existing required, settled, or booked protections: it
+only rejects the pending proposal. The organizer still cannot simply impose
+one side's proposed change.
 
 ## 5. Preferences And Constraints
 

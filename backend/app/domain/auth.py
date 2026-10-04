@@ -13,13 +13,15 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..db.models import AuthSession, TripMembership, User
+from ..db.models import AuthSession, GuestSession, TripMembership, User
 
 SESSION_TTL = timedelta(days=14)
+GUEST_SESSION_TTL = timedelta(days=7)
+GUEST_TOKEN_PREFIX = "gst_"
 HASH_ALGO = "pbkdf2_sha256"
 HASH_ROUNDS = 210_000
 
@@ -49,6 +51,12 @@ class LoginResult:
     user: User
     token: str
     memberships: list[dict]
+
+
+@dataclass(frozen=True)
+class GuestSessionResult:
+    session: GuestSession
+    token: str
 
 
 def _now() -> datetime:
@@ -95,7 +103,10 @@ def token_hash(token: str) -> str:
 def _memberships(db: Session, user_id: str) -> list[dict]:
     rows = db.scalars(
         select(TripMembership)
-        .where(TripMembership.user_id == user_id)
+        .where(
+            TripMembership.user_id == user_id,
+            TripMembership.status != "removed",
+        )
         .order_by(TripMembership.created_at)
     ).all()
     return [
@@ -118,6 +129,43 @@ def _start_session(db: Session, user: User) -> LoginResult:
     db.add(session)
     db.flush()
     return LoginResult(user=user, token=token, memberships=_memberships(db, user.id))
+
+
+def is_guest_token(token: str | None) -> bool:
+    return bool(token and token.startswith(GUEST_TOKEN_PREFIX))
+
+
+def start_guest_session(db: Session, membership: TripMembership) -> GuestSessionResult:
+    """Issue one bounded Guest bearer for a newly authenticated join.
+
+    The token has 256 bits of entropy and is shown once. SHA-256 protects a
+    database dump from directly replaying that high-entropy bearer; unlike a
+    human password it is not a low-entropy value requiring a slow KDF.
+    """
+    if membership.user_id is not None or membership.status != "joined":
+        raise AuthRequired("Guest credentials require a joined Guest membership")
+
+    # This is also the race-safe rotation primitive for a future authenticated
+    # reissue flow. Anonymous callers have no endpoint that can name a prior
+    # membership, so joins never exchange a membership id for a new token.
+    db.execute(
+        update(GuestSession)
+        .where(
+            GuestSession.membership_id == membership.id,
+            GuestSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=_now())
+    )
+    token = f"{GUEST_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+    session = GuestSession(
+        membership_id=membership.id,
+        trip_id=membership.trip_id,
+        token_hash=token_hash(token),
+        expires_at=_now() + GUEST_SESSION_TTL,
+    )
+    db.add(session)
+    db.flush()
+    return GuestSessionResult(session=session, token=token)
 
 
 def register(db: Session, *, name: str, email: str, password: str) -> LoginResult:
@@ -187,8 +235,56 @@ def revoke_token(db: Session, token: str) -> None:
         db.flush()
 
 
+def membership_for_guest_token(db: Session, token: str | None) -> TripMembership:
+    """Resolve a Guest bearer without accepting a membership identifier."""
+    if not is_guest_token(token):
+        raise AuthRequired("Invalid Guest credential")
+    session = db.scalar(
+        select(GuestSession).where(GuestSession.token_hash == token_hash(token))
+    )
+    expires_at = session.expires_at if session is not None else None
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if session is None or session.revoked_at is not None or expires_at <= _now():
+        raise AuthRequired("Invalid or expired Guest credential")
+
+    membership = db.get(TripMembership, session.membership_id)
+    if (
+        membership is None
+        or membership.trip_id != session.trip_id
+        or membership.user_id is not None
+        or membership.status != "joined"
+    ):
+        raise AuthRequired("Guest membership is no longer active")
+    return membership
+
+
+def revoke_guest_token(db: Session, token: str) -> None:
+    session = db.scalar(
+        select(GuestSession).where(GuestSession.token_hash == token_hash(token))
+    )
+    if session is not None:
+        session.revoked_at = _now()
+        db.flush()
+
+
+def revoke_guest_sessions_for_membership(db: Session, membership_id: str) -> None:
+    db.execute(
+        update(GuestSession)
+        .where(
+            GuestSession.membership_id == membership_id,
+            GuestSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=_now())
+    )
+    db.flush()
+
+
 def membership_for_trip(db: Session, user: User, trip_id: str | None) -> TripMembership:
-    query = select(TripMembership).where(TripMembership.user_id == user.id)
+    query = select(TripMembership).where(
+        TripMembership.user_id == user.id,
+        TripMembership.status != "removed",
+    )
     if trip_id:
         query = query.where(TripMembership.trip_id == trip_id)
     membership = db.scalar(query.order_by(TripMembership.created_at))

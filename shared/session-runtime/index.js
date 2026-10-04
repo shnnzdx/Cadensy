@@ -5,7 +5,7 @@
  * - private persistence key policy
  * - technical session restore/adopt/clear/invalidate
  * - active technical trip context
- * - membership compatibility semantics
+ * - bounded Guest bearer credential persistence
  * - token-scoped invite adoption cache mechanics
  * - request identity derivation
  * - logout lifecycle sequencing
@@ -20,6 +20,7 @@
  */
 
 const AUTH_TOKEN_KEY = "tripsync:authToken";
+const GUEST_TOKEN_KEY = "tripsync:guestToken";
 const MEMBERSHIP_ID_KEY = "tripsync:membershipId";
 const TRIP_ID_KEY = "tripsync:tripId";
 const INVITE_KEY_PREFIX = "tripsync:invite:";
@@ -90,7 +91,7 @@ class SessionRuntimeContractError extends Error {
 
 /**
  * @typedef {{ kind: "none" }} NoTechnicalSessionFacts
- * @typedef {{ kind: "guest", activeTripId: string, membershipId: string }} GuestTechnicalSessionFacts
+ * @typedef {{ kind: "guest", guestAuth: true, activeTripId: string, membershipId: string }} GuestTechnicalSessionFacts
  * @typedef {{ kind: "account", accountAuth: true, activeTripId: string | null, membershipId: string | null }} AccountTechnicalSessionFacts
  * @typedef {NoTechnicalSessionFacts | GuestTechnicalSessionFacts | AccountTechnicalSessionFacts} TechnicalSessionFacts
  *
@@ -107,13 +108,19 @@ class SessionRuntimeContractError extends Error {
  * }} AccountAuthAdoptionInput
  *
  * @typedef {{
+ *   token: string,
  *   activeTripId: string,
  *   membershipId: string,
  *   inviteToken?: string | null,
- *   forceGuest?: boolean,
+ * }} GuestAuthAdoptionInput
+ *
+ * @typedef {{
+ *   activeTripId: string,
+ *   membershipId: string,
+ *   inviteToken?: string | null,
  * }} TechnicalTripContextAdoptionInput
  *
- * @typedef {"account" | "trip" | "membership-compat"} RequestScope
+ * @typedef {"account" | "trip"} RequestScope
  * @typedef {"missing-account-auth" | "missing-active-trip-context" | "missing-membership-identity"} MissingContextCode
  * @typedef {"account-credentials-invalid" | "membership-credentials-invalid"} InvalidationCause
  * @typedef {{
@@ -127,16 +134,16 @@ class SessionRuntimeContractError extends Error {
 /**
  * @param {{
  *   storage?: SessionRuntimeStorage | null,
- *   emitCompatibilityMembershipHeader?: boolean,
  * }} [options]
  */
 export function createSessionRuntime(options = {}) {
-  const emitCompatibilityMembershipHeader = options.emitCompatibilityMembershipHeader === true;
   let privateAccountToken = null;
+  let privateGuestToken = null;
 
   return {
     restoreTechnicalSession,
     adoptAccountAuth,
+    adoptGuestAuth,
     adoptTechnicalTripContext,
     requestIdentityFor,
     readInviteAdoption,
@@ -152,6 +159,7 @@ export function createSessionRuntime(options = {}) {
     const storage = resolveStorageCapability(options.storage, warnings);
     if (!storage) {
       privateAccountToken = null;
+      privateGuestToken = null;
       return {
         facts: { kind: "none" },
         restorationHint: null,
@@ -160,18 +168,27 @@ export function createSessionRuntime(options = {}) {
     }
 
     const authToken = readString(storage, AUTH_TOKEN_KEY, warnings);
+    const guestToken = readString(storage, GUEST_TOKEN_KEY, warnings);
     const membershipId = readString(storage, MEMBERSHIP_ID_KEY, warnings);
     const tripId = readString(storage, TRIP_ID_KEY, warnings);
 
     privateAccountToken = authToken;
+    privateGuestToken = guestToken;
+    const facts = buildFactsFromMaterial({
+      authToken,
+      guestToken,
+      membershipId,
+      tripId,
+    });
+    // Legacy Membership IDs are object identifiers, not Guest credentials.
+    // Clear them rather than offering any restore or credential-exchange path.
+    if (facts.kind === "none" && membershipId && tripId) {
+      clearTripContextMaterial(warnings);
+    }
 
     return {
-      facts: buildFactsFromMaterial({
-        authToken,
-        membershipId,
-        tripId,
-      }),
-      restorationHint: tripId ? { tripId } : null,
+      facts,
+      restorationHint: facts.kind === "none" ? null : tripId ? { tripId } : null,
       warnings,
     };
   }
@@ -198,6 +215,7 @@ export function createSessionRuntime(options = {}) {
     );
 
     privateAccountToken = token;
+    privateGuestToken = null;
     const facts = {
       kind: "account",
       accountAuth: true,
@@ -206,6 +224,48 @@ export function createSessionRuntime(options = {}) {
     };
     const warnings = [];
     persistAccountSession(token, activeTripId || null, membershipId || null, warnings);
+    return { facts, warnings };
+  }
+
+  /**
+   * @param {GuestAuthAdoptionInput} input
+   * @returns {{ facts: TechnicalSessionFacts, warnings: string[] }}
+   */
+  function adoptGuestAuth(input) {
+    const token = requireNonEmptyString(
+      input?.token,
+      INVALID_ADOPTION_INPUT,
+      "Guest auth adoption requires a non-empty token.",
+    );
+    const activeTripId = requireNonEmptyString(
+      input?.activeTripId,
+      INVALID_ADOPTION_INPUT,
+      "Guest auth adoption requires a non-empty activeTripId.",
+    );
+    const membershipId = requireNonEmptyString(
+      input?.membershipId,
+      INVALID_ADOPTION_INPUT,
+      "Guest auth adoption requires a non-empty membershipId.",
+    );
+    const inviteToken = optionalNonEmptyString(
+      input?.inviteToken,
+      INVALID_INVITE_TOKEN,
+      "inviteToken must be a non-empty string when provided.",
+    );
+
+    privateAccountToken = null;
+    privateGuestToken = token;
+    const facts = {
+      kind: "guest",
+      guestAuth: true,
+      activeTripId,
+      membershipId,
+    };
+    const warnings = [];
+    persistGuestSession(token, activeTripId, membershipId, warnings);
+    if (inviteToken) {
+      writeInviteCache(inviteToken, { activeTripId, membershipId }, warnings);
+    }
     return { facts, warnings };
   }
 
@@ -229,30 +289,24 @@ export function createSessionRuntime(options = {}) {
       INVALID_INVITE_TOKEN,
       "inviteToken must be a non-empty string when provided.",
     );
-    const forceGuest = input?.forceGuest === true;
-
     const warnings = [];
-    if (forceGuest) {
-      privateAccountToken = null;
-      clearAccountAuthMaterial(warnings);
+    if (!privateAccountToken) {
+      throw new SessionRuntimeContractError(
+        INVALID_ADOPTION_INPUT,
+        "Technical trip adoption requires an active account token.",
+      );
     }
     persistTripContext(activeTripId, membershipId, warnings);
     if (inviteToken) {
       writeInviteCache(inviteToken, { activeTripId, membershipId }, warnings);
     }
 
-    const facts = !forceGuest && privateAccountToken
-      ? {
-          kind: "account",
-          accountAuth: true,
-          activeTripId,
-          membershipId,
-        }
-      : {
-          kind: "guest",
-          activeTripId,
-          membershipId,
-        };
+    const facts = {
+      kind: "account",
+      accountAuth: true,
+      activeTripId,
+      membershipId,
+    };
 
     return { facts, warnings };
   }
@@ -263,7 +317,7 @@ export function createSessionRuntime(options = {}) {
    * @returns {{ ok: true, headers: Record<string, string> } | { ok: false, code: MissingContextCode }}
    */
   function requestIdentityFor(scope, facts) {
-    if (!["account", "trip", "membership-compat"].includes(scope)) {
+    if (!["account", "trip"].includes(scope)) {
       throw new SessionRuntimeContractError(
         INVALID_REQUEST_SCOPE,
         `Unsupported request scope: ${scope}`,
@@ -295,11 +349,14 @@ export function createSessionRuntime(options = {}) {
       }
 
       if (facts.kind === "guest") {
+        if (!privateGuestToken) {
+          return { ok: false, code: MISSING_MEMBERSHIP_IDENTITY };
+        }
         return {
           ok: true,
           headers: {
+            Authorization: `Bearer ${privateGuestToken}`,
             "X-Trip-Id": facts.activeTripId,
-            "X-Membership-Id": facts.membershipId,
           },
         };
       }
@@ -312,31 +369,8 @@ export function createSessionRuntime(options = {}) {
         Authorization: `Bearer ${privateAccountToken}`,
         "X-Trip-Id": facts.activeTripId,
       };
-      if (emitCompatibilityMembershipHeader && facts.membershipId) {
-        headers["X-Membership-Id"] = facts.membershipId;
-      }
       return { ok: true, headers };
     }
-
-    if (facts.kind === "guest") {
-      return {
-        ok: true,
-        headers: {
-          "X-Membership-Id": facts.membershipId,
-        },
-      };
-    }
-
-    if (facts.kind === "account" && facts.membershipId) {
-      return {
-        ok: true,
-        headers: {
-          "X-Membership-Id": facts.membershipId,
-        },
-      };
-    }
-
-    return { ok: false, code: MISSING_MEMBERSHIP_IDENTITY };
   }
 
   /**
@@ -410,6 +444,7 @@ export function createSessionRuntime(options = {}) {
     const warnings = [];
     if (cause === ACCOUNT_CREDENTIALS_INVALID) {
       privateAccountToken = null;
+      privateGuestToken = null;
       clearAccountSessionMaterial(warnings);
       return {
         facts: { kind: "none" },
@@ -417,7 +452,7 @@ export function createSessionRuntime(options = {}) {
       };
     }
 
-    clearTripContextMaterial(warnings);
+    clearGuestSessionMaterial(warnings);
 
     if (currentFacts?.kind === "account" && privateAccountToken) {
       return {
@@ -431,7 +466,6 @@ export function createSessionRuntime(options = {}) {
       };
     }
 
-    privateAccountToken = null;
     return {
       facts: { kind: "none" },
       warnings,
@@ -445,10 +479,11 @@ export function createSessionRuntime(options = {}) {
    */
   async function logoutTechnicalSession(currentFacts, options = {}) {
     const hadAccountAuth = currentFacts?.kind === "account" && privateAccountToken;
+    const hadGuestAuth = currentFacts?.kind === "guest" && privateGuestToken;
     let revokeAttempted = false;
     let revokeFailed = false;
 
-    if (hadAccountAuth && typeof options.revoke === "function") {
+    if ((hadAccountAuth || hadGuestAuth) && typeof options.revoke === "function") {
       revokeAttempted = true;
       try {
         await options.revoke();
@@ -458,6 +493,7 @@ export function createSessionRuntime(options = {}) {
     }
 
     privateAccountToken = null;
+    privateGuestToken = null;
     const warnings = [];
     clearAccountSessionMaterial(warnings);
 
@@ -480,6 +516,7 @@ export function createSessionRuntime(options = {}) {
     if (!storage) return;
 
     writeItem(storage, AUTH_TOKEN_KEY, token, warnings);
+    removeItem(storage, GUEST_TOKEN_KEY, warnings);
     if (membershipId) {
       writeItem(storage, MEMBERSHIP_ID_KEY, membershipId, warnings);
     } else {
@@ -491,6 +528,20 @@ export function createSessionRuntime(options = {}) {
     } else {
       removeItem(storage, TRIP_ID_KEY, warnings);
     }
+  }
+
+  /**
+   * @param {string} token
+   * @param {string} activeTripId
+   * @param {string} membershipId
+   * @param {string[]} warnings
+   */
+  function persistGuestSession(token, activeTripId, membershipId, warnings) {
+    const storage = resolveStorageCapability(options.storage, warnings);
+    if (!storage) return;
+    removeItem(storage, AUTH_TOKEN_KEY, warnings);
+    writeItem(storage, GUEST_TOKEN_KEY, token, warnings);
+    persistTripContext(activeTripId, membershipId, warnings);
   }
 
   /**
@@ -526,16 +577,19 @@ export function createSessionRuntime(options = {}) {
     const storage = resolveStorageCapability(options.storage, warnings);
     if (!storage) return;
     removeItem(storage, AUTH_TOKEN_KEY, warnings);
+    removeItem(storage, GUEST_TOKEN_KEY, warnings);
     clearTripContextMaterial(warnings);
   }
 
   /**
    * @param {string[]} warnings
    */
-  function clearAccountAuthMaterial(warnings) {
+  function clearGuestSessionMaterial(warnings) {
     const storage = resolveStorageCapability(options.storage, warnings);
     if (!storage) return;
-    removeItem(storage, AUTH_TOKEN_KEY, warnings);
+    privateGuestToken = null;
+    removeItem(storage, GUEST_TOKEN_KEY, warnings);
+    clearTripContextMaterial(warnings);
   }
 
   /**
@@ -552,6 +606,7 @@ export function createSessionRuntime(options = {}) {
 /**
  * @param {{
  *   authToken: string | null,
+ *   guestToken: string | null,
  *   membershipId: string | null,
  *   tripId: string | null,
  * }} material
@@ -567,9 +622,10 @@ function buildFactsFromMaterial(material) {
     };
   }
 
-  if (material.membershipId && material.tripId) {
+  if (material.guestToken && material.membershipId && material.tripId) {
     return {
       kind: "guest",
+      guestAuth: true,
       activeTripId: material.tripId,
       membershipId: material.membershipId,
     };

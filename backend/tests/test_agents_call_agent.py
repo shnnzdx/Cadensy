@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from app.agents import base, trace
+from app.agents.execution import (
+    AgentExecutionConfig,
+    AgentExecutionContext,
+    AgentProviderDeadlineExceeded,
+    AgentToolDeadlineExceeded,
+)
 
 
 PARAMS = {
@@ -260,6 +268,102 @@ def test_agent_route_defaults_to_deepseek(monkeypatch):
     monkeypatch.delenv("AGENT_AI_PROVIDER", raising=False)
 
     assert base._resolve_provider_name(base.AGENT_ROUTE) == base.DEEPSEEK_PROVIDER
+
+
+def test_call_agent_passes_only_the_remaining_provider_budget_to_the_provider(monkeypatch):
+    monkeypatch.setenv("MOCK_AI", "0")
+    seen_timeouts = []
+
+    def fake_provider(*, timeout_seconds, **_kwargs):
+        seen_timeouts.append(timeout_seconds)
+        return _reply("done")
+
+    monkeypatch.setattr(base, "_invoke_agent_provider", fake_provider)
+    deadline = AgentExecutionContext(
+        execution_id="deadline-test",
+        config=AgentExecutionConfig(
+            request_timeout_seconds=1.0,
+            provider_timeout_seconds=0.25,
+            tool_timeout_seconds=0.1,
+        ),
+    )
+
+    result = base.call_agent(
+        system="s",
+        user="u",
+        tools=(),
+        deadline=deadline,
+    )
+
+    assert result.content == "done"
+    assert seen_timeouts == [0.25]
+
+
+def test_tool_result_past_its_deadline_is_not_sent_to_another_provider_round(monkeypatch):
+    monkeypatch.setenv("MOCK_AI", "0")
+    provider_calls = []
+
+    def fake_provider(**_kwargs):
+        provider_calls.append("provider")
+        return _reply(calls=(_call("slow-call", "slow"),))
+
+    def slow_read_only_tool():
+        import time
+
+        time.sleep(0.02)
+        return "late tool result"
+
+    monkeypatch.setattr(base, "_invoke_agent_provider", fake_provider)
+    deadline = AgentExecutionContext(
+        execution_id="tool-deadline-test",
+        config=AgentExecutionConfig(
+            request_timeout_seconds=1.0,
+            provider_timeout_seconds=0.25,
+            tool_timeout_seconds=0.001,
+        ),
+    )
+
+    with pytest.raises(AgentToolDeadlineExceeded):
+        base.call_agent(
+            system="s",
+            user="u",
+            tools=(_tool("slow", slow_read_only_tool),),
+            deadline=deadline,
+        )
+
+    assert provider_calls == ["provider"]
+
+
+def test_provider_timeout_has_a_distinct_deadline_failure_category(monkeypatch):
+    monkeypatch.setenv("MOCK_AI", "0")
+    monkeypatch.setattr(
+        base,
+        "provider_catalog",
+        lambda: {
+            base.DEEPSEEK_PROVIDER: base.ProviderConfig(
+                name=base.DEEPSEEK_PROVIDER,
+                api_key="fake-key",
+                base_url="https://fake.test",
+                model="fake",
+            )
+        },
+    )
+
+    def timed_out_provider(**_kwargs):
+        raise TimeoutError("fake provider timed out")
+
+    monkeypatch.setattr(base, "_invoke_agent_provider", timed_out_provider)
+    deadline = AgentExecutionContext(
+        execution_id="provider-deadline-test",
+        config=AgentExecutionConfig(
+            request_timeout_seconds=1.0,
+            provider_timeout_seconds=0.01,
+            tool_timeout_seconds=0.1,
+        ),
+    )
+
+    with pytest.raises(AgentProviderDeadlineExceeded):
+        base.call_agent(system="s", user="u", tools=(), deadline=deadline)
 
 
 def test_a_finished_answer_is_returned_even_when_it_went_over_budget():

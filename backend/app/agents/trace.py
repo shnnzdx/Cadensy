@@ -180,6 +180,43 @@ def record_agent_round(
     return event
 
 
+def record_agent_lifecycle(
+    *,
+    phase: str,
+    execution_id: str,
+    elapsed_ms: float,
+    result_consumed: bool,
+    worker_cancel_requested: bool,
+) -> None:
+    """Record deadline lifecycle metadata without prompts, tool data, or output.
+
+    A late completion proves only that a local worker reached a terminal state
+    after the HTTP/request response had already been abandoned. The result is
+    intentionally not serialized or inspected here.
+    """
+    timestamp = datetime.now(timezone.utc)
+    event = {
+        "timestamp": timestamp.isoformat(),
+        "phase": phase,
+        "execution_id": execution_id,
+        "elapsed_ms": round(elapsed_ms, 2),
+        "result_consumed": result_consumed,
+        "worker_cancel_requested": worker_cancel_requested,
+    }
+    print(
+        "[agent-lifecycle] "
+        f"phase={phase} execution_id={execution_id} elapsed_ms={event['elapsed_ms']} "
+        f"result_consumed={result_consumed} worker_cancel_requested={worker_cancel_requested}"
+    )
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOG_DIR / f"agent-lifecycle-{timestamp:%Y%m%d}.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        print(f"[agent-lifecycle] log_write_failed execution_id={execution_id} reason={exc!r}")
+
+
 def _agent_round_guard_info(tool_result: Any) -> dict[str, Any]:
     calls = tool_result.get("calls", []) if isinstance(tool_result, dict) else []
     reasons = []

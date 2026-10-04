@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from ..domain.auth import hash_password, normalize_email
-from .models import AuthSession, Base, TripMembership, User
-from .session import SessionLocal, engine
+from .init_schema import init_schema
+from .models import TripMembership, User
+from .session import SessionLocal
 
 ORGANIZER_EMAIL = normalize_email(
     os.getenv("SEED_ORGANIZER_EMAIL", "organizer@cadensy.local")
@@ -25,24 +26,10 @@ DEMO_DESTINATION = os.getenv("SEED_DEMO_DESTINATION", "Chicago")
 
 
 def ensure_cloud_schema() -> None:
-    Base.metadata.create_all(engine)
-    AuthSession.__table__.create(engine, checkfirst=True)
-    with engine.begin() as connection:
-        connection.execute(
-            text("ALTER TABLE user_account ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)")
-        )
-        connection.execute(
-            text(
-                "ALTER TABLE change_proposal "
-                "ADD COLUMN IF NOT EXISTS extended_at TIMESTAMPTZ"
-            )
-        )
-        connection.execute(
-            text(
-                "ALTER TABLE plan ADD COLUMN IF NOT EXISTS "
-                "needs_refresh BOOLEAN NOT NULL DEFAULT FALSE"
-            )
-        )
+    # The helper no longer applies ad-hoc DDL. Existing legacy
+    # ``change_proposal.extended_at`` columns remain untouched; they must be
+    # reconciled by a reviewed migration rather than silently dropped here.
+    init_schema()
 
 
 def upsert_demo_login() -> dict:

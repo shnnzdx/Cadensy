@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -11,12 +10,16 @@ from sqlalchemy.orm import Session
 
 from ...agents import base
 from ...agents import chat as chat_agent
+from ...agents.execution import AgentExecutionConfig, run_agent_with_deadline
 from ...agents.tools import build_read_only_trip_tools
+from ...db.session import SessionLocal
 from ...db.models import Plan, PlanItem, Trip, TripMembership
 from ..constraints.types import Classification
 from ..decisions import orchestrator as orch
 
 CHAT_AGENT_TIMEOUT_SECONDS = 30.0
+CHAT_AGENT_PROVIDER_TIMEOUT_SECONDS = 20.0
+CHAT_AGENT_TOOL_TIMEOUT_SECONDS = 5.0
 CHAT_AGENT_MAX_ROUNDS = 8
 # Counted across rounds, and every round re-sends the whole conversation, so this
 # grows quadratically with trip size. A four-round exchange on a one-week trip
@@ -145,9 +148,8 @@ def _respond_with_agent_branch(
 
     try:
         result = _run_chat_agent_with_timeout(
-            db=db,
             trip_id=trip_id,
-            membership=membership,
+            actor_membership_id=membership.id,
             message=_agent_user_message(
                 message,
                 target,
@@ -926,36 +928,50 @@ def _contains_chinese(value: str) -> bool:
 
 def _run_chat_agent_with_timeout(
     *,
-    db: Session,
     trip_id: str,
-    membership: TripMembership,
+    actor_membership_id: str,
     message: str,
     history: tuple[chat_agent.HistoryTurn, ...] = (),
 ) -> base.AgentRunResult:
-    tools = build_read_only_trip_tools(
-        db,
-        trip_id=trip_id,
-        actor_membership_id=membership.id,
-    )
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(
-        base.call_agent,
-        system=_agent_system_prompt(),
-        user=message,
-        tools=tools,
-        history=tuple(
-            {"role": turn.role, "content": turn.text} for turn in history
+    """Run Agent work with a worker-owned, short-lived read Session.
+
+    The request Session is used only for the deterministic preflight in
+    ``respond_to_trip_chat``. It is never captured by this worker. A timeout
+    signals local cancellation but cannot force-stop an already running
+    synchronous provider call; in that case the worker retains exclusive
+    ownership of its Session until it returns and the result is discarded.
+    """
+
+    def worker(deadline):
+        with SessionLocal() as worker_db:
+            def tool_factory() -> tuple[base.AgentTool, ...]:
+                deadline.ensure_request_active()
+                return build_read_only_trip_tools(
+                    worker_db,
+                    trip_id=trip_id,
+                    actor_membership_id=actor_membership_id,
+                )
+
+            return base.call_agent(
+                system=_agent_system_prompt(),
+                user=message,
+                tool_factory=tool_factory,
+                history=tuple(
+                    {"role": turn.role, "content": turn.text} for turn in history
+                ),
+                max_rounds=CHAT_AGENT_MAX_ROUNDS,
+                max_total_tokens=CHAT_AGENT_MAX_TOTAL_TOKENS,
+                deadline=deadline,
+            )
+
+    return run_agent_with_deadline(
+        worker=worker,
+        config=AgentExecutionConfig(
+            request_timeout_seconds=CHAT_AGENT_TIMEOUT_SECONDS,
+            provider_timeout_seconds=CHAT_AGENT_PROVIDER_TIMEOUT_SECONDS,
+            tool_timeout_seconds=CHAT_AGENT_TOOL_TIMEOUT_SECONDS,
         ),
-        max_rounds=CHAT_AGENT_MAX_ROUNDS,
-        max_total_tokens=CHAT_AGENT_MAX_TOTAL_TOKENS,
     )
-    try:
-        return future.result(timeout=CHAT_AGENT_TIMEOUT_SECONDS)
-    except TimeoutError as exc:
-        future.cancel()
-        raise TimeoutError("chat agent timed out") from exc
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _agent_system_prompt() -> str:

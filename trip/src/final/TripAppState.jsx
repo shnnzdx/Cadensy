@@ -9,9 +9,6 @@ const TripAppContext = createContext(null)
 export const useTripApp = () => useContext(TripAppContext)
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
-const TRIP_ID = import.meta.env.VITE_TRIP_ID
-const MEMBERSHIP_ID = import.meta.env.VITE_MEMBERSHIP_ID
-const DEV_ALLOW_MEMBERSHIP_HEADER = import.meta.env.VITE_DEV_ALLOW_MEMBERSHIP_HEADER === '1'
 const loginUrl = () => `${window.location.origin}/login?next=/trip`
 
 const emptyPreferences = {
@@ -297,14 +294,9 @@ const missingContextError = (message, code) => {
 }
 
 export function TripAppProvider({ children }) {
-  const [sessionRuntime] = useState(() => createSessionRuntime({
-    emitCompatibilityMembershipHeader: DEV_ALLOW_MEMBERSHIP_HEADER,
-  }))
+  const [sessionRuntime] = useState(() => createSessionRuntime())
   const [bootstrapSession] = useState(() => restoreTripAppBootstrapState({
     sessionRuntime,
-    devAllowMembershipHeader: DEV_ALLOW_MEMBERSHIP_HEADER,
-    defaultMembershipId: MEMBERSHIP_ID || '',
-    defaultTripId: TRIP_ID || '',
   }))
   const [hasAccountSession, setHasAccountSession] = useState(() => bootstrapSession.hasAccountSession)
   const [membershipId, setMembershipId] = useState(() => bootstrapSession.membershipId)
@@ -648,14 +640,22 @@ export function TripAppProvider({ children }) {
     }
   }, [sessionRuntime])
 
-  const adoptTechnicalTripContext = useCallback(({ membershipId: nextMembershipId, tripId: nextTripId, inviteToken, profile }) => {
+  const adoptTechnicalTripContext = useCallback(({ membershipId: nextMembershipId, tripId: nextTripId, guestToken, inviteToken, profile }) => {
     const forceGuest = Boolean(profile?.isGuest)
-    sessionRuntime.adoptTechnicalTripContext({
-      membershipId: nextMembershipId,
-      activeTripId: nextTripId,
-      ...(inviteToken ? { inviteToken } : {}),
-      ...(forceGuest ? { forceGuest: true } : {}),
-    })
+    if (forceGuest) {
+      sessionRuntime.adoptGuestAuth({
+        token: guestToken,
+        membershipId: nextMembershipId,
+        activeTripId: nextTripId,
+        ...(inviteToken ? { inviteToken } : {}),
+      })
+    } else {
+      sessionRuntime.adoptTechnicalTripContext({
+        membershipId: nextMembershipId,
+        activeTripId: nextTripId,
+        ...(inviteToken ? { inviteToken } : {}),
+      })
+    }
     if (forceGuest) {
       setHasAccountSession(false)
       setTripSummaries([])
@@ -681,7 +681,7 @@ export function TripAppProvider({ children }) {
     const result = await sessionRuntime.logoutTechnicalSession(technicalSessionFacts, {
       revoke: async () => publicRequestJson('/api/auth/logout', {
         method: 'POST',
-        headers: identityHeadersFor('account'),
+        headers: identityHeadersFor(technicalSessionFacts.kind === 'guest' ? 'trip' : 'account'),
       }),
     })
     setHasAccountSession(false)

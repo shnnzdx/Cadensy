@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 from app.api import main as api
 from app.agents import base
 from app.agents import chat as chat_agent
+from app.db.models import TripMembership, User
 from app.domain.chat import service as chat_service
 from app.domain.constraints.types import Classification, Path
+from app.domain import auth
 
 
 @contextmanager
@@ -24,8 +26,23 @@ def _client(db: Session):
         api.app.dependency_overrides.clear()
 
 
-def _headers(membership_id: str) -> dict:
-    return {"X-Membership-Id": membership_id}
+def _account_headers(
+    client: TestClient, db: Session, membership: TripMembership, trip_id: str
+) -> dict[str, str]:
+    user = db.get(User, membership.user_id)
+    assert user is not None
+    user.email = f"chat-safety-{membership.id}@example.test"
+    user.password_hash = auth.hash_password("correct-horse")
+    db.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": user.email, "password": "correct-horse"},
+    )
+    assert login.status_code == 200
+    return {
+        "Authorization": f"Bearer {login.json()['token']}",
+        "X-Trip-Id": trip_id,
+    }
 
 
 @pytest.mark.parametrize(
@@ -125,7 +142,7 @@ def test_chat_api_serializes_candidate_options_without_changing_proposed_change(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={"message": "周三排得太满了，能不能松一点"},
         )
 

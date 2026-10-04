@@ -1,48 +1,39 @@
-name: Build Validation
+name: CI Regression Gates
 
 on:
+  pull_request:
+  push:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-regression-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13.5"
+  NODE_VERSION: "22.13.0"
+
 jobs:
-  frontend-trip-build:
-    name: Frontend and Trip Build
+  backend-legacy-full-regression:
+    name: Backend — Legacy Full Regression
     runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            frontend/package-lock.json
-            trip/package-lock.json
-
-      - name: Install Trip dependencies
-        working-directory: trip
-        run: npm ci
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build and sync Trip preview
-        working-directory: frontend
-        run: npm run build:trip-preview
-
-      - name: Run frontend validation
-        working-directory: frontend
-        run: npm test
-
-  backend-tests:
-    name: Backend Tests
-    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The runtime-looking URL is deliberately different from the disposable
+      # database. pytest replaces DATABASE_URL with TEST_DATABASE_URL internally.
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/cadensy_ci_legacy_runtime
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/cadensy_ci_legacy_test
+      DISABLE_SCHEDULER: "1"
+      MOCK_AI: "1"
+      GEOAPIFY_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
+      DEV_ALLOW_MEMBERSHIP_HEADER: "0"
+      CADENSY_EVAL_DEPENDENCY_LOCK: requirements-legacy-regression.lock.txt
+      LEGACY_JUNIT_XML: test-results/legacy-junit.xml
+      EVALUATION_OUTPUT: evals/reports/ci/legacy-${{ github.run_id }}-${{ github.run_attempt }}
 
     services:
       postgres:
@@ -50,11 +41,11 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: tripsync_test
+          POSTGRES_DB: cadensy_ci_legacy_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d tripsync_test"
+          --health-cmd "pg_isready -U postgres -d cadensy_ci_legacy_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -66,66 +57,261 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: backend/requirements-legacy-regression.lock.txt
 
-      - name: Install backend dependencies
+      - name: Install frozen Legacy regression dependencies
         working-directory: backend
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install --requirement requirements-legacy-regression.lock.txt
+          python -m pip check
 
-      - name: Run backend tests
+      - name: Verify disposable database boundary
         working-directory: backend
-        env:
-          DISABLE_SCHEDULER: "1"
-          MOCK_AI: "1"
-          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/tripsync_test
-          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/tripsync_test
-        run: python -m pytest -q
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy.engine import make_url
 
-  backend-container-health:
-    name: Backend Container Health
+          test_url = make_url(os.environ["TEST_DATABASE_URL"])
+          runtime_url = make_url(os.environ["DATABASE_URL"])
+          assert test_url.get_backend_name() == "postgresql"
+          assert test_url.host in {"localhost", "127.0.0.1", "::1"}
+          assert test_url.database == "cadensy_ci_legacy_test"
+          assert runtime_url.database != test_url.database
+          assert os.environ["MOCK_AI"] == "1"
+          assert os.environ["DEEPSEEK_API_KEY"] == ""
+          assert os.environ["GEOAPIFY_API_KEY"] == ""
+          assert os.environ["DEV_ALLOW_MEMBERSHIP_HEADER"] == "0"
+          PY
+
+      - name: Run Legacy full regression
+        # The isolated Pydantic PoC belongs exclusively to its own job.  This
+        # job must have no collected skips; the next step enforces that JUnit
+        # contract rather than treating a missing dependency as a pass.
+        working-directory: backend
+        run: |
+          mkdir -p "$(dirname "$LEGACY_JUNIT_XML")"
+          python -m pytest -q --ignore=tests/test_pydantic_ai_poc.py --junitxml="$LEGACY_JUNIT_XML"
+
+      - name: Validate Legacy JUnit skip contract
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          junit_path = Path(os.environ["LEGACY_JUNIT_XML"])
+          assert junit_path.is_file(), f"Missing JUnit report: {junit_path}"
+          root = ET.parse(junit_path).getroot()
+          assert root.findall(".//testcase"), "JUnit report contains no collected tests"
+          skipped = root.findall(".//skipped")
+          assert not skipped, f"Legacy job has unapproved skipped tests: {len(skipped)}"
+          PY
+
+      - name: Generate frozen Golden Dataset report
+        working-directory: backend
+        run: python -m evals.runner --output "$EVALUATION_OUTPUT"
+
+      - name: Validate evaluation report is traceable and privacy-safe
+        id: validate_evaluation_artifact
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          output = Path(os.environ["EVALUATION_OUTPUT"])
+          manifest_path = output / "manifest.json"
+          summary_path = output / "summary.json"
+          cases_path = output / "cases.jsonl"
+          for path in (manifest_path, summary_path, cases_path):
+              assert path.is_file(), f"Missing evaluation artifact: {path}"
+
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          summary = json.loads(summary_path.read_text(encoding="utf-8"))
+          approved_dataset_hash = "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f"
+          computed_dataset_hash = hashlib.sha256(
+              Path("evals/datasets/chat_change_preview_v1.json").read_bytes()
+          ).hexdigest()
+          assert computed_dataset_hash == approved_dataset_hash
+          assert computed_dataset_hash == manifest["dataset_hash"]
+          assert manifest["dataset_hash"] == approved_dataset_hash
+          assert manifest["dataset_version"] == "chat-change-preview-v1"
+          required_manifest_keys = {
+              "dataset_hash",
+              "runtime",
+              "dependency_configuration",
+              "grader_version",
+              "git_commit",
+          }
+          assert required_manifest_keys <= manifest.keys()
+          assert manifest["dependency_configuration"] == {
+              "lockfile": "requirements-legacy-regression.lock.txt",
+              "lockfile_sha256": hashlib.sha256(
+                  Path("requirements-legacy-regression.lock.txt").read_bytes()
+              ).hexdigest(),
+              "python_version": sys.version.split()[0],
+          }
+          assert manifest["database_isolation"] == {
+              "source": "TEST_DATABASE_URL",
+              "backend": "postgresql",
+              "host": "localhost",
+              "database": "cadensy_ci_legacy_test",
+              "runtime_database_url_used": False,
+          }
+          assert manifest["fixture_visibility"] == {
+              "worker_session_is_independent": True,
+              "tool_invocations": [
+                  "get_current_plan",
+                  "get_trip_facts",
+                  "classify_change",
+              ],
+              "destination": "Synthetic City",
+              "member_count": 2,
+              "plan_item_titles": ["Art Institute of Chicago", "Birthday dinner"],
+              "classification_path": "notice",
+          }
+          assert manifest["runtime"]["provider_mode"] == "fake"
+          assert summary == {
+              "total_cases": 8,
+              "passed_cases": 8,
+              "failed_cases": 0,
+              "safety_violations": 0,
+          }
+          artifact_text = "\n".join(
+              path.read_text(encoding="utf-8")
+              for path in (manifest_path, summary_path, cases_path)
+          ).casefold()
+          for forbidden in (
+              "sensitive fixture phrase",
+              "original_text",
+              "deepseek_api_key",
+              "authorization: bearer",
+          ):
+              assert forbidden not in artifact_text, f"Sensitive artifact marker: {forbidden}"
+          PY
+
+      - name: Upload Legacy evaluation artifacts
+        if: ${{ steps.validate_evaluation_artifact.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: backend/${{ env.EVALUATION_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  pydantic-ai-isolated-fake-compatibility:
+    name: Pydantic AI — Isolated Fake Compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/cadensy_ci_pydantic_runtime
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/cadensy_ci_pydantic_test
+      DISABLE_SCHEDULER: "1"
+      MOCK_AI: "1"
+      GEOAPIFY_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
+      DEV_ALLOW_MEMBERSHIP_HEADER: "0"
+      CADENSY_EVAL_DEPENDENCY_LOCK: requirements-pydantic-ai-poc.lock.txt
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cadensy_ci_pydantic_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cadensy_ci_pydantic_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build backend image
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-pydantic-ai-poc.lock.txt
+
+      - name: Install isolated Pydantic AI PoC dependencies
         working-directory: backend
-        run: docker build -t tripsync-backend:ci .
-
-      - name: Run backend container
         run: |
-          docker rm -f tripsync-backend-ci >/dev/null 2>&1 || true
-          docker run -d \
-            --name tripsync-backend-ci \
-            -p 8000:8000 \
-            -e DISABLE_SCHEDULER=1 \
-            -e MOCK_AI=1 \
-            -e DATABASE_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/tripsync_ci \
-            tripsync-backend:ci
+          python -m pip install --requirement requirements-pydantic-ai-poc.lock.txt
+          python -m pip check
+          python -c "import pydantic_ai; print('pydantic_ai_available')"
 
-          docker ps -a --filter name=tripsync-backend-ci
-
-      - name: Verify backend health endpoint
+      - name: Verify disposable database boundary
+        working-directory: backend
         run: |
-          for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:8000/api/health; then
-              echo
-              echo "Backend container health check passed."
-              exit 0
-            fi
+          python - <<'PY'
+          import os
+          from sqlalchemy.engine import make_url
 
-            echo "Waiting for backend container health check, attempt ${attempt}/30..."
-            docker ps -a --filter name=tripsync-backend-ci
-            sleep 2
-          done
+          test_url = make_url(os.environ["TEST_DATABASE_URL"])
+          runtime_url = make_url(os.environ["DATABASE_URL"])
+          assert test_url.get_backend_name() == "postgresql"
+          assert test_url.host in {"localhost", "127.0.0.1", "::1"}
+          assert test_url.database == "cadensy_ci_pydantic_test"
+          assert runtime_url.database != test_url.database
+          assert os.environ["MOCK_AI"] == "1"
+          assert os.environ["DEEPSEEK_API_KEY"] == ""
+          assert os.environ["GEOAPIFY_API_KEY"] == ""
+          assert os.environ["DEV_ALLOW_MEMBERSHIP_HEADER"] == "0"
+          PY
 
-          echo "::error::Backend container did not become healthy."
-          docker logs tripsync-backend-ci
-          exit 1
+      - name: Run isolated Fake compatibility contracts
+        working-directory: backend
+        run: python -m pytest -q tests/test_pydantic_ai_poc.py tests/test_evaluation_foundation.py
 
-      - name: Stop backend container
-        if: always()
-        run: docker stop tripsync-backend-ci || true
+  frontend-regression:
+    name: Frontend — Regression and Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            trip/package-lock.json
+
+      - name: Install Trip workspace dependencies
+        working-directory: trip
+        run: npm ci
+
+      - name: Build Trip workspace
+        working-directory: trip
+        run: npm run build
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build and sync the embedded Trip preview
+        working-directory: frontend
+        run: npm run build:trip-preview
+
+      - name: Run frontend regression and production build
+        # frontend's existing npm test script runs its production build before
+        # the Node regression tests; this keeps that package contract intact.
+        working-directory: frontend
+        run: npm test

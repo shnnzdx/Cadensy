@@ -150,7 +150,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 MOCK_AI=1
 SETTLE_TICK_SECONDS=60
 DISABLE_SCHEDULER=0
-DEV_ALLOW_MEMBERSHIP_HEADER=1
+DEV_ALLOW_MEMBERSHIP_HEADER=0
 FRONTEND_BASE_URL=http://localhost:5173
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000
 ```
@@ -173,8 +173,9 @@ Notes:
   the current shell before treating `aws sts get-caller-identity` `NoCredentials`
   as a real missing-credential problem
 
-`DEV_ALLOW_MEMBERSHIP_HEADER=1` keeps the local `X-Membership-Id` demo flow available
-while login is still evolving.
+`DEV_ALLOW_MEMBERSHIP_HEADER` is retired. Leave it at `0`: raw
+`X-Membership-Id` values are never authentication credentials, and a truthy
+value causes production startup to fail closed.
 
 ## 5. Install Dependencies
 
@@ -440,12 +441,17 @@ share the same DeepSeek provider path.
 
 1. Put the real key in `backend/.env` as `GEOAPIFY_API_KEY=...`.
 2. Start PostgreSQL and confirm `DATABASE_URL` targets the intended development database.
-3. Create/upgrade the additive schema:
+3. Create/upgrade the versioned schema:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m app.db.init_schema
+.\.venv\Scripts\python.exe -m alembic -c alembic.ini upgrade head
 ```
+
+For an existing pre-Alembic database, do not replace this with a blind
+`init_schema` run or a blind `stamp`. Follow the reviewed compatibility and
+stamping runbook in
+`AI_enhanced/phase-0-audit-2026-10-03/11_PR05A_ALEMBIC_BASELINE.md`.
 
 4. Start the backend, frontend, and Trip workspace using the commands above.
 5. Create a trip whose destination is `Tokyo, Japan`, submit organizer preferences,

@@ -809,7 +809,7 @@ function TradeoffThread() {
       const labels = {
         keep: 'Current plan kept',
         split: 'Block split',
-        remove: 'Activity removed',
+        clear: 'Activity removed',
       }
       app.notify(labels[action] || 'Block resolved')
       navigate(tripHref(currentTrip.id, 'updates'))
@@ -827,8 +827,8 @@ function TradeoffThread() {
       {canRespond && <div className="message ai"><span>✦</span><div><p>Choose one response. Your private reason is not shown to the group.</p><div className="messageActions conflictDecisionActions"><Button secondary disabled={app.loading.action} onClick={() => app.resolveProposal(proposal.id, 'accepted')}>Accept</Button><Button ghost disabled={app.loading.action} onClick={async () => { await app.resolveProposal(proposal.id, 'declined'); app.notify('Current plan kept') }}>Decline change</Button></div></div></div>}
       {alreadyAccepted && <div className="message ai"><span>✦</span><div><p>Your response is accepted. The Current Plan will update after the remaining affected members accept.</p></div></div>}
       {pending && !proposal.canDecide && <div className="message ai"><span>✦</span><div><p>This confirmation is waiting on another affected member. You can review it, but you cannot accept on their behalf.</p></div></div>}
-      {escalated && isOrganizer && <div className="message ai"><span>✦</span><div><p>The affected members could not agree. Resolve this without accepting the blocked proposal for anyone else.</p><div className="messageActions conflictDecisionActions"><Button secondary disabled={app.loading.action} onClick={() => resolveDeadlock('keep')}>Keep current</Button><Button ghost disabled={app.loading.action} onClick={() => resolveDeadlock('split')}>Split group</Button><Button ghost disabled={app.loading.action} onClick={() => resolveDeadlock('remove')}>Remove activity</Button></div></div></div>}
-      {escalated && !isOrganizer && <div className="message ai"><span>✦</span><div><p>Waiting for the organizer to choose keep current, split group, or remove this activity.</p></div></div>}
+      {escalated && isOrganizer && <div className="message ai"><span>✦</span><div><p>The affected members could not agree. Resolve this without accepting the blocked proposal for anyone else.</p><div className="messageActions conflictDecisionActions"><Button secondary disabled={app.loading.action} onClick={() => resolveDeadlock('keep')}>Keep current</Button><Button ghost disabled={app.loading.action} onClick={() => resolveDeadlock('split')}>Split group</Button><Button ghost disabled={app.loading.action} onClick={() => resolveDeadlock('clear')}>Clear activity</Button></div></div></div>}
+      {escalated && !isOrganizer && <div className="message ai"><span>✦</span><div><p>Waiting for the organizer to choose keep current, split group, or clear this activity.</p></div></div>}
       {applied && <div className="message ai resolvedMessage"><span>✓</span><div><p>Every affected member confirmed. The Current Plan is updated and the booking is unchanged.</p><Link className="inlineAction" to={planTarget}>Back to updated plan →</Link></div></div>}
       {unchanged && <div className="message ai resolvedMessage"><span>↩</span><div><p>The proposal is closed. The Current Plan did not change.</p><Link className="inlineAction" to={planTarget}>Back to Current Plan →</Link></div></div>}
     </div>
@@ -856,7 +856,7 @@ function UpdatesPage() {
         {!hasActions && <div className="emptyState quietEmptyState"><span></span><h2>You're all caught up.</h2><p>No decisions need your attention right now.</p><small>New votes, confirmations, or conflicts will appear here.</small></div>}
         {openRounds.map(round => <DecisionRoundCard key={round.id} round={round}/>)}
         {pendingProposals.map(proposal => <article className="decisionCard" key={proposal.id}>
-          <div className="decisionTop"><div><Badge tone="orange">{proposal.status === 'escalated' ? 'With organizer' : 'Needs confirmation'}</Badge><h2>{proposal.headline}</h2><p>{proposal.status === 'escalated' ? 'The affected members could not agree. The organizer can keep current, split group, or remove this activity.' : `${proposal.detail} You proposed this, so you already count as accepted.`}</p></div><span>{proposal.createdAt}</span></div>
+          <div className="decisionTop"><div><Badge tone="orange">{proposal.status === 'escalated' ? 'With organizer' : 'Needs confirmation'}</Badge><h2>{proposal.headline}</h2><p>{proposal.status === 'escalated' ? 'The affected members could not agree. The organizer can keep current, split group, or clear this activity.' : `${proposal.detail} You proposed this, so you already count as accepted.`}</p></div><span>{proposal.createdAt}</span></div>
           <div className="changeCompare"><div><small>Current{proposal.before.dayLabel ? ` · ${proposal.before.dayLabel}` : ''}</small><strong>{proposal.before.time} · {proposal.before.title}</strong><span>{proposal.before.place}</span></div><b>→</b><div className="new"><small>Proposed{proposal.after.dayLabel ? ` · ${proposal.after.dayLabel}` : ''}</small><strong>{proposal.after.time} · {proposal.after.title}</strong><span>{proposal.after.place}</span></div></div>
           <div className="impactRow">{proposal.affectedMembers.map(member => <span key={member.id}>{member.label}: {member.status === 'accepted' ? 'accepted' : 'needs decision'}</span>)}<span>Names hidden</span></div>
           <div className="decisionActions"><Button onClick={() => navigate(tripHref(currentTrip.id, 'conflict'))}>Review decision</Button>{proposal.status !== 'escalated' && <Button ghost onClick={() => { app.withdrawProposal(proposal.id); app.notify('Hidden — current plan kept') }}>Hide</Button>}</div>
@@ -1362,20 +1362,8 @@ function JoinInvitePage() {
       .then(data => {
         if (cancelled) return
         setPreview(data)
-        if (
-          savedInviteSession?.membershipId &&
-          savedInviteSession?.tripId &&
-          (
-            app.membershipId !== savedInviteSession.membershipId ||
-            app.activeTripId !== savedInviteSession.tripId
-          )
-        ) {
-          app.adoptTechnicalTripContext({
-            membershipId: savedInviteSession.membershipId,
-            tripId: savedInviteSession.tripId,
-            inviteToken: token,
-          })
-        }
+        // Invite cache is only a routing hint. It never contains a credential
+        // and therefore must not restore or mint Guest authentication.
       })
       .catch(err => {
         if (!cancelled) {
@@ -1429,6 +1417,7 @@ function JoinInvitePage() {
       app.adoptTechnicalTripContext({
         membershipId: joined.membership_id,
         tripId: joined.trip_id,
+        ...(!withAccount ? { guestToken: joined.guest_token } : {}),
         inviteToken: token,
         profile: {
           name: name.trim(),

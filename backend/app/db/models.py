@@ -76,6 +76,32 @@ class AuthSession(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class GuestSession(Base, TimestampMixin):
+    """A bounded bearer credential for one anonymous trip membership.
+
+    ``TripMembership.id`` remains an identifier. The one-time raw credential
+    returned by Guest join is represented only by this hashed, revocable row.
+    """
+
+    __tablename__ = "guest_session"
+    __table_args__ = (
+        Index("ix_guest_session_trip_id", "trip_id"),
+        Index(
+            "one_active_guest_session_per_membership",
+            "membership_id",
+            unique=True,
+            postgresql_where="revoked_at IS NULL",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    membership_id: Mapped[str] = mapped_column(ForeignKey("trip_membership.id"))
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trip.id"))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Trip(Base, TimestampMixin):
     __tablename__ = "trip"
 

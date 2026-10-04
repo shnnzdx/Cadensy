@@ -6,7 +6,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.db.models import ChangeProposal, DecisionRound, PlanChange, UpdateNotice
+from app.db.models import (
+    ChangeProposal,
+    DecisionRound,
+    PlanChange,
+    ProposalDecision,
+    UpdateNotice,
+)
 from app.domain.decisions import orchestrator as orch
 from app.domain.decisions import organizer as org
 from app.domain.constraints.types import Settledness
@@ -124,17 +130,94 @@ def test_any_affected_member_can_escalate_not_just_the_proposer(db, full_trip):
 
 
 @pytest.mark.parametrize(
-    "action, expected_title",
-    [("split", "Split for this block"), ("clear", "Free time")],
+    "action, expected_title, expected_settledness",
+    [
+        ("keep", "Birthday dinner", "booked"),
+        ("split", "Split for this block", "settled"),
+        # `clear` records a remove patch. The item must
+        # leave the shared itinerary, not be relabeled as a fictitious event.
+        ("clear", "Birthday dinner", "removed"),
+    ],
 )
-def test_both_exits_decline_to_decide(db, full_trip, action, expected_title):
+def test_all_deadlock_exits_close_without_adopting_the_pending_proposal(
+    db, full_trip, action, expected_title, expected_settledness
+):
     proposal = _stuck_proposal(db, full_trip)
     org.escalate(db, full_trip["me"], proposal.id)
 
     item = org.resolve_deadlock(db, full_trip["me"], proposal.id, action)
 
     assert item.title == expected_title
+    assert item.settledness == expected_settledness
     assert proposal.status == "resolved_by_organizer"
+
+
+def test_keep_rejects_the_pending_proposal_without_mutating_the_current_plan(
+    db, full_trip
+):
+    """Keep is a neutral deadlock exit, not organizer adoption or a vote."""
+    proposal = _stuck_proposal(db, full_trip)
+    org.escalate(db, full_trip["me"], proposal.id)
+    dinner = full_trip["dinner"]
+    original_item = (
+        dinner.title,
+        dinner.place,
+        dinner.start_hour,
+        dinner.settledness,
+        dinner.settled_at,
+    )
+    decisions_before = sorted(
+        (decision.trip_membership_id, decision.status)
+        for decision in db.query(ProposalDecision)
+        .filter_by(proposal_id=proposal.id)
+        .all()
+    )
+
+    item = org.resolve_deadlock(db, full_trip["me"], proposal.id, "keep")
+
+    assert (
+        item.title,
+        item.place,
+        item.start_hour,
+        item.settledness,
+        item.settled_at,
+    ) == original_item
+    assert item.start_hour == 19.0
+    assert proposal.status == "resolved_by_organizer"
+    assert sorted(
+        (decision.trip_membership_id, decision.status)
+        for decision in db.query(ProposalDecision)
+        .filter_by(proposal_id=proposal.id)
+        .all()
+    ) == decisions_before
+
+    change = db.query(PlanChange).filter_by(source_proposal_id=proposal.id).one()
+    notice = db.query(UpdateNotice).filter_by(plan_item_id=item.id).one()
+    assert change.origin == "deadlock_keep"
+    assert change.patch == {}
+    assert "not decided either way" in change.reason
+    assert notice.title == "The current block was kept"
+    assert "Current Plan unchanged" in notice.body
+
+    with pytest.raises(org.NothingToDo):
+        org.resolve_deadlock(db, full_trip["me"], proposal.id, "keep")
+    assert db.query(PlanChange).filter_by(source_proposal_id=proposal.id).count() == 1
+    assert db.query(UpdateNotice).filter_by(plan_item_id=item.id).count() == 1
+
+
+def test_keep_preserves_live_state_instead_of_restoring_a_stale_snapshot(db, full_trip):
+    proposal = _stuck_proposal(db, full_trip)
+    org.escalate(db, full_trip["me"], proposal.id)
+    dinner = full_trip["dinner"]
+    dinner.title = "Birthday dinner (confirmed separately)"
+    dinner.start_hour = 19.5
+    db.flush()
+
+    item = org.resolve_deadlock(db, full_trip["me"], proposal.id, "keep")
+
+    assert item.title == "Birthday dinner (confirmed separately)"
+    assert item.start_hour == 19.5
+    assert db.query(PlanChange).filter_by(source_proposal_id=proposal.id).one().patch == {}
 
 
 def test_the_organizer_can_never_adopt_the_proposal(db, full_trip):
@@ -144,11 +227,21 @@ def test_the_organizer_can_never_adopt_the_proposal(db, full_trip):
     org.escalate(db, full_trip["me"], proposal.id)
     original_hour = full_trip["dinner"].start_hour
 
-    for attempt in ("apply", "accept", "keep", "20.0"):
+    for attempt in ("apply", "accept", "20.0"):
         with pytest.raises(org.NothingToDo):
             org.resolve_deadlock(db, full_trip["me"], proposal.id, attempt)
 
     assert full_trip["dinner"].start_hour == original_hour
+
+
+def test_remove_is_not_a_public_organizer_resolution_action(db, full_trip):
+    proposal = _stuck_proposal(db, full_trip)
+    org.escalate(db, full_trip["me"], proposal.id)
+
+    with pytest.raises(org.NothingToDo):
+        org.resolve_deadlock(db, full_trip["me"], proposal.id, "remove")
+
+    assert proposal.status == "escalated"
 
 
 def test_breaking_a_deadlock_is_written_into_the_log(db, full_trip):

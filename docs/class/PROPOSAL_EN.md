@@ -90,10 +90,14 @@ Three non-negotiable rules:
 2. Organizers cannot read private raw preference wording.
 3. Nobody can decide for another member.
 
-If Confirm deadlocks, the organizer still cannot simply choose a side. They can only:
+If Confirm deadlocks, the organizer still cannot simply choose a side. They can:
 
+- keep the current plan, which rejects the pending proposal without applying it
 - split up
 - clear the slot
+
+`keep` is a neutral rejection, not an extra organizer vote or an adoption of
+the blocked proposal.
 
 ## 5. AI Responsibilities
 
