@@ -20,12 +20,13 @@ test("phase 7 account 401 is classified as account credential invalidation", () 
   );
 });
 
-test("phase 7 guest and membership-only 401 are classified as membership invalidation", () => {
+test("phase 7 Guest 401 is classified as Guest credential invalidation", () => {
   assert.equal(
     classifyTechnicalSessionInvalidation({
       scope: "trip",
       facts: {
         kind: "guest",
+        guestAuth: true,
         activeTripId: "t-guest",
         membershipId: "m-guest",
       },
@@ -34,19 +35,6 @@ test("phase 7 guest and membership-only 401 are classified as membership invalid
     SESSION_RUNTIME_CODES.invalidation.MEMBERSHIP_CREDENTIALS_INVALID,
   );
 
-  assert.equal(
-    classifyTechnicalSessionInvalidation({
-      scope: "membership-compat",
-      facts: {
-        kind: "account",
-        accountAuth: true,
-        activeTripId: "t-1",
-        membershipId: "m-1",
-      },
-      status: 401,
-    }),
-    SESSION_RUNTIME_CODES.invalidation.MEMBERSHIP_CREDENTIALS_INVALID,
-  );
 });
 
 test("phase 7 trip 403 does not invalidate session", () => {
@@ -87,6 +75,7 @@ test("phase 7 404 does not invalidate session", () => {
       scope: "trip",
       facts: {
         kind: "guest",
+        guestAuth: true,
         activeTripId: "t-guest",
         membershipId: "m-guest",
       },

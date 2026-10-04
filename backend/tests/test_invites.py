@@ -20,6 +20,7 @@ from app.db.models import (
     TripMembership,
     User,
 )
+from app.domain import auth
 
 
 @pytest.fixture
@@ -44,6 +45,7 @@ def api_session(test_engine):
 def client(api_session: Session):
     api.app.dependency_overrides[api.get_session] = lambda: api_session
     with TestClient(api.app) as test_client:
+        test_client.app_state["cadensy_test_db"] = api_session
         yield test_client
     api.app.dependency_overrides.clear()
 
@@ -84,10 +86,27 @@ def _trip(db: Session) -> tuple[Trip, TripMembership, TripMembership]:
     return trip, organizer, participant
 
 
+def _member_headers(client: TestClient, membership: TripMembership, trip: Trip) -> dict:
+    db = client.app_state["cadensy_test_db"]
+    user = db.get(User, membership.user_id)
+    assert user is not None
+    user.password_hash = auth.hash_password("correct-horse")
+    db.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": user.email, "password": "correct-horse"},
+    )
+    assert login.status_code == 200
+    return {
+        "Authorization": f"Bearer {login.json()['token']}",
+        "X-Trip-Id": trip.id,
+    }
+
+
 def _create_invite(client: TestClient, organizer: TripMembership, trip: Trip) -> dict:
     response = client.post(
         f"/api/trips/{trip.id}/invite",
-        headers={"X-Membership-Id": organizer.id},
+        headers=_member_headers(client, organizer, trip),
     )
     assert response.status_code == 200
     return response.json()
@@ -181,7 +200,7 @@ def test_revoked_invite_returns_404(client: TestClient, api_session: Session):
 
     revoke = client.post(
         f"/api/invites/{invite['invite_id']}/revoke",
-        headers={"X-Membership-Id": organizer.id},
+        headers=_member_headers(client, organizer, trip),
     )
     assert revoke.status_code == 200
 
@@ -214,7 +233,11 @@ def test_guest_join_creates_participant_without_user(client: TestClient, api_ses
     assert response.status_code == 200
     body = response.json()
     membership = api_session.get(TripMembership, body["membership_id"])
-    assert body == {"membership_id": membership.id, "trip_id": trip.id, "role": "participant"}
+    assert body["membership_id"] == membership.id
+    assert body["trip_id"] == trip.id
+    assert body["role"] == "participant"
+    assert body["guest_token"].startswith("gst_")
+    assert body["guest_expires_at"]
     assert membership.user_id is None
     assert membership.guest_display_name == "Guest Lee"
     assert membership.role == "participant"
@@ -262,7 +285,7 @@ def test_non_organizer_cannot_create_invite(client: TestClient, api_session: Ses
 
     response = client.post(
         f"/api/trips/{trip.id}/invite",
-        headers={"X-Membership-Id": participant.id},
+        headers=_member_headers(client, participant, trip),
     )
 
     assert response.status_code == 403

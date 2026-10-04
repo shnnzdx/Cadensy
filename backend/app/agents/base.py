@@ -22,6 +22,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from . import trace
+from .execution import AgentProviderDeadlineExceeded
 from ..domain.constraints.types import Classification
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -423,6 +424,7 @@ def _invoke_agent_provider(
     messages: list[dict[str, Any]],
     tools: tuple[AgentTool, ...],
     max_tokens: int | None,
+    timeout_seconds: float = 90.0,
 ) -> AgentProviderReply:
     if not config.api_key:
         raise AgentUnavailable(f"{config.name} API key is not set")
@@ -431,7 +433,11 @@ def _invoke_agent_provider(
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=config.api_key, base_url=config.base_url, timeout=90.0)
+    client = OpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        timeout=timeout_seconds,
+    )
     kwargs: dict[str, Any] = {
         "model": config.model,
         "messages": messages,
@@ -462,6 +468,7 @@ def _agent_reply_with_fallback(
     messages: list[dict[str, Any]],
     tools: tuple[AgentTool, ...],
     max_tokens: int | None,
+    provider_timeout_seconds: float = 90.0,
 ) -> tuple[AgentProviderReply, ProviderConfig]:
     failures: list[str] = []
     for provider_name in _provider_chain(provider):
@@ -476,21 +483,37 @@ def _agent_reply_with_fallback(
                     messages=messages,
                     tools=tools,
                     max_tokens=max_tokens,
+                    timeout_seconds=provider_timeout_seconds,
                 ),
                 config,
             )
         except AgentUnavailable as exc:
             failures.append(f"{provider_name}: {exc}")
         except Exception as exc:
+            if _is_provider_timeout(exc):
+                raise AgentProviderDeadlineExceeded(
+                    f"{provider_name} exceeded its local provider deadline"
+                ) from exc
             failures.append(f"{provider_name}: {exc!r}")
     raise AgentUnavailable(" | ".join(failures) or "No AI provider succeeded")
+
+
+def _is_provider_timeout(exc: Exception) -> bool:
+    """Avoid importing a provider-specific exception just to classify a timeout."""
+    return isinstance(exc, TimeoutError) or exc.__class__.__name__ in {
+        "APITimeoutError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "TimeoutException",
+    }
 
 
 def call_agent(
     *,
     system: str,
     user: str,
-    tools: tuple[AgentTool, ...],
+    tools: tuple[AgentTool, ...] = (),
+    tool_factory: Callable[[], tuple[AgentTool, ...]] | None = None,
     history: tuple[dict[str, str], ...] = (),
     mock_rounds: tuple[AgentProviderReply, ...] = (),
     max_rounds: int = 5,
@@ -498,8 +521,18 @@ def call_agent(
     max_tokens: int | None = None,
     provider: str | None = AGENT_ROUTE,
     guard_reject_limit: int = 2,
+    deadline: Any | None = None,
 ) -> AgentRunResult:
     """Run a read-only tool-calling agent loop."""
+    if tools and tool_factory is not None:
+        raise ValueError("Provide either tools or tool_factory, not both")
+    if tool_factory is not None:
+        if deadline is not None:
+            deadline.ensure_request_active()
+        tools = tool_factory()
+        if deadline is not None:
+            deadline.ensure_request_active()
+
     trace_id = trace.new_trace_id()
     route = _route_name(provider)
     catalog = provider_catalog()
@@ -531,6 +564,9 @@ def call_agent(
 
     for round_index in range(1, max_rounds + 1):
         round_started = time.perf_counter()
+        provider_timeout_seconds = (
+            deadline.before_provider() if deadline is not None else 90.0
+        )
         if is_mocked():
             reply = _next_mock_agent_reply(mock_list, round_index - 1)
         else:
@@ -540,7 +576,13 @@ def call_agent(
                 messages=messages,
                 tools=tools,
                 max_tokens=max_tokens,
+                provider_timeout_seconds=provider_timeout_seconds,
             )
+        if deadline is not None:
+            # A local request may have timed out while a synchronous provider
+            # was still executing. Discard its reply before it can trigger a
+            # tool call or become a user-visible result.
+            deadline.after_provider()
         total_tokens += reply.tokens.total_tokens or 0
 
         if not reply.tool_calls:
@@ -610,13 +652,21 @@ def call_agent(
                         force_stop_reason = "guard_rejection_limit_exceeded"
                 else:
                     key = _cache_key(call.name, call.arguments)
+                    tool_started = deadline.before_tool() if deadline is not None else None
                     if tool.cache and key in cache:
                         output = cache[key]
                         cached = True
                     else:
                         output = tool.handler(**call.arguments)
+                        if deadline is not None:
+                            # A blocking read-only tool cannot be forcibly
+                            # killed. Its late result is never appended to the
+                            # conversation or cache.
+                            deadline.after_tool(tool_started)
                         if tool.cache:
                             cache[key] = output
+                    if deadline is not None and cached:
+                        deadline.after_tool(tool_started)
                     called_tools.append({"name": call.name, "arguments": call.arguments})
 
             output_text = _stringify_tool_result(output)

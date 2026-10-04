@@ -65,8 +65,7 @@ Confirm is now one proposal with only affected members deciding:
 - Organizer deadlock exits are:
   - `keep`
   - `split`
-  - `remove`
-  - legacy `clear`
+  - `clear` (recorded with the historical `deadlock_remove` audit origin)
 
 Removed from backend:
 

@@ -147,7 +147,7 @@ Put runtime variables in `backend/.env`. Do not commit real secrets.
 | `MOCK_AI` | use local mock AI when `1` | `1` |
 | `SETTLE_TICK_SECONDS` | settlement polling interval | `60` |
 | `DISABLE_SCHEDULER` | disable scheduler when `1` | none |
-| `DEV_ALLOW_MEMBERSHIP_HEADER` | keep `X-Membership-Id` local fallback | `1` |
+| `DEV_ALLOW_MEMBERSHIP_HEADER` | retired; production fails fast if truthy | `0` |
 | `FRONTEND_BASE_URL` | frontend base URL for redirects | `http://localhost:5173` |
 | `CORS_ORIGINS` | allowed frontend origins | `http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000` |
 
@@ -334,9 +334,15 @@ Unsplash is only for Trip city covers. It does not provide Planner candidate pla
 The dashboard persists the selected hotlinked image URL and attribution on `Trip`.
 Place and PlanItem photos remain separate. Provider failure keeps the neutral Travel cover.
 
-Before using an existing database, apply the additive schema setup:
+For a new, empty local database, apply the versioned schema baseline:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m app.db.init_schema
+.\.venv\Scripts\python.exe -m alembic -c alembic.ini upgrade head
 ```
+
+Do not run `app.db.init_schema` as a substitute for migration history. For an
+existing database created before Alembic, use the reviewed preflight and
+stamping procedure in
+`AI_enhanced/phase-0-audit-2026-10-03/11_PR05A_ALEMBIC_BASELINE.md`; stamping
+is allowed only after a zero-drift comparison and a backup plan.

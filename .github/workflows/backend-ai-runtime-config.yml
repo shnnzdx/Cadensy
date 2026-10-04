@@ -171,7 +171,7 @@ jobs:
 
           APP_ENV="${APP_ENV:-production}"
           DISABLE_SCHEDULER="${DISABLE_SCHEDULER:-1}"
-          DEV_ALLOW_MEMBERSHIP_HEADER="1"
+          DEV_ALLOW_MEMBERSHIP_HEADER="0"
           FRONTEND_BASE_URL="${FRONTEND_BASE_URL:-http://localhost:3000}"
           CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173}"
           SETTLE_TICK_SECONDS="${SETTLE_TICK_SECONDS:-60}"

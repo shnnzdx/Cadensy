@@ -6,8 +6,9 @@ them decides anything on another member's behalf:
   - a reminder nudges, it cannot fill the form in
   - an extension buys time, it cannot cast a vote
   - the deadlock exit never lets the organizer pick either side's proposal.
-    They can keep the current block, split the block, or remove the disputed
-    activity from the shared itinerary.
+    They can keep the current block, split the block, or clear the disputed
+    activity from the shared itinerary. `clear` is recorded under the legacy
+    audit origin `deadlock_remove`; callers cannot submit `remove` directly.
 
 That last rule is the whole reason this module exists. Without an exit, a
 confirmation that cannot reach agreement is a dead end; but handing the
@@ -166,15 +167,16 @@ def resolve_deadlock(
 ) -> PlanItem:
     """The organizer closes a deadlock without accepting the blocked proposal.
 
-    `keep` -- the Current Plan stays as-is
+    `keep` -- reject the pending proposal; the live Current Plan stays as-is
     `split` -- the block splits; each group goes its own way and regroups after
-    `remove` -- the disputed activity leaves the shared itinerary
+    `clear` -- the disputed activity leaves the shared itinerary
 
-    `clear` is accepted as a legacy alias for `remove`.
+    `deadlock_remove` remains the append-only audit origin for a `clear`
+    resolution. It is not an action that callers may submit.
     """
     _require_organizer(organizer)
-    if action not in ("keep", "split", "remove", "clear"):
-        raise NothingToDo("An organizer can only keep, split, or remove the block")
+    if action not in ("keep", "split", "clear"):
+        raise NothingToDo("An organizer can only keep, split, or clear the block")
     normalized_action = "remove" if action == "clear" else action
 
     proposal = db.get(ChangeProposal, proposal_id)

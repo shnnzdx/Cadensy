@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...db.models import InviteLink, Plan, PlanItem, Trip, TripMembership, User
+from .. import auth as auth_service
 from ..places.service import normalize_destination
 from . import cover_service
 
@@ -26,6 +27,10 @@ class GuestTripAccessDenied(Exception):
 
 class OrganizerRequired(Exception):
     """Only the trip organizer can manage invite links."""
+
+
+class MembershipRemovalDenied(Exception):
+    """Membership removal is invalid for this actor or target."""
 
 
 class InviteNotFound(Exception):
@@ -142,7 +147,10 @@ def list_user_trips(
 
     memberships = db.scalars(
         select(TripMembership)
-        .where(TripMembership.user_id == user.id)
+        .where(
+            TripMembership.user_id == user.id,
+            TripMembership.status != "removed",
+        )
         .order_by(TripMembership.created_at)
     ).all()
     display_memberships = list(memberships)
@@ -295,6 +303,7 @@ def invite_preview(db: Session, token: str) -> dict:
 class JoinedInvite:
     membership: TripMembership
     trip_id: str
+    guest_session: auth_service.GuestSessionResult | None = None
 
 
 def join_invite(
@@ -319,7 +328,11 @@ def join_invite(
         )
         db.add(membership)
         db.flush()
-        return JoinedInvite(membership=membership, trip_id=invite.trip_id)
+        return JoinedInvite(
+            membership=membership,
+            trip_id=invite.trip_id,
+            guest_session=auth_service.start_guest_session(db, membership),
+        )
 
     user = db.scalar(select(User).where(func.lower(User.email) == normalized_email))
     if user is None:
@@ -367,4 +380,29 @@ def revoke_invite(db: Session, invite_id: str, organizer: TripMembership) -> Non
     _require_organizer(db, invite.trip_id, organizer)
     invite.revoked_at = _now()
     invite.is_primary = False
+    db.flush()
+
+
+def remove_membership(
+    db: Session,
+    *,
+    trip_id: str,
+    organizer: TripMembership,
+    membership_id: str,
+) -> None:
+    """Remove authorization without deleting membership history.
+
+    Invite revocation stays separate: it prevents future joins only. Membership
+    removal changes this membership's authorization state and revokes every
+    live Guest credential bound to it in the same transaction.
+    """
+    _require_organizer(db, trip_id, organizer)
+    membership = db.get(TripMembership, membership_id)
+    if membership is None or membership.trip_id != trip_id:
+        raise MembershipRemovalDenied("Trip membership not found")
+    if membership.id == organizer.id or membership.role == "organizer":
+        raise MembershipRemovalDenied("An organizer membership cannot be removed here")
+
+    membership.status = "removed"
+    auth_service.revoke_guest_sessions_for_membership(db, membership.id)
     db.flush()

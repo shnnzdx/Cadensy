@@ -27,6 +27,7 @@ from app.db.models import (
     Vote,
 )
 from app.domain.trips import service as trip_service
+from app.domain import auth
 
 
 @pytest.fixture
@@ -53,6 +54,53 @@ def client(api_session: Session):
     with TestClient(api.app) as test_client:
         yield test_client
     api.app.dependency_overrides.clear()
+
+
+def _account_headers(
+    client: TestClient, db: Session, membership: TripMembership
+) -> dict[str, str]:
+    """Authenticate an HTTP fixture through public account login, not an ID header."""
+    user = db.get(User, membership.user_id)
+    assert user is not None
+    user.password_hash = auth.hash_password("correct-horse")
+    db.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": user.email, "password": "correct-horse"},
+    )
+    assert login.status_code == 200
+    return {
+        "Authorization": f"Bearer {login.json()['token']}",
+        "X-Trip-Id": membership.trip_id,
+    }
+
+
+def _guest_headers(
+    client: TestClient,
+    db: Session,
+    organizer: TripMembership,
+    *,
+    display_name: str,
+) -> tuple[dict[str, str], dict]:
+    """Join through a real invite and return its bounded Guest bearer."""
+    invite = client.post(
+        f"/api/trips/{organizer.trip_id}/invite",
+        headers=_account_headers(client, db, organizer),
+    )
+    assert invite.status_code == 200
+    joined = client.post(
+        f"/api/invites/{invite.json()['token']}/join",
+        json={"display_name": display_name},
+    )
+    assert joined.status_code == 200
+    body = joined.json()
+    return (
+        {
+            "Authorization": f"Bearer {body['guest_token']}",
+            "X-Trip-Id": organizer.trip_id,
+        },
+        body,
+    )
 
 
 def _user(db: Session, name: str) -> User:
@@ -178,7 +226,7 @@ def test_create_trip_makes_creator_organizer_and_empty_plan(
 
     response = client.post(
         "/api/trips",
-        headers={"X-Membership-Id": auth_membership.id},
+        headers=_account_headers(client, api_session, auth_membership),
         json={
             "name": "Paris birthday",
             "destination": "Paris",
@@ -260,7 +308,7 @@ def test_list_trips_returns_only_current_users_trips(
 
     response = client.get(
         "/api/trips",
-        headers={"X-Membership-Id": auth_membership.id},
+        headers=_account_headers(client, api_session, auth_membership),
     )
 
     assert response.status_code == 200
@@ -293,7 +341,7 @@ def test_list_trips_fetches_covers_in_stable_trip_id_order_even_when_priority_ch
 
     response = client.get(
         f"/api/trips?priority_trip_id={second_trip.id}",
-        headers={"X-Membership-Id": auth_membership.id},
+        headers=_account_headers(client, api_session, auth_membership),
     )
 
     assert response.status_code == 200
@@ -302,22 +350,17 @@ def test_list_trips_fetches_covers_in_stable_trip_id_order_even_when_priority_ch
 
 def test_guest_cannot_list_trips(client: TestClient, api_session: Session):
     user = _user(api_session, "Mia")
-    trip, _ = _trip_with_member(api_session, user)
-    guest = TripMembership(
-        trip_id=trip.id,
-        user_id=None,
-        guest_display_name="Guest",
-        status="joined",
+    _, organizer = _trip_with_member(api_session, user, role="organizer")
+    guest_headers, _ = _guest_headers(
+        client, api_session, organizer, display_name="Guest"
     )
-    api_session.add(guest)
-    api_session.flush()
 
     response = client.get(
         "/api/trips",
-        headers={"X-Membership-Id": guest.id},
+        headers=guest_headers,
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -335,7 +378,7 @@ def test_create_trip_requires_name_and_destination(
 
     response = client.post(
         "/api/trips",
-        headers={"X-Membership-Id": auth_membership.id},
+        headers=_account_headers(client, api_session, auth_membership),
         json=payload,
     )
 
@@ -370,7 +413,7 @@ def test_next_item_skips_days_that_already_passed(
     api_session.flush()
 
     response = client.get(
-        "/api/trips", headers={"X-Membership-Id": auth_membership.id}
+        "/api/trips", headers=_account_headers(client, api_session, auth_membership)
     )
     trips = {t["id"]: t for t in response.json()}
     assert trips[trip.id]["next_item_title"] == "Still ahead"
@@ -393,7 +436,7 @@ def test_a_finished_trip_has_no_next_item(client: TestClient, api_session: Sessi
     api_session.flush()
 
     response = client.get(
-        "/api/trips", headers={"X-Membership-Id": auth_membership.id}
+        "/api/trips", headers=_account_headers(client, api_session, auth_membership)
     )
     trips = {t["id"]: t for t in response.json()}
     assert trips[trip.id]["next_item_title"] is None
@@ -402,19 +445,17 @@ def test_a_finished_trip_has_no_next_item(client: TestClient, api_session: Sessi
 def test_a_guest_cannot_create_a_trip(client: TestClient, api_session: Session):
     """Guests have the same rights inside this trip, but cannot create new trips; that is account-level."""
     user = _user(api_session, "Mia")
-    trip, _ = _trip_with_member(api_session, user)
-    guest = TripMembership(
-        trip_id=trip.id, user_id=None, guest_display_name="Guest", status="joined",
+    _, organizer = _trip_with_member(api_session, user, role="organizer")
+    guest_headers, _ = _guest_headers(
+        client, api_session, organizer, display_name="Guest"
     )
-    api_session.add(guest)
-    api_session.flush()
 
     response = client.post(
         "/api/trips",
-        headers={"X-Membership-Id": guest.id},
+        headers=guest_headers,
         json={"name": "Sneaky trip", "destination": "Paris"},
     )
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 # ————————————————————— GET /api/me —————————————————————
@@ -432,8 +473,12 @@ def test_me_returns_the_role_of_this_trip_not_the_account(
         api_session, user, name="Trip B", role="participant"
     )
 
-    a = client.get("/api/me", headers={"X-Membership-Id": organizer_here.id}).json()
-    b = client.get("/api/me", headers={"X-Membership-Id": participant_there.id}).json()
+    a = client.get(
+        "/api/me", headers=_account_headers(client, api_session, organizer_here)
+    ).json()
+    b = client.get(
+        "/api/me", headers=_account_headers(client, api_session, participant_there)
+    ).json()
 
     assert a["role"] == "organizer"
     assert b["role"] == "participant"
@@ -446,24 +491,18 @@ def test_me_reports_a_guest_as_guest_with_no_email(
     client: TestClient, api_session: Session
 ):
     user = _user(api_session, "Mia Chen")
-    trip, _ = _trip_with_member(api_session, user)
-    guest = TripMembership(
-        trip_id=trip.id,
-        user_id=None,
-        guest_display_name="Sam",
-        role="participant",     # Even if membership says participant.
-        status="joined",
+    _, organizer = _trip_with_member(api_session, user, role="organizer")
+    guest_headers, joined = _guest_headers(
+        client, api_session, organizer, display_name="Sam"
     )
-    api_session.add(guest)
-    api_session.flush()
 
-    body = client.get("/api/me", headers={"X-Membership-Id": guest.id}).json()
+    body = client.get("/api/me", headers=guest_headers).json()
 
     assert body["role"] == "guest"      # Report guest anyway; no account means guest.
     assert body["is_guest"] is True
     assert body["name"] == "Sam"
     assert body["email"] is None
-    assert body["id"] == guest.id       # Provide a stable id when there is no account.
+    assert body["id"] == joined["membership_id"]
 
 
 def test_me_needs_an_identity(client: TestClient):
@@ -477,7 +516,7 @@ def test_creating_a_trip_returns_the_new_membership(client: TestClient, api_sess
 
     body = client.post(
         "/api/trips",
-        headers={"X-Membership-Id": auth.id},
+        headers=_account_headers(client, api_session, auth),
         json={"name": "Paris", "destination": "Paris"},
     ).json()
 
@@ -498,8 +537,9 @@ def test_an_identity_from_another_trip_is_refused_not_silently_answered(
     trip_a, auth_a = _trip_with_member(api_session, user, name="Trip A")
     trip_b, _ = _trip_with_member(api_session, user, name="Trip B")
 
-    ok = client.get(f"/api/trips/{trip_a.id}/members", headers={"X-Membership-Id": auth_a.id})
-    wrong = client.get(f"/api/trips/{trip_b.id}/members", headers={"X-Membership-Id": auth_a.id})
+    headers = _account_headers(client, api_session, auth_a)
+    ok = client.get(f"/api/trips/{trip_a.id}/members", headers=headers)
+    wrong = client.get(f"/api/trips/{trip_b.id}/members", headers=headers)
 
     assert ok.status_code == 200
     assert wrong.status_code == 403
@@ -515,7 +555,7 @@ def test_trip_detail_now_requires_authenticated_trip_membership(
 
     response = client.get(
         f"/api/trips/{trip.id}",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
     assert response.status_code == 200
     assert response.json()["id"] == trip.id
@@ -528,8 +568,9 @@ def test_trip_detail_rejects_foreign_trip_path(
     trip_a, auth_a = _trip_with_member(api_session, user, name="Trip A")
     trip_b, _ = _trip_with_member(api_session, user, name="Trip B")
 
-    ok = client.get(f"/api/trips/{trip_a.id}", headers={"X-Membership-Id": auth_a.id})
-    wrong = client.get(f"/api/trips/{trip_b.id}", headers={"X-Membership-Id": auth_a.id})
+    headers = _account_headers(client, api_session, auth_a)
+    ok = client.get(f"/api/trips/{trip_a.id}", headers=headers)
+    wrong = client.get(f"/api/trips/{trip_b.id}", headers=headers)
 
     assert ok.status_code == 200
     assert wrong.status_code == 403
@@ -548,7 +589,7 @@ def test_current_plan_now_requires_authenticated_trip_membership(
 
     response = client.get(
         f"/api/trips/{trip.id}/plans/current",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
     assert response.status_code == 200
     assert response.json()["plan_id"] == plan.id
@@ -571,7 +612,7 @@ def test_current_plan_exposes_meal_semantics_and_refresh_state(
 
     response = client.get(
         f"/api/trips/{trip.id}/plans/current",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
 
     assert response.status_code == 200
@@ -592,11 +633,11 @@ def test_current_plan_rejects_foreign_trip_path(
 
     ok = client.get(
         f"/api/trips/{trip_a.id}/plans/current",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     wrong = client.get(
         f"/api/trips/{trip_b.id}/plans/current",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     assert ok.status_code == 200
@@ -612,7 +653,7 @@ def test_item_comments_are_saved_and_read_back(
 
     created = client.post(
         f"/api/plans/items/{item.id}/comments",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={"text": "Meet by the main entrance."},
     )
     assert created.status_code == 200
@@ -620,7 +661,7 @@ def test_item_comments_are_saved_and_read_back(
 
     rows = client.get(
         f"/api/trips/{trip.id}/comments",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     ).json()
     assert rows[0]["plan_item_id"] == item.id
     assert rows[0]["text"] == "Meet by the main entrance."
@@ -642,17 +683,17 @@ def test_classify_access_is_scoped_to_plan_item(
 
     same = client.post(
         f"/api/plans/items/{item_a.id}/classify",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json=payload,
     )
     foreign = client.post(
         f"/api/plans/items/{item_b.id}/classify",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json=payload,
     )
     missing = client.post(
         "/api/plans/items/missing-item/classify",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json=payload,
     )
 
@@ -680,18 +721,18 @@ def test_submit_change_access_is_scoped_to_plan_item(
 
     same = client.post(
         f"/api/plans/items/{item_a.id}/changes",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json=payload,
     )
     persisted_changes = api_session.query(PlanChange).count()
     foreign = client.post(
         f"/api/plans/items/{item_b.id}/changes",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json=payload,
     )
     missing = client.post(
         "/api/plans/items/missing-item/changes",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json=payload,
     )
 
@@ -718,7 +759,7 @@ def test_submit_change_accepts_validated_round_alternatives(
 
     response = client.post(
         f"/api/plans/items/{item.id}/changes",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={
             "title": "Shopping",
             "request": "Replace this with shopping",
@@ -764,7 +805,7 @@ def test_submit_change_deduplicates_requested_round_alternative(
 
     response = client.post(
         f"/api/plans/items/{item.id}/changes",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={
             "start_hour": 13.0,
             "request": "Move this to 1 PM",
@@ -803,7 +844,7 @@ def test_submit_change_with_day_date_writes_json_safe_plan_change(
 
     response = client.post(
         f"/api/plans/items/{item.id}/changes",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={"day_date": new_day, "request": "Move this to the next day"},
     )
 
@@ -848,7 +889,7 @@ def test_submit_change_with_day_date_moves_item_to_matching_day_index(
 
     response = client.post(
         f"/api/plans/items/{moved.id}/changes",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={"day_date": "2026-08-19", "request": "Move this to August 19"},
     )
 
@@ -858,7 +899,7 @@ def test_submit_change_with_day_date_moves_item_to_matching_day_index(
     assert moved.day_index == 1
     plan_response = client.get(
         f"/api/trips/{trip.id}/plans/current",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
     assert plan_response.status_code == 200
     days = plan_response.json()["days"]
@@ -894,7 +935,7 @@ def test_current_plan_reports_canonical_day_dates_from_trip_window(
 
     response = client.get(
         f"/api/trips/{trip.id}/plans/current",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
 
     assert response.status_code == 200
@@ -920,18 +961,18 @@ def test_item_comment_access_is_scoped_to_plan_item(
 
     same = client.post(
         f"/api/plans/items/{item_a.id}/comments",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={"text": "Meet by the entrance."},
     )
     persisted_comments = api_session.query(PlanItemComment).count()
     foreign = client.post(
         f"/api/plans/items/{item_b.id}/comments",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={"text": "Wrong trip"},
     )
     missing = client.post(
         "/api/plans/items/missing-item/comments",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={"text": "Missing"},
     )
 
@@ -959,18 +1000,18 @@ def test_booking_access_is_scoped_to_plan_item(
 
     same = client.patch(
         f"/api/plans/items/{item_a.id}/booking",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={"booked": True},
     )
     persisted_changes = api_session.query(PlanChange).count()
     foreign = client.patch(
         f"/api/plans/items/{item_b.id}/booking",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={"booked": True},
     )
     missing = client.patch(
         "/api/plans/items/missing-item/booking",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={"booked": True},
     )
 
@@ -999,16 +1040,16 @@ def test_notice_object_access_is_scoped_to_notice(
 
     same = client.post(
         f"/api/updates/{notice_a.id}/object",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     persisted_rounds = api_session.query(DecisionRound).count()
     foreign = client.post(
         f"/api/updates/{notice_b.id}/object",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     missing = client.post(
         "/api/updates/missing-notice/object",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     api_session.refresh(notice_a)
@@ -1044,11 +1085,11 @@ def test_updates_reject_a_membership_from_another_trip(
 
     ok = client.get(
         f"/api/trips/{trip_a.id}/updates",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     wrong = client.get(
         f"/api/trips/{trip_b.id}/updates",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     assert ok.status_code == 200
@@ -1075,7 +1116,7 @@ def test_change_log_now_requires_authenticated_trip_membership(
 
     response = client.get(
         f"/api/plans/{plan.id}/changes",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
     assert response.status_code == 200
     assert response.json() == [
@@ -1108,15 +1149,15 @@ def test_change_log_hides_foreign_and_missing_plans_as_404(
 
     ok = client.get(
         f"/api/plans/{plan_a.id}/changes",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     foreign = client.get(
         f"/api/plans/{plan_b.id}/changes",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     missing = client.get(
         "/api/plans/missing-plan/changes",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     assert ok.status_code == 200
@@ -1139,7 +1180,7 @@ def test_round_read_now_requires_authenticated_trip_membership(
 
     response = client.get(
         f"/api/rounds/{round_.id}",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
     body = response.json()
     assert response.status_code == 200
@@ -1159,15 +1200,15 @@ def test_round_read_hides_foreign_and_missing_rounds_as_404(
 
     ok = client.get(
         f"/api/rounds/{round_a.id}",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     foreign = client.get(
         f"/api/rounds/{round_b.id}",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     missing = client.get(
         "/api/rounds/missing-round",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     assert ok.status_code == 200
@@ -1188,14 +1229,16 @@ def test_proposal_read_now_requires_authenticated_trip_membership(
 
     response = client.get(
         f"/api/proposals/{proposal.id}",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     )
     body = response.json()
     assert response.status_code == 200
     assert body["id"] == proposal.id
     assert body["status"] == proposal.status
     assert body["plan_item_id"] == proposal.plan_item_id
-    assert body["members"] == [{"label": "Member A", "status": "accepted"}]
+    assert body["members"] == [
+        {"label": "Member A", "status": "accepted", "is_me": True}
+    ]
 
 
 def test_proposal_read_hides_foreign_and_missing_proposals_as_404(
@@ -1209,15 +1252,15 @@ def test_proposal_read_hides_foreign_and_missing_proposals_as_404(
 
     ok = client.get(
         f"/api/proposals/{proposal_a.id}",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     foreign = client.get(
         f"/api/proposals/{proposal_b.id}",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
     missing = client.get(
         "/api/proposals/missing-proposal",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     assert ok.status_code == 200
@@ -1238,7 +1281,7 @@ def test_preference_dates_are_saved_and_read_back(
 
     saved = client.put(
         f"/api/trips/{trip.id}/preferences/me",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={
             "preferred_start_date": start.isoformat(),
             "preferred_end_date": end.isoformat(),
@@ -1256,7 +1299,7 @@ def test_preference_dates_are_saved_and_read_back(
 
     body = client.get(
         f"/api/trips/{trip.id}/preferences/me",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
     ).json()
     assert body["preference"]["preferred_start_date"] == start.isoformat()
     assert body["preference"]["available_end_date"] == end.isoformat()
@@ -1277,7 +1320,7 @@ def test_preference_dates_outside_trip_window_are_rejected_for_any_role(
     for membership in (organizer, participant):
         response = client.put(
             f"/api/trips/{trip.id}/preferences/me",
-            headers={"X-Membership-Id": membership.id},
+            headers=_account_headers(client, api_session, membership),
             json={
                 "preferred_start_date": (start - timedelta(days=1)).isoformat(),
                 "preferred_end_date": end.isoformat(),
@@ -1302,7 +1345,7 @@ def test_foreign_preference_path_is_rejected_instead_of_using_my_trip(
 
     saved = client.put(
         f"/api/trips/{trip_b.id}/preferences/me",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
         json={
             "preferred_start_date": start.isoformat(),
             "preferred_end_date": end.isoformat(),
@@ -1312,7 +1355,7 @@ def test_foreign_preference_path_is_rejected_instead_of_using_my_trip(
     )
     read = client.get(
         f"/api/trips/{trip_b.id}/preferences/me",
-        headers={"X-Membership-Id": auth_a.id},
+        headers=_account_headers(client, api_session, auth_a),
     )
 
     assert saved.status_code == 403
@@ -1332,7 +1375,7 @@ def test_foreign_constraint_path_is_rejected_instead_of_using_my_trip(
 
     response = client.post(
         f"/api/trips/{trip_c.id}/constraints",
-        headers={"X-Membership-Id": auth_b.id},
+        headers=_account_headers(client, api_session, auth_b),
         json={
             "kind": "time_window",
             "importance": "required",
@@ -1351,7 +1394,7 @@ def test_constraint_api_rejects_non_executable_required_payload(
 
     response = client.post(
         f"/api/trips/{trip.id}/constraints",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={
             "kind": "avoid_tag",
             "importance": "required",
@@ -1373,7 +1416,7 @@ def test_marking_an_item_booked_and_unbooked_is_persistent(
 
     booked = client.patch(
         f"/api/plans/items/{item.id}/booking",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={"booked": True},
     )
     assert booked.status_code == 200
@@ -1383,7 +1426,7 @@ def test_marking_an_item_booked_and_unbooked_is_persistent(
 
     unbooked = client.patch(
         f"/api/plans/items/{item.id}/booking",
-        headers={"X-Membership-Id": membership.id},
+        headers=_account_headers(client, api_session, membership),
         json={"booked": False},
     )
     assert unbooked.status_code == 200
@@ -1415,17 +1458,17 @@ def test_round_vote_and_settle_routes_are_trip_scoped(
 
     vote = client.post(
         f"/api/rounds/{round_a.id}/votes",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
         json={"option_id": "keep"},
     )
     foreign_vote = client.post(
         f"/api/rounds/{round_b.id}/votes",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
         json={"option_id": "keep"},
     )
     missing_vote = client.post(
         "/api/rounds/missing-round/votes",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
         json={"option_id": "keep"},
     )
 
@@ -1438,15 +1481,15 @@ def test_round_vote_and_settle_routes_are_trip_scoped(
 
     settle = client.post(
         f"/api/rounds/{round_a.id}/settle",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
     )
     foreign_settle = client.post(
         f"/api/rounds/{round_b.id}/settle",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
     )
     missing_settle = client.post(
         "/api/rounds/missing-round/settle",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
     )
 
     assert settle.status_code == 200
@@ -1480,7 +1523,7 @@ def test_round_auto_settles_when_every_member_has_voted(
 
     vote = client.post(
         f"/api/rounds/{round_.id}/votes",
-        headers={"X-Membership-Id": member.id},
+        headers=_account_headers(client, api_session, member),
         json={"option_id": "requested"},
     )
 
@@ -1512,19 +1555,19 @@ def test_round_extend_route_is_trip_scoped_and_keeps_organizer_policy(
 
     participant = client.post(
         f"/api/rounds/{round_a.id}/extend",
-        headers={"X-Membership-Id": participant_a.id},
+        headers=_account_headers(client, api_session, participant_a),
     )
     success = client.post(
         f"/api/rounds/{round_a.id}/extend",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     foreign = client.post(
         f"/api/rounds/{round_b.id}/extend",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     missing = client.post(
         "/api/rounds/missing-round/extend",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
 
     assert participant.status_code == 403
@@ -1567,34 +1610,37 @@ def test_proposal_decision_and_escalation_routes_are_trip_scoped(
 
     decide = client.post(
         f"/api/proposals/{proposal_decide.id}/decisions",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
         json={"status": "accepted"},
     )
     escalate = client.post(
         f"/api/proposals/{proposal_escalate.id}/escalate",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
     )
     foreign_decide = client.post(
         f"/api/proposals/{proposal_foreign.id}/decisions",
-        headers={"X-Membership-Id": organizer_b.id},
+        headers=_account_headers(client, api_session, organizer_b),
         json={"status": "accepted"},
     )
     foreign_escalate = client.post(
         f"/api/proposals/{proposal_foreign.id}/escalate",
-        headers={"X-Membership-Id": organizer_b.id},
+        headers=_account_headers(client, api_session, organizer_b),
     )
     missing_decide = client.post(
         "/api/proposals/missing-proposal/decisions",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
         json={"status": "accepted"},
     )
     missing_escalate = client.post(
         "/api/proposals/missing-proposal/escalate",
-        headers={"X-Membership-Id": member_a.id},
+        headers=_account_headers(client, api_session, member_a),
     )
 
     assert decide.status_code == 200
-    assert decide.json() == {"proposal_status": "applied", "applied": True}
+    decided = decide.json()
+    assert decided["status"] == "applied"
+    assert decided["applied"] is True
+    assert decided["can_decide"] is False
     assert escalate.status_code == 200
     assert escalate.json()["status"] == "escalated"
     assert foreign_decide.status_code == 404
@@ -1629,8 +1675,18 @@ def test_deadlock_route_is_trip_scoped_and_keeps_organizer_policy(
     _, item_foreign, _, proposal_foreign = _round_and_proposal(
         api_session, trip_a, organizer_a
     )
+    _, item_keep, _, proposal_keep = _round_and_proposal(
+        api_session, trip_a, organizer_a
+    )
     proposal_success.status = "escalated"
     proposal_foreign.status = "escalated"
+    proposal_keep.status = "escalated"
+    keep_snapshot = (
+        item_keep.title,
+        item_keep.place,
+        item_keep.start_hour,
+        item_keep.settledness,
+    )
     api_session.flush()
 
     assert client.post(
@@ -1638,41 +1694,77 @@ def test_deadlock_route_is_trip_scoped_and_keeps_organizer_policy(
         json={"action": "clear"},
     ).status_code == 401
 
+    # `remove` is an internal historical audit origin, not a public organizer
+    # action. Public callers may choose only keep, split, or clear.
+    assert client.post(
+        f"/api/proposals/{proposal_success.id}/deadlock",
+        headers=_account_headers(client, api_session, organizer_a),
+        json={"action": "remove"},
+    ).status_code == 422
+
     participant = client.post(
         f"/api/proposals/{proposal_success.id}/deadlock",
-        headers={"X-Membership-Id": participant_a.id},
+        headers=_account_headers(client, api_session, participant_a),
         json={"action": "clear"},
     )
     success = client.post(
         f"/api/proposals/{proposal_success.id}/deadlock",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
         json={"action": "clear"},
+    )
+    keep = client.post(
+        f"/api/proposals/{proposal_keep.id}/deadlock",
+        headers=_account_headers(client, api_session, organizer_a),
+        json={"action": "keep"},
     )
     foreign = client.post(
         f"/api/proposals/{proposal_foreign.id}/deadlock",
-        headers={"X-Membership-Id": organizer_b.id},
+        headers=_account_headers(client, api_session, organizer_b),
         json={"action": "clear"},
     )
     missing = client.post(
         "/api/proposals/missing-proposal/deadlock",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
         json={"action": "clear"},
     )
 
     assert participant.status_code == 403
     assert success.status_code == 200
     assert success.json()["item_id"] == item_success.id
+    assert keep.status_code == 200
+    assert keep.json() == {
+        "item_id": item_keep.id,
+        "title": keep_snapshot[0],
+        "action": "keep",
+    }
     assert foreign.status_code == 404
     assert missing.status_code == 404
 
     api_session.refresh(proposal_success)
     api_session.refresh(proposal_foreign)
+    api_session.refresh(proposal_keep)
     api_session.refresh(item_success)
     api_session.refresh(item_foreign)
+    api_session.refresh(item_keep)
     assert proposal_success.status == "resolved_by_organizer"
     assert proposal_foreign.status == "escalated"
-    assert item_success.title == "Free time"
+    assert proposal_keep.status == "resolved_by_organizer"
+    assert item_success.title == "Art Institute of Chicago"
+    assert item_success.settledness == "removed"
     assert item_foreign.title == "Art Institute of Chicago"
+    assert (
+        item_keep.title,
+        item_keep.place,
+        item_keep.start_hour,
+        item_keep.settledness,
+    ) == keep_snapshot
+    assert (
+        api_session.query(PlanChange)
+        .filter_by(source_proposal_id=proposal_keep.id)
+        .one()
+        .origin
+        == "deadlock_keep"
+    )
 
 
 def test_remind_route_enforces_full_trip_scope_invariant(
@@ -1694,19 +1786,19 @@ def test_remind_route_enforces_full_trip_scope_invariant(
 
     success = client.post(
         f"/api/trips/{trip_a.id}/members/{target_a.id}/remind",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     foreign_path = client.post(
         f"/api/trips/{trip_b.id}/members/{target_b.id}/remind",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     foreign_target = client.post(
         f"/api/trips/{trip_a.id}/members/{target_b.id}/remind",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     missing = client.post(
         f"/api/trips/{trip_a.id}/members/missing-membership/remind",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
 
     assert success.status_code == 200
@@ -1739,19 +1831,19 @@ def test_revoke_invite_route_is_trip_scoped_and_keeps_organizer_policy(
 
     participant = client.post(
         f"/api/invites/{invite_a.id}/revoke",
-        headers={"X-Membership-Id": participant_a.id},
+        headers=_account_headers(client, api_session, participant_a),
     )
     success = client.post(
         f"/api/invites/{invite_a.id}/revoke",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     foreign = client.post(
         f"/api/invites/{invite_b.id}/revoke",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
     missing = client.post(
         "/api/invites/missing-invite/revoke",
-        headers={"X-Membership-Id": organizer_a.id},
+        headers=_account_headers(client, api_session, organizer_a),
     )
 
     assert participant.status_code == 403

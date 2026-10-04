@@ -8,7 +8,7 @@ test("phase 5 TripAppState delegates request identity ownership to session-runti
   const source = await readFile(tripAppStateUrl, "utf8");
 
   assert.match(source, /import \{ createSessionRuntime, SESSION_RUNTIME_CODES \} from '\.\.\/\.\.\/\.\.\/shared\/session-runtime\/index\.js'/);
-  assert.match(source, /const \[sessionRuntime\] = useState\(\(\) => createSessionRuntime\(\{\s*emitCompatibilityMembershipHeader: DEV_ALLOW_MEMBERSHIP_HEADER,\s*\}\)\)/s);
+  assert.match(source, /const \[sessionRuntime\] = useState\(\(\) => createSessionRuntime\(\)\)/);
   assert.match(source, /const identityHeadersFor = useCallback\(scope => \{\s*const identity = sessionRuntime\.requestIdentityFor\(scope, technicalSessionFacts\)/s);
   assert.match(source, /const sessionRequestJson = useCallback\(async \(scope, path, options = \{\}\) => \{/);
   assert.match(source, /\.\.\.identityHeadersFor\(scope\),/);
@@ -19,7 +19,7 @@ test("phase 5 TripAppState delegates request identity ownership to session-runti
 test("phase 5 scope mapping keeps trip summaries and createTrip on account scope while workspace fetches remain trip scoped", async () => {
   const source = await readFile(tripAppStateUrl, "utf8");
 
-  assert.match(source, /const raw = await accountRequestJson\('\/api\/trips'\)/);
+  assert.match(source, /const raw = await accountRequestJson\(`\/api\/trips\$\{priorityQuery\}`\)/);
   assert.match(source, /const created = await accountRequestJson\('\/api\/trips', \{/);
   assert.match(source, /const raw = await requestJson\(`\/api\/trips\/\$\{activeTripId\}`\)/);
   assert.match(source, /const raw = await requestJson\('\/api\/me'\)/);

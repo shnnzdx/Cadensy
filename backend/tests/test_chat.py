@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.api import main as api
 from app.agents import base
-from app.db.models import ChangeProposal, DecisionRound, PlanItem
+from app.db.models import ChangeProposal, DecisionRound, PlanItem, TripMembership, User
+from app.domain import auth
 
 
 @contextmanager
@@ -23,8 +24,24 @@ def _client(db: Session):
         api.app.dependency_overrides.clear()
 
 
-def _headers(membership_id: str) -> dict:
-    return {"X-Membership-Id": membership_id}
+def _account_headers(
+    client: TestClient, db: Session, membership: TripMembership, trip_id: str
+) -> dict[str, str]:
+    """Authenticate this HTTP fixture through the public account-bearer flow."""
+    user = db.get(User, membership.user_id)
+    assert user is not None
+    user.email = f"chat-{membership.id}@example.test"
+    user.password_hash = auth.hash_password("correct-horse")
+    db.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": user.email, "password": "correct-horse"},
+    )
+    assert login.status_code == 200
+    return {
+        "Authorization": f"Bearer {login.json()['token']}",
+        "X-Trip-Id": trip_id,
+    }
 
 
 def _snapshot(db: Session, model) -> list[tuple]:
@@ -42,6 +59,23 @@ def _stable(value):
     if isinstance(value, (dict, list)):
         return repr(value)
     return value
+
+
+def test_chat_rejects_raw_membership_header_as_an_explicit_security_negative(
+    monkeypatch, db: Session, full_trip: dict
+):
+    calls: list[dict] = []
+    monkeypatch.setattr(base, "call_agent", lambda **kwargs: calls.append(kwargs))
+
+    with _client(db) as client:
+        response = client.post(
+            f"/api/trips/{full_trip['trip'].id}/chat",
+            headers={"X-Membership-Id": full_trip["me"].id},
+            json={"message": "Move this to 3 PM", "item_id": full_trip["art"].id},
+        )
+
+    assert response.status_code == 401
+    assert calls == []
 
 
 def test_chat_mock_flow_returns_reply_change_and_verdict(monkeypatch, db: Session, full_trip: dict):
@@ -72,7 +106,7 @@ def test_chat_mock_flow_returns_reply_change_and_verdict(monkeypatch, db: Sessio
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Move this to 3:30 PM",
                 "item_id": full_trip["art"].id,
@@ -168,7 +202,7 @@ def test_chat_resolves_delegated_downtown_cafe_replacement_from_history(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "随便",
                 "item_id": lula.id,
@@ -215,7 +249,7 @@ def test_chat_does_not_choose_random_place_without_a_preference(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Replace this",
                 "item_id": full_trip["art"].id,
@@ -261,7 +295,7 @@ def test_chat_is_read_only(monkeypatch, db: Session, full_trip: dict):
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Move this to 3:30 PM",
                 "item_id": full_trip["art"].id,
@@ -295,7 +329,7 @@ def test_chat_asks_when_it_cannot_identify_the_item(monkeypatch, db: Session, fu
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={"message": "I want to go shopping on Tuesday afternoon"},
         )
 
@@ -338,7 +372,7 @@ def test_chat_prompt_does_not_include_identity_or_private_wording(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Move Art Institute to 8 AM",
                 "item_id": full_trip["art"].id,
@@ -363,7 +397,7 @@ def test_chat_degrades_when_deepseek_is_unavailable_and_classify_still_works(
     with _client(db) as client:
         chat_response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Move this to 3:30 PM",
                 "item_id": full_trip["art"].id,
@@ -371,7 +405,7 @@ def test_chat_degrades_when_deepseek_is_unavailable_and_classify_still_works(
         )
         classify_response = client.post(
             f"/api/plans/items/{full_trip['art'].id}/classify",
-            headers=_headers(full_trip["me"].id),
+                headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={"start_hour": 15.5, "request": "Move this to 3:30 PM"},
         )
 
@@ -402,7 +436,7 @@ def test_chat_selecting_previous_candidate_is_read_only(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Option 2.",
                 "history": [
@@ -460,7 +494,7 @@ def test_chat_bare_number_selects_previous_candidate_without_running_agent(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "2",
                 "history": [
@@ -514,7 +548,7 @@ def test_chat_stale_selected_item_fails_safely_without_a_404(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "Move this one later",
                 "item_id": "missing-item-id",
@@ -559,7 +593,7 @@ def test_chat_selected_item_relative_time_request_uses_selected_item(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+            headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "move to 4pm",
                 "item_id": full_trip["art"].id,
@@ -598,7 +632,7 @@ def test_chat_change_time_clarification_response_is_plain_text(
     with _client(db) as client:
         response = client.post(
             f"/api/trips/{full_trip['trip'].id}/chat",
-            headers=_headers(full_trip["me"].id),
+                headers=_account_headers(client, db, full_trip["me"], full_trip["trip"].id),
             json={
                 "message": "change time",
                 "item_id": grand_park.id,

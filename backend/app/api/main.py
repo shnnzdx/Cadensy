@@ -3,8 +3,8 @@
 This layer is intentionally thin: it accepts parameters, calls domain code, and converts results to JSON.
 All rules live in domain/; business decisions should not live here.
 
-Authentication uses bearer tokens from email/password login. Local development may temporarily keep
-X-Membership-Id when DEV_ALLOW_MEMBERSHIP_HEADER=1."""
+Authentication uses verified bearer credentials. ``X-Membership-Id`` is an
+object selector only and is never accepted as authentication."""
 
 from __future__ import annotations
 
@@ -52,6 +52,7 @@ DEFAULT_CORS_ORIGINS = (
     "http://127.0.0.1:5173",
     "http://localhost:3000",
 )
+PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod"})
 
 
 def parse_cors_origins(raw: str | None = None) -> list[str]:
@@ -63,6 +64,7 @@ def parse_cors_origins(raw: str | None = None) -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """The settlement scheduler starts with the backend, so no separate process is required."""
+    _validate_auth_configuration()
     from ..jobs import scheduler
 
     task = None
@@ -98,28 +100,37 @@ def current_membership(
     db: Session = Depends(get_session),
     authorization: str | None = Header(default=None),
     x_trip_id: str | None = Header(default=None),
-    x_membership_id: str | None = Header(default=None),
 ) -> TripMembership:
     """Authenticated trip identity.
 
-    Real login uses a bearer token for the account, then X-Trip-Id chooses the
-    membership for this trip. The old membership header is kept behind a local
-    dev flag so two-window demos can still switch roles quickly.
+    Account bearer credentials select an account, then ``X-Trip-Id`` selects
+    that account's membership for the requested trip. Guest bearer support is
+    added by PR-01B's bounded credential path. A membership ID is never a
+    credential and therefore cannot select an identity on its own.
     """
     token = _bearer_token(authorization)
     if token:
+        # Resolve an account session first.  A Guest token has a recognizable
+        # prefix for routing/readability, but a randomly generated account
+        # token could theoretically share that prefix; a valid account bearer
+        # must never be reclassified as Guest solely by its spelling.
         try:
             user = auth_service.user_for_token(db, token)
+        except auth_service.AuthRequired as account_error:
+            if not auth_service.is_guest_token(token):
+                raise HTTPException(401, str(account_error)) from account_error
+            try:
+                membership = auth_service.membership_for_guest_token(db, token)
+            except auth_service.AuthRequired as exc:
+                raise HTTPException(401, str(exc)) from exc
+            if x_trip_id and x_trip_id != membership.trip_id:
+                raise HTTPException(403, "This identity belongs to a different trip")
+            return membership
+
+        try:
             return auth_service.membership_for_trip(db, user, x_trip_id)
-        except auth_service.AuthRequired as exc:
-            raise HTTPException(401, str(exc)) from exc
         except auth_service.TripMembershipRequired as exc:
             raise HTTPException(403, str(exc)) from exc
-
-    if os.getenv("DEV_ALLOW_MEMBERSHIP_HEADER", "1") == "1" and x_membership_id:
-        membership = db.get(TripMembership, x_membership_id)
-        if membership is not None:
-            return membership
 
     raise HTTPException(401, "Login required")
 
@@ -127,7 +138,6 @@ def current_membership(
 def current_account_user(
     db: Session = Depends(get_session),
     authorization: str | None = Header(default=None),
-    x_membership_id: str | None = Header(default=None),
 ) -> User:
     """Account identity for cross-trip reads and creating the first trip.
 
@@ -139,18 +149,24 @@ def current_account_user(
         try:
             return auth_service.user_for_token(db, token)
         except auth_service.AuthRequired as exc:
+            # A Guest bearer is deliberately not an account credential.  Do
+            # not inspect browser metadata or header fallbacks after this
+            # failure; that would reintroduce the former authorization bypass.
+            if auth_service.is_guest_token(token):
+                raise HTTPException(401, "Account authentication required") from exc
             raise HTTPException(401, str(exc)) from exc
 
-    if os.getenv("DEV_ALLOW_MEMBERSHIP_HEADER", "1") == "1" and x_membership_id:
-        membership = db.get(TripMembership, x_membership_id)
-        if membership is not None and membership.user_id:
-            user = db.get(User, membership.user_id)
-            if user is not None:
-                return user
-        if membership is not None:
-            raise HTTPException(403, "Guests do not have an account")
-
     raise HTTPException(401, "Login required")
+
+
+def _validate_auth_configuration() -> None:
+    """Fail closed when a production deployment requests retired header auth."""
+    environment = os.getenv("APP_ENV", "development").strip().lower()
+    legacy_header = os.getenv("DEV_ALLOW_MEMBERSHIP_HEADER", "0").strip().lower()
+    if environment in PRODUCTION_ENVIRONMENTS and legacy_header in {"1", "true", "yes", "on"}:
+        raise RuntimeError(
+            "DEV_ALLOW_MEMBERSHIP_HEADER is retired and must not be enabled in production."
+        )
 
 
 def _bearer_token(authorization: str | None) -> str | None:
@@ -586,7 +602,13 @@ def logout(
 ) -> dict:
     token = _bearer_token(authorization)
     if token:
-        auth_service.revoke_token(db, token)
+        try:
+            auth_service.user_for_token(db, token)
+        except auth_service.AuthRequired:
+            if auth_service.is_guest_token(token):
+                auth_service.revoke_guest_token(db, token)
+        else:
+            auth_service.revoke_token(db, token)
         db.commit()
     return {"ok": True}
 
@@ -608,8 +630,8 @@ def get_me(
 ) -> dict:
     """Who am I. The frontend currentUser comes from here instead of being hard-coded.
 
-    Role belongs to membership, so changing X-Membership-Id is equivalent to logging in as another
-    member and the UI follows that perspective."""
+    Role belongs to the server-verified membership, not a client supplied
+    membership identifier."""
     return trip_service.describe_me(db, me)
 
 
@@ -1153,11 +1175,15 @@ def join_invite(
     except trip_service.InviteNotFound as exc:
         raise HTTPException(404, "Invite not found") from exc
     db.commit()
-    return {
+    response = {
         "membership_id": joined.membership.id,
         "trip_id": joined.trip_id,
         "role": "participant",
     }
+    if joined.guest_session is not None:
+        response["guest_token"] = joined.guest_session.token
+        response["guest_expires_at"] = joined.guest_session.session.expires_at.isoformat()
+    return response
 
 
 @app.post("/api/invites/{invite_id}/revoke")
@@ -1175,6 +1201,29 @@ def revoke_invite(
         raise HTTPException(404, "Invite not found") from exc
     db.commit()
     return {"revoked": True}
+
+
+@app.delete("/api/trips/{trip_id}/members/{membership_id}")
+def remove_membership(
+    trip_id: str,
+    membership_id: str,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        trip_service.remove_membership(
+            db,
+            trip_id=trip_id,
+            organizer=me,
+            membership_id=membership_id,
+        )
+    except trip_service.OrganizerRequired as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except trip_service.MembershipRemovalDenied as exc:
+        raise HTTPException(404, str(exc)) from exc
+    db.commit()
+    return {"removed": True}
 
 
 @app.post("/api/trips/{trip_id}/plans/generate")
@@ -1504,7 +1553,8 @@ def list_members(
 
 class DeadlockRequest(BaseModel):
     # Organizer exits never accept the blocked proposal for another traveler.
-    action: str = Field(pattern="^(keep|split|remove|clear)$")
+    # `remove` is retained only as the internal legacy audit origin of `clear`.
+    action: str = Field(pattern="^(keep|split|clear)$")
 
 
 def _organizer_error(exc: Exception) -> HTTPException:

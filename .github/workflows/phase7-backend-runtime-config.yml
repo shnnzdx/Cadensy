@@ -83,7 +83,7 @@ jobs:
                   { "name": "APP_ENV", "value": "production" },
                   { "name": "DISABLE_SCHEDULER", "value": "1" },
                   { "name": "MOCK_AI", "value": "1" },
-                  { "name": "DEV_ALLOW_MEMBERSHIP_HEADER", "value": "1" },
+                  { "name": "DEV_ALLOW_MEMBERSHIP_HEADER", "value": "0" },
                   { "name": "FRONTEND_BASE_URL", "value": "${FRONTEND_BASE_URL}" },
                   { "name": "CORS_ORIGINS", "value": "${CORS_ORIGINS}" }
                 ],

@@ -56,18 +56,18 @@ test("phase 4 bootstrap preserves token-only account session semantics without e
   });
 });
 
-test("phase 4 bootstrap preserves guest membership restoration when compatibility headers are enabled", () => {
+test("phase 4 bootstrap restores a bounded Guest session without exposing its token", () => {
   const bootstrap = restoreTripAppBootstrapState({
     sessionRuntime: createStubRuntime({
       facts: {
         kind: "guest",
+        guestAuth: true,
         activeTripId: "trip-guest",
         membershipId: "member-guest",
       },
       restorationHint: { tripId: "trip-guest" },
       authorization: null,
     }),
-    devAllowMembershipHeader: true,
   });
 
   assert.deepEqual(bootstrap, {
@@ -78,7 +78,7 @@ test("phase 4 bootstrap preserves guest membership restoration when compatibilit
   });
 });
 
-test("phase 4 bootstrap preserves account trip restoration without surfacing membership compatibility when disabled", () => {
+test("phase 4 bootstrap preserves account trip restoration", () => {
   const bootstrap = restoreTripAppBootstrapState({
     sessionRuntime: createStubRuntime({
       facts: {
@@ -90,34 +90,30 @@ test("phase 4 bootstrap preserves account trip restoration without surfacing mem
       restorationHint: { tripId: "trip-account" },
       authorization: null,
     }),
-    devAllowMembershipHeader: false,
   });
 
   assert.deepEqual(bootstrap, {
     hasAccountSession: true,
-    membershipId: "",
+    membershipId: "member-account",
     restoredTripId: "trip-account",
     activeTripId: "trip-account",
   });
 });
 
-test("phase 4 bootstrap preserves malformed-or-unavailable restore fallback semantics through shared session-runtime output", () => {
+test("phase 4 bootstrap never restores legacy environment Membership IDs", () => {
   const bootstrap = restoreTripAppBootstrapState({
     sessionRuntime: createStubRuntime({
       facts: { kind: "none" },
       restorationHint: null,
       authorization: null,
     }),
-    devAllowMembershipHeader: true,
-    defaultMembershipId: "member-dev",
-    defaultTripId: "trip-dev",
   });
 
   assert.deepEqual(bootstrap, {
     hasAccountSession: false,
-    membershipId: "member-dev",
-    restoredTripId: "trip-dev",
-    activeTripId: "trip-dev",
+    membershipId: "",
+    restoredTripId: "",
+    activeTripId: "",
   });
 });
 
@@ -133,7 +129,6 @@ test("phase 4 bootstrap keeps restorationHint tripId distinct from active techni
       restorationHint: { tripId: "trip-restored" },
       authorization: null,
     }),
-    devAllowMembershipHeader: true,
   });
 
   assert.equal(bootstrap.hasAccountSession, true);

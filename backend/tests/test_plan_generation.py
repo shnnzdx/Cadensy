@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.agents import base, planner
 from app.api import main as api
 from app.db.models import MemberConstraint, Plan, PlanChange, PlanItem, Trip, TripMembership, User
+from app.domain import auth
 from app.domain.constraints.engine import violates
 from app.domain.constraints.types import (
     Constraint,
@@ -49,6 +50,25 @@ def client(api_session: Session):
     with TestClient(api.app) as test_client:
         yield test_client
     api.app.dependency_overrides.clear()
+
+
+def _account_headers(
+    client: TestClient, db: Session, membership: TripMembership
+) -> dict[str, str]:
+    """Authenticate an HTTP fixture through the public account-bearer flow."""
+    user = db.get(User, membership.user_id)
+    assert user is not None
+    user.password_hash = auth.hash_password("correct-horse")
+    db.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": user.email, "password": "correct-horse"},
+    )
+    assert login.status_code == 200
+    return {
+        "Authorization": f"Bearer {login.json()['token']}",
+        "X-Trip-Id": membership.trip_id,
+    }
 
 
 def _make_trip(
@@ -485,7 +505,7 @@ def test_organizer_must_submit_preferences_before_generation(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 422
@@ -518,7 +538,7 @@ def test_existing_items_block_regeneration_without_changing_them(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 409
@@ -888,7 +908,7 @@ def test_planner_exception_falls_back_to_rules(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 200
@@ -909,7 +929,7 @@ def test_mocked_planner_path_still_uses_rules_generation_by_default(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 200
@@ -1082,7 +1102,7 @@ def test_all_planner_api_response_reports_structured_notes_even_when_used_ai_is_
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 200
@@ -1124,7 +1144,7 @@ def test_mixed_generation_response_reports_structured_notes_and_used_ai_false(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 200
@@ -1166,7 +1186,7 @@ def test_mixed_generation_response_reports_used_ai_when_real_ai_day_persists(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 200
@@ -1307,7 +1327,7 @@ def test_blocked_api_response_currently_reports_rules_and_writes_no_items(
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["organizer"].id},
+        headers=_account_headers(client, api_session, setup["organizer"]),
     )
 
     assert response.status_code == 200
@@ -1345,7 +1365,7 @@ def test_non_organizer_cannot_generate_plan(client: TestClient, api_session: Ses
 
     response = client.post(
         f"/api/trips/{setup['trip'].id}/plans/generate",
-        headers={"X-Membership-Id": setup["participant"].id},
+        headers=_account_headers(client, api_session, setup["participant"]),
     )
 
     assert response.status_code == 403

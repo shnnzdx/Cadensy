@@ -74,7 +74,7 @@ test("phase 1 current malformed or partial storage remains a technical-session c
 test("phase 1 current request identity behavior keeps scope selection in TripAppState while delegating ready-to-apply identity headers to session-runtime", async () => {
   const { tripAppState } = await loadSources();
 
-  assert.match(tripAppState, /const \[sessionRuntime\] = useState\(\(\) => createSessionRuntime\(\{/);
+  assert.match(tripAppState, /const \[sessionRuntime\] = useState\(\(\) => createSessionRuntime\(\)\)/);
   assert.match(tripAppState, /const identityHeadersFor = useCallback\(scope => \{\s*const identity = sessionRuntime\.requestIdentityFor\(scope, technicalSessionFacts\)/s);
   assert.match(tripAppState, /const accountRequestJson = useCallback\(async \(path, options = \{\}\) => \{\s*return sessionRequestJson\('account', path, options\)/s);
   assert.match(tripAppState, /const requestJson = useCallback\(async \(path, options = \{\}\) => \{\s*return sessionRequestJson\('trip', path, options\)/s);
@@ -83,15 +83,14 @@ test("phase 1 current request identity behavior keeps scope selection in TripApp
   assert.doesNotMatch(tripAppState, /\.\.\.\(DEV_ALLOW_MEMBERSHIP_HEADER && membershipId \? \{ 'X-Membership-Id': membershipId \} : \{\}\),/);
 });
 
-test("phase 1 current invite adoption cache is token-scoped, written during adoption, and reread on invite reopen", async () => {
+test("phase 1 invite adoption cache remains a routing hint and cannot restore Guest credentials", async () => {
   const { finalApp, tripAppState } = await loadSources();
 
   assert.match(tripAppState, /const \{ record \} = sessionRuntime\.readInviteAdoption\(token\)/);
-  assert.match(tripAppState, /sessionRuntime\.adoptTechnicalTripContext\(\{\s*membershipId: nextMembershipId,\s*activeTripId: nextTripId,/s);
+  assert.match(tripAppState, /sessionRuntime\.adoptGuestAuth\(\{\s*token: guestToken,\s*membershipId: nextMembershipId,\s*activeTripId: nextTripId,/s);
   assert.match(finalApp, /const savedInviteSession = useMemo\(\(\) => app\.readInviteAdoption\(token\), \[app, token\]\)/);
-  assert.match(finalApp, /savedInviteSession\?\.membershipId/);
   assert.match(finalApp, /savedInviteSession\?\.tripId/);
-  assert.match(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: savedInviteSession\.membershipId,\s*tripId: savedInviteSession\.tripId,\s*inviteToken: token,/s);
+  assert.doesNotMatch(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: savedInviteSession\.membershipId/);
 });
 
 test("phase 1 current createTrip and invite join both adopt technical trip context through shared session-runtime adoption", async () => {
@@ -99,7 +98,7 @@ test("phase 1 current createTrip and invite join both adopt technical trip conte
 
   assert.match(tripAppState, /if \(created\.membership_id\) \{\s*adoptTechnicalTripContext\(\{\s*membershipId: created\.membership_id,\s*tripId: created\.id,\s*profile:/s);
   assert.match(finalApp, /const joined = await app\.joinInvite\(token, \{/);
-  assert.match(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,\s*inviteToken: token,/s);
+  assert.match(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,\s*\.\.\.\(!withAccount \? \{ guestToken: joined\.guest_token \} : \{\}\),/s);
 });
 
 test("phase 1 current logout delegates technical-session clear to session-runtime, preserves invite adoption caches, and keeps outer reset/navigation in TripAppState", async () => {
@@ -107,7 +106,7 @@ test("phase 1 current logout delegates technical-session clear to session-runtim
 
   assert.match(tripAppState, /sessionRuntime\.logoutTechnicalSession\(technicalSessionFacts, \{/);
   assert.match(tripAppState, /revoke: async \(\) => publicRequestJson\('\/api\/auth\/logout', \{/);
-  assert.match(tripAppState, /headers: identityHeadersFor\('account'\),/);
+  assert.match(tripAppState, /headers: identityHeadersFor\(technicalSessionFacts\.kind === 'guest' \? 'trip' : 'account'\),/);
   assert.doesNotMatch(tripAppState, /readInviteAdoption\(.*removeItem/i);
   assert.match(tripAppState, /setHasAccountSession\(false\)/);
   assert.match(tripAppState, /setCurrentUser\(null\)/);
