@@ -34,6 +34,10 @@ AI suggestions are grounded in the current trip state, saved preferences, valida
 
 Cadensy uses provider-backed place results and cached venue records so planning can work with real candidates instead of fictional attractions. The cache improves repeat lookups while still allowing fresh destination coverage when the existing place library is not enough.
 
+## Replacement Suggestions
+
+When the assistant proposes replacing a venue, candidates should come from validated backend place results rather than free-form model imagination. This keeps replacement suggestions tied to the trip destination, current plan context, and real venue identities.
+
 ## Planner Role
 
 The planner turns trip facts, member preferences, and real place candidates into a starting itinerary that the group can inspect and refine. Its job is to create a usable shared plan, not to make every later decision on behalf of the travelers.
