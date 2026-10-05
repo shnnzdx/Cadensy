@@ -93,7 +93,11 @@ jobs:
         working-directory: backend
         run: |
           mkdir -p "$(dirname "$LEGACY_JUNIT_XML")"
-          python -m pytest -q --ignore=tests/test_pydantic_ai_poc.py --junitxml="$LEGACY_JUNIT_XML"
+          python -m pytest -q \
+            --ignore=tests/test_pydantic_ai_poc.py \
+            --ignore=tests/test_provider_smoke_harness.py \
+            --ignore=tests/test_live_provider_smoke_adapter.py \
+            --junitxml="$LEGACY_JUNIT_XML"
 
       - name: Validate Legacy JUnit skip contract
         working-directory: backend
@@ -137,7 +141,9 @@ jobs:
           summary = json.loads(summary_path.read_text(encoding="utf-8"))
           approved_dataset_hash = "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f"
           computed_dataset_hash = hashlib.sha256(
-              Path("evals/datasets/chat_change_preview_v1.json").read_bytes()
+              Path("evals/datasets/chat_change_preview_v1.json")
+              .read_bytes()
+              .replace(b"\r\n", b"\n")
           ).hexdigest()
           assert computed_dataset_hash == approved_dataset_hash
           assert computed_dataset_hash == manifest["dataset_hash"]
@@ -274,7 +280,12 @@ jobs:
 
       - name: Run isolated Fake compatibility contracts
         working-directory: backend
-        run: python -m pytest -q tests/test_pydantic_ai_poc.py tests/test_evaluation_foundation.py
+        run: >-
+          python -m pytest -q
+          tests/test_pydantic_ai_poc.py
+          tests/test_provider_smoke_harness.py
+          tests/test_live_provider_smoke_adapter.py
+          tests/test_evaluation_foundation.py
 
   frontend-regression:
     name: Frontend — Regression and Builds

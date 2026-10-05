@@ -211,3 +211,30 @@ def test_runner_cli_uses_only_test_database_url_and_cleans_only_synthetic_rows(
             if row is not None:
                 cleanup_db.delete(row)
                 cleanup_db.commit()
+
+
+def test_runner_cli_refuses_to_overwrite_the_archived_baseline_without_an_output_path(
+    test_engine,
+):
+    """A direct CLI invocation must not default to the checked-in V1 report."""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATABASE_URL": test_engine.url.render_as_string(hide_password=False),
+            "DISABLE_SCHEDULER": "1",
+            "MOCK_AI": "1",
+            "GEOAPIFY_API_KEY": "",
+            "DEEPSEEK_API_KEY": "",
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "evals.runner"],
+        cwd=EVAL_ROOT.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "--output" in completed.stderr
