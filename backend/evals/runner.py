@@ -424,7 +424,7 @@ def _manifest(dataset: dict[str, Any]) -> dict[str, Any]:
         "runtime": {"name": RUNTIME_VERSION, "version": "source", "provider_mode": "fake"},
         "git_commit": _git_commit(),
         "dataset_version": dataset["dataset_version"],
-        "dataset_hash": hashlib.sha256(DATASET_PATH.read_bytes()).hexdigest(),
+        "dataset_hash": _canonical_dataset_sha256(),
         "dependency_configuration": _dependency_configuration(),
         "model_configuration": {"provider": "fake", "model": None, "thinking_mode": None},
         "prompt_version": dataset["prompt_version"],
@@ -436,6 +436,16 @@ def _manifest(dataset: dict[str, Any]) -> dict[str, Any]:
             "tool_timeout_seconds": chat_service.CHAT_AGENT_TOOL_TIMEOUT_SECONDS,
         },
     }
+
+
+def _canonical_dataset_sha256() -> str:
+    """Hash frozen dataset content independent of Git checkout line endings.
+
+    The approved V1 hash is the canonical LF Git-object content hash.  A
+    Windows CRLF checkout must not look like a new Golden Dataset version.
+    """
+    canonical_bytes = DATASET_PATH.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(canonical_bytes).hexdigest()
 
 
 def _dependency_configuration() -> dict[str, str]:
@@ -496,8 +506,11 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=EVAL_ROOT / "reports" / "legacy_baseline_v1",
-        help="Directory receiving manifest.json, summary.json, and cases.jsonl",
+        required=True,
+        help=(
+            "Explicit non-archived directory receiving manifest.json, summary.json, "
+            "and cases.jsonl"
+        ),
     )
     args = parser.parse_args()
     database_url = os.getenv("TEST_DATABASE_URL")

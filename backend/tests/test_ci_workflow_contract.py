@@ -52,7 +52,10 @@ def test_checked_in_v1_dataset_still_has_the_approved_frozen_hash():
         REPOSITORY_ROOT / "backend" / "evals" / "datasets" / "chat_change_preview_v1.json"
     )
 
-    assert hashlib.sha256(dataset_path.read_bytes()).hexdigest() == (
+    # The approved V1 value identifies canonical Git content.  Windows may
+    # check this text file out with CRLF, which is not a Dataset version bump.
+    canonical_bytes = dataset_path.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(canonical_bytes).hexdigest() == (
         APPROVED_CHAT_CHANGE_PREVIEW_V1_HASH
     )
 
@@ -69,7 +72,7 @@ def test_legacy_artifact_validation_requires_standalone_runner_isolation_evidenc
     assert '"worker_session_is_independent": True' in validation["run"]
 
 
-def test_legacy_job_excludes_only_the_pydantic_poc_and_proves_no_collected_skips():
+def test_legacy_job_excludes_all_pydantic_modules_and_proves_no_collected_skips():
     steps = _legacy_steps()
     regression = next(step for step in steps if step["name"] == "Run Legacy full regression")
     skip_contract = next(
@@ -77,6 +80,8 @@ def test_legacy_job_excludes_only_the_pydantic_poc_and_proves_no_collected_skips
     )
 
     assert "--ignore=tests/test_pydantic_ai_poc.py" in regression["run"]
+    assert "--ignore=tests/test_provider_smoke_harness.py" in regression["run"]
+    assert "--ignore=tests/test_live_provider_smoke_adapter.py" in regression["run"]
     assert "--junitxml" in regression["run"]
     assert 'findall(".//skipped")' in skip_contract["run"]
     assert "assert not skipped" in skip_contract["run"]
@@ -142,4 +147,6 @@ def test_pydantic_job_requires_the_installed_poc_and_executes_its_tests():
     assert "requirements-pydantic-ai-poc.lock.txt" in install["run"]
     assert "import pydantic_ai" in install["run"]
     assert "tests/test_pydantic_ai_poc.py" in test_step["run"]
+    assert "tests/test_provider_smoke_harness.py" in test_step["run"]
+    assert "tests/test_live_provider_smoke_adapter.py" in test_step["run"]
     assert "tests/test_evaluation_foundation.py" in test_step["run"]
