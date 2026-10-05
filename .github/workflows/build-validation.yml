@@ -95,6 +95,7 @@ jobs:
           mkdir -p "$(dirname "$LEGACY_JUNIT_XML")"
           python -m pytest -q \
             --ignore=tests/test_pydantic_ai_poc.py \
+            --ignore=tests/test_pydantic_runtime.py \
             --ignore=tests/test_provider_smoke_harness.py \
             --ignore=tests/test_live_provider_smoke_adapter.py \
             --junitxml="$LEGACY_JUNIT_XML"
@@ -283,6 +284,7 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_pydantic_ai_poc.py
+          tests/test_pydantic_runtime.py
           tests/test_provider_smoke_harness.py
           tests/test_live_provider_smoke_adapter.py
           tests/test_evaluation_foundation.py
