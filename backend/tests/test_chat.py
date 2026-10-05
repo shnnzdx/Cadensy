@@ -4,14 +4,30 @@ import re
 from contextlib import contextmanager
 from datetime import date, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api import main as api
-from app.agents import base
+from app.agents import base, legacy_runtime
 from app.db.models import ChangeProposal, DecisionRound, PlanItem, TripMembership, User
 from app.domain import auth
+
+
+@pytest.fixture(autouse=True)
+def _adapter_tool_surface_without_cross_transaction_fixture_reads(monkeypatch):
+    """Keep HTTP behavior fixtures out of an independent worker Session.
+
+    The route's request Session remains separate from the adapter worker. These
+    tests assert HTTP/application semantics with fake Agent responses; the
+    read-tool capability and worker Session lifecycle are covered in the
+    dedicated lifecycle suite.
+    """
+
+    monkeypatch.setattr(
+        legacy_runtime, "build_read_only_trip_tools", lambda *_args, **_kwargs: ()
+    )
 
 
 @contextmanager

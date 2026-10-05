@@ -33,6 +33,7 @@ from app.agents import execution
 from app.agents.execution import AgentExecutionConfig
 from app.agents.legacy_runtime import LegacyReadTripCapability
 from app.agents.pydantic_runtime import PydanticChatAgentRuntime
+from app.agents.runtime_factory import build_chat_runtime
 from app.agents.runtime_contract import (
     AgentClarification,
     AgentReplyOnly,
@@ -123,6 +124,29 @@ def _execution(*, request: float = 0.5, tool: float = 0.1) -> AgentExecutionConf
 
 def _runtime(model: object) -> PydanticChatAgentRuntime:
     return PydanticChatAgentRuntime(model=model, system_prompt="Synthetic system prompt.")
+
+
+def test_explicit_pydantic_selector_composes_only_an_injected_pydantic_runtime(monkeypatch):
+    monkeypatch.setenv("CHAT_AGENT_RUNTIME", "pydantic")
+    expected = _runtime(
+        FunctionModel(
+            lambda _messages, _info: ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "runtime_reply",
+                        {"output_kind": "reply_only", "reply": "Synthetic reply."},
+                    )
+                ]
+            )
+        )
+    )
+
+    runtime = build_chat_runtime(
+        system_prompt="Synthetic system prompt.",
+        pydantic_runtime_factory=lambda: expected,
+    )
+
+    assert runtime is expected
 
 
 @pytest.mark.parametrize(

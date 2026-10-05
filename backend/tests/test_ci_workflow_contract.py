@@ -149,6 +149,7 @@ def test_pydantic_job_requires_the_installed_poc_and_executes_its_tests():
     assert "import pydantic_ai" in install["run"]
     assert "tests/test_pydantic_ai_poc.py" in test_step["run"]
     assert "tests/test_pydantic_runtime.py" in test_step["run"]
+    assert "tests/test_runtime_composition.py" in test_step["run"]
     assert "tests/test_provider_smoke_harness.py" in test_step["run"]
     assert "tests/test_live_provider_smoke_adapter.py" in test_step["run"]
     assert "tests/test_evaluation_foundation.py" in test_step["run"]

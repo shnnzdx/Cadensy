@@ -413,25 +413,27 @@ def test_capacity_exhaustion_has_its_own_runtime_capacity_failure(monkeypatch):
     assert result.observation.failure.technical_kind == "AgentExecutionCapacityExceeded"
 
 
-def test_current_chat_service_does_not_use_the_new_legacy_adapter(
+def test_chat_service_uses_the_legacy_adapter_by_default(
     monkeypatch, db: Session, full_trip: dict
 ):
-    def adapter_must_not_run(*_args, **_kwargs):
-        raise AssertionError("PR-04A adapter must not be wired into Chat Service")
+    monkeypatch.delenv("CHAT_AGENT_RUNTIME", raising=False)
+    observed_requests = []
 
-    monkeypatch.setattr(LegacyChatAgentRuntime, "run", adapter_must_not_run)
-    monkeypatch.setattr(
-        base,
-        "call_agent",
-        lambda **_kwargs: base.AgentRunResult(
-            content="I can prepare that change.",
-            trace_id="current-path",
-            rounds=(),
-            tool_results=(),
-            total_tokens=0,
-            total_elapsed_ms=1.0,
-        ),
-    )
+    def legacy_run(_self, request, _capability, *, execution):
+        observed_requests.append((request, execution))
+        return RuntimeResult(
+            reply="I can prepare that change.",
+            outcome=AgentReplyOnly(),
+            candidate_options=(),
+            observation=RuntimeObservation(
+                trace_id="legacy-default",
+                round_count=1,
+                total_tokens=0,
+                total_elapsed_ms=1.0,
+            ),
+        )
+
+    monkeypatch.setattr(LegacyChatAgentRuntime, "run", legacy_run)
 
     result = chat_service.respond_to_trip_chat(
         db,
@@ -443,3 +445,5 @@ def test_current_chat_service_does_not_use_the_new_legacy_adapter(
     )
 
     assert result.reply == "I can prepare that change."
+    assert len(observed_requests) == 1
+    assert observed_requests[0][0].selected_item_ref == full_trip["art"].id

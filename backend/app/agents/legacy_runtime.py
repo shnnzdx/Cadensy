@@ -61,6 +61,7 @@ class LegacyReadTripCapability:
     _trip_id: str
     _actor_membership_id: str
     _session_factory: Callable[[], Session]
+    _legacy_tool_results: tuple[dict[str, Any], ...]
 
     def __init__(
         self,
@@ -72,6 +73,24 @@ class LegacyReadTripCapability:
         object.__setattr__(self, "_trip_id", trip_id)
         object.__setattr__(self, "_actor_membership_id", actor_membership_id)
         object.__setattr__(self, "_session_factory", session_factory)
+        object.__setattr__(self, "_legacy_tool_results", ())
+
+    @property
+    def _application_legacy_tool_results(self) -> tuple[dict[str, Any], ...]:
+        """Private evidence for legacy-only application revalidation.
+
+        Replacement previews require the raw, guard-filtered
+        ``find_replacement_place`` provenance.  That evidence is intentionally
+        not part of the framework-neutral Runtime contract because the Pydantic
+        adapter does not support replacement fields in PR-04B.
+        """
+
+        return self._legacy_tool_results
+
+    def _record_legacy_tool_results(
+        self, tool_results: tuple[dict[str, Any], ...]
+    ) -> None:
+        object.__setattr__(self, "_legacy_tool_results", tool_results)
 
     def run_with_read_only_tools(
         self,
@@ -161,6 +180,8 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
             legacy_result = run_agent_with_deadline(worker=worker, config=execution)
         except Exception as error:
             return _failure_result(error)
+        if isinstance(capability, LegacyReadTripCapability):
+            capability._record_legacy_tool_results(legacy_result.tool_results)
         return _map_legacy_result(legacy_result)
 
 
