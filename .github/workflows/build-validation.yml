@@ -97,6 +97,7 @@ jobs:
             --ignore=tests/test_pydantic_ai_poc.py \
             --ignore=tests/test_pydantic_runtime.py \
             --ignore=tests/test_symmetric_evaluation_harness.py \
+            --ignore=tests/test_formal_ab_runner.py \
             --ignore=tests/test_provider_smoke_harness.py \
             --ignore=tests/test_live_provider_smoke_adapter.py \
             --junitxml="$LEGACY_JUNIT_XML"
@@ -314,6 +315,7 @@ jobs:
           tests/test_pydantic_ai_poc.py
           tests/test_pydantic_runtime.py
           tests/test_symmetric_evaluation_harness.py
+          tests/test_formal_ab_runner.py
           tests/test_runtime_composition.py
           tests/test_provider_smoke_harness.py
           tests/test_live_provider_smoke_adapter.py
