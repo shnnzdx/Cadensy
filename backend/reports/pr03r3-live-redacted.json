@@ -1,0 +1,65 @@
+{
+  "actual_http_requests": 1,
+  "cases": {
+    "r3": {
+      "failure_classification": null,
+      "output_kind": "required_tool_choice_verified",
+      "suggested_action": null
+    }
+  },
+  "cost_estimates_usd": {
+    "off_peak_usd": 5.325e-05,
+    "peak_usd": 0.0001065
+  },
+  "durable_counts_unchanged": true,
+  "failure": null,
+  "ledger_stop_reason": null,
+  "provider_configuration": {
+    "base_url": "https://api.deepseek.com",
+    "max_reported_total_tokens": 500,
+    "max_requests": 1,
+    "max_tokens_per_request": 128,
+    "model": "deepseek-v4-flash",
+    "provider_timeout_seconds": 8.0,
+    "retries": 0,
+    "scenario": "r3_only_incremental",
+    "streaming": false
+  },
+  "provider_reported_usage": [
+    {
+      "completion_tokens": 18,
+      "prompt_tokens": 283,
+      "total_tokens": 301
+    }
+  ],
+  "r3_tool_invocations": [
+    [
+      "r3",
+      "compatibility_probe"
+    ]
+  ],
+  "redacted_wire_contracts": [
+    {
+      "has_native_json_schema_response_format": false,
+      "max_tokens": 128,
+      "method": "POST",
+      "model": "deepseek-v4-flash",
+      "path": "/chat/completions",
+      "reasoning_effort": "none",
+      "request_keys": [
+        "max_tokens",
+        "messages",
+        "model",
+        "reasoning_effort",
+        "stream",
+        "tool_choice",
+        "tools"
+      ],
+      "strict_values": [],
+      "tool_choice": "required",
+      "unexpected_openai_parameters": []
+    }
+  ],
+  "reported_total_tokens": 301,
+  "unfinished_late_tasks_at_close": 0
+}

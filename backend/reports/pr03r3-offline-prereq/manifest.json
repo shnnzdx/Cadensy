@@ -1,0 +1,50 @@
+{
+  "database_isolation": {
+    "backend": "postgresql",
+    "database": "test_pr03r3_smoke",
+    "host": "localhost",
+    "runtime_database_url_used": false,
+    "source": "TEST_DATABASE_URL"
+  },
+  "dataset_hash": "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f",
+  "dataset_version": "chat-change-preview-v1",
+  "deadline_contract": {
+    "provider_timeout_seconds": 20.0,
+    "request_timeout_seconds": 30.0,
+    "tool_timeout_seconds": 5.0
+  },
+  "dependency_configuration": {
+    "lockfile": "requirements-legacy-regression.lock.txt",
+    "lockfile_sha256": "80aba16954c839c293143b5ac3738806cd07aca082fd222bfc52d70571e7f761",
+    "python_version": "3.13.5"
+  },
+  "fixture_visibility": {
+    "classification_path": "notice",
+    "destination": "Synthetic City",
+    "member_count": 2,
+    "plan_item_titles": [
+      "Art Institute of Chicago",
+      "Birthday dinner"
+    ],
+    "tool_invocations": [
+      "get_current_plan",
+      "get_trip_facts",
+      "classify_change"
+    ],
+    "worker_session_is_independent": true
+  },
+  "git_commit": "8c9d12b681828bbe511b5d0bbc3b1f82a5b8e194",
+  "grader_version": "chat-golden-grader-v1",
+  "model_configuration": {
+    "model": null,
+    "provider": "fake",
+    "thinking_mode": null
+  },
+  "prompt_version": "chat-agent-system-v1",
+  "runtime": {
+    "name": "legacy_custom_runtime",
+    "provider_mode": "fake",
+    "version": "source"
+  },
+  "tool_contract_version": "read-only-trip-tools-v1"
+}

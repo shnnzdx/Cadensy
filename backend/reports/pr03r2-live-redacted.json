@@ -1,0 +1,62 @@
+{
+  "actual_http_requests": 4,
+  "cases": {
+    "r1": {
+      "failure_classification": null,
+      "output_kind": "clarification",
+      "suggested_action": null
+    },
+    "r2": {
+      "failure_classification": null,
+      "output_kind": "change_preview",
+      "suggested_action": {
+        "item_ref": "scoped_item",
+        "kind": "move_time",
+        "new_start_hour": 15.5
+      }
+    }
+  },
+  "cost_estimates_usd": {
+    "off_peak_usd": 0.0004161,
+    "peak_usd": 0.0008322
+  },
+  "failure": {
+    "normalized": "usage_limit",
+    "technical": "usage_budget_exceeded"
+  },
+  "fixture_cleanup_preserved_durable_counts": true,
+  "ledger_stop_reason": "reported_token_budget_exceeded",
+  "provider_configuration": {
+    "base_url": "https://api.deepseek.com",
+    "max_reported_total_tokens": 2000,
+    "max_requests": 4,
+    "max_tokens_per_request": 128,
+    "model": "deepseek-v4-flash",
+    "provider_timeout_seconds": 8.0,
+    "retries": 0,
+    "streaming": false
+  },
+  "provider_reported_usage": [
+    {
+      "completion_tokens": 76,
+      "prompt_tokens": 311,
+      "total_tokens": 387
+    },
+    {
+      "completion_tokens": 39,
+      "prompt_tokens": 619,
+      "total_tokens": 658
+    },
+    {
+      "completion_tokens": 81,
+      "prompt_tokens": 705,
+      "total_tokens": 786
+    },
+    {
+      "completion_tokens": 18,
+      "prompt_tokens": 283,
+      "total_tokens": 301
+    }
+  ],
+  "reported_total_tokens": 2132
+}
