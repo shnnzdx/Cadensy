@@ -400,7 +400,8 @@ def _synthetic_fixture(db: Session) -> Iterator[dict[str, Any]]:
             visibility="planning_only",
         )
         plan = Plan(trip_id=trip.id)
-        fixture_db.add_all([private_constraint, plan])
+        foreign_plan = Plan(trip_id=foreign_trip.id)
+        fixture_db.add_all([private_constraint, plan, foreign_plan])
         fixture_db.flush()
         art = PlanItem(
             plan_id=plan.id,
@@ -424,7 +425,17 @@ def _synthetic_fixture(db: Session) -> Iterator[dict[str, Any]]:
             settledness="booked",
             is_meal=True,
         )
-        fixture_db.add_all([art, dinner])
+        foreign_item = PlanItem(
+            plan_id=foreign_plan.id,
+            day_index=1,
+            day_date=date(2026, 8, 19),
+            start_hour=10.0,
+            duration_min=60,
+            title="Foreign Fixture Only",
+            place="Elsewhere",
+            settledness="loose",
+        )
+        fixture_db.add_all([art, dinner, foreign_item])
         fixture_db.flush()
         fixture_ids = {
             "users": (organizer_user.id, participant_user.id, foreign_user.id),
@@ -432,14 +443,15 @@ def _synthetic_fixture(db: Session) -> Iterator[dict[str, Any]]:
             "memberships": (organizer.id, participant.id, foreign_member.id),
             "constraints": (constraint.id,),
             "private_constraints": (private_constraint.constraint_id,),
-            "plans": (plan.id,),
-            "items": (art.id, dinner.id),
+            "plans": (plan.id, foreign_plan.id),
+            "items": (art.id, dinner.id, foreign_item.id),
         }
         fixture_db.commit()
         yield {
             "trip": trip,
             "items": {"art": art, "dinner": dinner},
             "item_keys": {art.id: "art", dinner.id: "dinner"},
+            "foreign": {"trip": foreign_trip, "item": foreign_item},
             "memberships": {
                 "organizer": organizer,
                 "participant": participant,

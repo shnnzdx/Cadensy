@@ -20,12 +20,16 @@ pytest.importorskip(
 
 from pydantic_ai import models
 
-from evals.runner import _synthetic_fixture, load_chat_change_preview_dataset
+from evals.graders import grade_ab_case, grade_case
+from evals.runner import (
+    _canonical_dataset_sha256,
+    _synthetic_fixture,
+    load_chat_change_preview_dataset,
+)
 from evals.symmetric_harness import (
     compile_neutral_scenario,
     run_single_symmetric_case,
 )
-from evals.graders import grade_case
 
 
 def _case(case_id: str) -> dict:
@@ -84,6 +88,46 @@ def test_explicit_preview_runs_both_real_orchestrators_and_actual_tools(db: Sess
     assert legacy.network_attempts == pydantic.network_attempts == 0
 
 
+def test_explicit_previews_bind_complete_execution_evidence_directly_to_ab_grader(db: Session):
+    case = _case("explicit-time-notice")
+    with _synthetic_fixture(db) as fixture:
+        observations = {
+            runtime_name: run_single_symmetric_case(
+                db, fixture=fixture, case=case, runtime_name=runtime_name
+            )
+            for runtime_name in ("legacy", "pydantic")
+        }
+
+    legacy = observations["legacy"]
+    pydantic = observations["pydantic"]
+    for observation in observations.values():
+        assert observation.output_kind == "change_preview"
+        assert observation.proposed_item_key == "art"
+        assert observation.decision_path == "notice"
+        assert observation.failure_taxonomy is None
+        assert observation.scope_enforced is True
+        assert observation.grounding.scoped_read_evidence is True
+        assert observation.grounding.suggested_item_grounded is True
+        assert observation.grounding.application_item_patch_validated is True
+        assert observation.grounding.authoritative_domain_classification_executed is True
+        assert observation.safety.durable_side_effects is False
+        assert observation.safety.private_data_leaked is False
+        assert observation.safety.cross_trip_exposed is False
+        assert observation.safety.agent_executed is True
+        assert observation.safety.unsupported_write_authority is False
+        assert observation.safety.false_application_claim is False
+        assert observation.safety.business_invariant_violated is False
+        assert observation.network_attempts == 0
+        assert observation.worker_session_is_independent is True
+
+    legacy_grade = grade_ab_case(case, legacy.as_grade_input())
+    pydantic_grade = grade_ab_case(case, pydantic.as_grade_input())
+    assert legacy_grade["business_pass"] is legacy_grade["safety_pass"] is True
+    assert legacy_grade["tool_contract_status"] == "superset"
+    assert pydantic_grade["business_pass"] is pydantic_grade["safety_pass"] is True
+    assert pydantic_grade["tool_contract_status"] == "alternate_authoritative"
+
+
 def test_provider_and_tool_failures_are_actual_events_not_prebuilt_agent_results(db: Session):
     with _synthetic_fixture(db) as fixture:
         for runtime_name in ("legacy", "pydantic"):
@@ -115,6 +159,11 @@ def test_provider_and_tool_failures_are_actual_events_not_prebuilt_agent_results
             assert tool.successful_tool_calls == ()
             assert tool.safe_degraded is True
             assert tool.network_attempts == 0
+            assert provider.failure_taxonomy == "provider_failure"
+            assert tool.failure_taxonomy == "tool_failure"
+            assert provider.safety.durable_side_effects is False
+            assert tool.safety.durable_side_effects is False
+            assert tool.as_grade_input()["attempted_tool_calls"][0]["outcome"] == "failure"
 
 
 def test_application_only_case_never_enters_either_runtime(db: Session):
@@ -135,6 +184,29 @@ def test_application_only_case_never_enters_either_runtime(db: Session):
         assert observation.output_kind == "clarification"
         assert observation.clarification_source == "deterministic_ambiguous_item"
         assert observation.network_attempts == 0
+        assert observation.scope_enforced is True
+        assert observation.safety.agent_executed is False
+        assert observation.safety.cross_trip_exposed is False
+
+
+def test_cross_trip_denial_records_scope_and_safety_evidence_before_runtime_execution(db: Session):
+    case = _case("cross-trip-denied")
+    with _synthetic_fixture(db) as fixture:
+        for runtime_name in ("legacy", "pydantic"):
+            observation = run_single_symmetric_case(
+                db, fixture=fixture, case=case, runtime_name=runtime_name
+            )
+            assert observation.runtime_executed is False
+            assert observation.output_kind == "access_denied"
+            assert observation.failure_taxonomy == "cross_trip_denied"
+            assert observation.scope_enforced is True
+            assert observation.safety.cross_trip_exposed is False
+            assert observation.safety.agent_executed is False
+            assert observation.safety.durable_side_effects is False
+            grade = grade_ab_case(case, observation.as_grade_input())
+            assert grade["business_pass"] is True
+            assert grade["safety_pass"] is True
+            assert grade["runtime_discriminating"] is False
 
 
 def test_expected_label_mutation_cannot_change_scenario_or_single_case_observation(db: Session):
@@ -156,6 +228,7 @@ def test_expected_label_mutation_cannot_change_scenario_or_single_case_observati
                 db, fixture=fixture, case=relabeled, runtime_name=runtime_name
             )
             assert original_observation == relabeled_observation
+            assert original_observation.as_grade_input() == relabeled_observation.as_grade_input()
 
 
 def test_other_deterministic_clarifications_have_structured_sources(db: Session):
@@ -241,6 +314,32 @@ def test_pydantic_model_request_guard_is_scoped_and_restored(db: Session, monkey
 
     assert observation.network_attempts == 0
     assert models.ALLOW_MODEL_REQUESTS is True
+
+
+def test_ab_conversion_and_grader_fail_closed_when_actual_evidence_is_removed(db: Session):
+    case = _case("explicit-time-notice")
+    with _synthetic_fixture(db) as fixture:
+        observation = run_single_symmetric_case(
+            db, fixture=fixture, case=case, runtime_name="pydantic"
+        )
+
+    missing_grounding = observation.as_grade_input()
+    missing_grounding["grounding"]["suggested_item_grounded"] = False
+    assert grade_ab_case(case, missing_grounding)["business_pass"] is False
+
+    missing_scope = observation.as_grade_input()
+    del missing_scope["scope_enforced"]
+    assert grade_ab_case(case, missing_scope)["business_pass"] is False
+
+    missing_privacy = observation.as_grade_input()
+    del missing_privacy["safety"]["private_data_leaked"]
+    assert grade_ab_case(case, missing_privacy)["safety_pass"] is False
+
+
+def test_symmetric_harness_preserves_frozen_dataset_hash():
+    assert _canonical_dataset_sha256() == (
+        "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f"
+    )
 
 
 def test_harness_never_patches_or_returns_from_base_call_agent():
