@@ -15,6 +15,7 @@ import sys
 import time
 from argparse import ArgumentParser
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterator
@@ -25,6 +26,8 @@ from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agents import base
+from app.agents.legacy_runtime import LegacyChatAgentRuntime
+from app.agents.runtime_contract import RuntimeFailure
 from app.db.models import (
     Base,
     ChangeProposal,
@@ -48,6 +51,19 @@ BACKEND_ROOT = EVAL_ROOT.parent
 DATASET_PATH = EVAL_ROOT / "datasets" / "chat_change_preview_v1.json"
 RUNTIME_VERSION = "legacy_custom_runtime"
 PRIVATE_FIXTURE_PHRASE = "sensitive fixture phrase"
+
+
+@dataclass
+class _ExecutionEvidence:
+    """Evaluation-only trace facts captured from an actual case execution."""
+
+    provider_prompts: list[str] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    clarification_source: str | None = None
+    safe_degradation: bool = False
+    access_denied: bool = False
+    provider_exception_observed: bool = False
+    runtime_failure: RuntimeFailure | None = None
 
 
 def load_chat_change_preview_dataset() -> dict[str, Any]:
@@ -105,20 +121,57 @@ def write_evaluation_report(report: dict[str, Any], *, output_dir: Path) -> dict
 def _run_legacy_case(
     db: Session, fixture: dict[str, Any], case: dict[str, Any]
 ) -> dict[str, Any]:
-    provider_prompts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
+    evidence = _ExecutionEvidence()
     started = time.perf_counter()
     before = _durable_counts(db)
-    failure_taxonomy: str | None = None
-    reply = ""
-    proposed_item_key = None
-    decision_path = None
-    output_kind = "reply_only"
-    provider = _fake_provider(case, fixture, provider_prompts, tool_calls)
+    provider = _fake_provider(case, fixture, evidence)
     item_key = case["input"].get("item_key")
     membership = fixture["memberships"][case["fixture_preconditions"]["actor"]]
+    result = None
+    original_runtime_run = LegacyChatAgentRuntime.run
+    original_degraded_reply = chat_service._degraded_reply
+    original_plain_clarification = chat_service._plain_text_clarification_reply
+    original_ambiguous_reply = chat_service._ambiguous_item_reference_reply
+    original_missing_reply = chat_service._missing_item_reference_reply
+    # Bind only this evaluation's worker factory to the caller-owned disposable
+    # engine. This remains an independent Session from ``db`` and avoids
+    # inheriting the process's unrelated runtime DATABASE_URL in CLI mode.
+    worker_session_factory = _independent_session_factory(db)
+
+    def record_runtime_result(runtime, *args, **kwargs):
+        runtime_result = original_runtime_run(runtime, *args, **kwargs)
+        evidence.runtime_failure = runtime_result.observation.failure
+        return runtime_result
+
+    def record_degraded_reply(*args, **kwargs):
+        evidence.safe_degradation = True
+        return original_degraded_reply(*args, **kwargs)
+
+    def record_plain_clarification(*args, **kwargs):
+        reply = original_plain_clarification(*args, **kwargs)
+        if reply is not None:
+            evidence.clarification_source = "deterministic_missing_slot"
+        return reply
+
+    def record_ambiguous_reply(*args, **kwargs):
+        evidence.clarification_source = "deterministic_ambiguous_item"
+        return original_ambiguous_reply(*args, **kwargs)
+
+    def record_missing_reply(*args, **kwargs):
+        evidence.clarification_source = "deterministic_missing_item"
+        return original_missing_reply(*args, **kwargs)
     try:
-        with patch.object(base, "call_agent", provider):
+        with (
+            patch.object(base, "call_agent", provider),
+            patch.object(LegacyChatAgentRuntime, "run", record_runtime_result),
+            patch.object(chat_service, "SessionLocal", worker_session_factory),
+            patch.object(chat_service, "_degraded_reply", record_degraded_reply),
+            patch.object(
+                chat_service, "_plain_text_clarification_reply", record_plain_clarification
+            ),
+            patch.object(chat_service, "_ambiguous_item_reference_reply", record_ambiguous_reply),
+            patch.object(chat_service, "_missing_item_reference_reply", record_missing_reply),
+        ):
             result = chat_service.respond_to_trip_chat(
                 db,
                 trip_id=fixture["trip"].id,
@@ -126,40 +179,20 @@ def _run_legacy_case(
                 message=case["input"]["message"],
                 item_id=(fixture["items"][item_key].id if item_key else None),
             )
-        reply = result.reply
-        if result.proposed_change is not None:
-            output_kind = "change_preview"
-            proposed_item_key = fixture["item_keys"].get(result.proposed_change.item_id)
-            decision_path = result.proposed_change.verdict.path.value
-        elif case["expected_business_outcome"].startswith("read_only_fallback"):
-            output_kind = "safe_degraded"
-            failure_taxonomy = case.get("expected_failure_taxonomy")
-        elif case["expected_business_outcome"].startswith("ask_for_"):
-            output_kind = "clarification"
-        else:
-            output_kind = "reply_only"
     except chat_service.ChatAccessDenied:
-        output_kind = "access_denied"
-        failure_taxonomy = "cross_trip_denied"
+        evidence.access_denied = True
 
-    observed = {
-        "output_kind": output_kind,
-        "reply": reply,
-        "proposed_item_key": proposed_item_key,
-        "decision_path": decision_path,
-        "tool_calls": tool_calls,
-        "provider_prompts": provider_prompts,
-        "failure_taxonomy": failure_taxonomy,
-        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-        # Fake provider results intentionally contain no metered usage. Null
-        # is more truthful than treating a fixture response as zero cost.
-        "token_usage": None,
-        "durable_side_effects": _durable_counts(db) != before,
-        "forbidden_values": [
+    observed = _extract_observed_result(
+        result=result,
+        evidence=evidence,
+        item_keys=fixture["item_keys"],
+        durable_side_effects=_durable_counts(db) != before,
+        forbidden_values=(
             PRIVATE_FIXTURE_PHRASE,
             *(membership.id for membership in fixture["memberships"].values()),
-        ],
-    }
+        ),
+        latency_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
     grader = grade_case(case, observed)
     return {
         "case_id": case["id"],
@@ -184,16 +217,16 @@ def _run_legacy_case(
 def _fake_provider(
     case: dict[str, Any],
     fixture: dict[str, Any],
-    provider_prompts: list[str],
-    tool_calls: list[dict[str, Any]],
+    evidence: _ExecutionEvidence,
 ):
     mode = case["fake_provider"]
 
     def call_agent(**kwargs: Any) -> base.AgentRunResult:
-        provider_prompts.append(str(kwargs.get("user") or ""))
+        evidence.provider_prompts.append(str(kwargs.get("user") or ""))
         if mode == "must_not_run":
             raise AssertionError(f"{case['id']} should finish before Agent execution")
         if mode == "raise_provider_failure":
+            evidence.provider_exception_observed = True
             raise RuntimeError("synthetic provider failure")
         if mode == "tool_failure":
             return base.AgentRunResult(
@@ -226,7 +259,7 @@ def _fake_provider(
             },
             "guard_rejected": False,
         }
-        tool_calls.append(
+        evidence.tool_calls.append(
             {
                 "name": "classify_change",
                 "arguments": {"item_id": item_key, "new_start_hour": start_hour},
@@ -242,6 +275,79 @@ def _fake_provider(
         )
 
     return call_agent
+
+
+def _extract_observed_result(
+    *,
+    result: Any,
+    evidence: _ExecutionEvidence,
+    item_keys: dict[str, str],
+    durable_side_effects: bool,
+    forbidden_values: tuple[str, ...],
+    latency_ms: float,
+) -> dict[str, Any]:
+    """Normalize only actual application/runtime behavior into observation.
+
+    The function deliberately receives no case or Golden label. This makes the
+    observer independent of business expectations; the grader alone compares
+    this observation to those expectations.
+    """
+
+    reply = result.reply if result is not None else ""
+    proposed = result.proposed_change if result is not None else None
+    visible_text = "\n".join(
+        [reply, *evidence.provider_prompts, json.dumps(evidence.tool_calls, sort_keys=True)]
+    )
+    private_data_leaked = any(value in visible_text for value in forbidden_values if value)
+    if evidence.access_denied:
+        output_kind = "access_denied"
+    elif proposed is not None:
+        output_kind = "change_preview"
+    elif evidence.safe_degradation:
+        output_kind = "safe_degraded"
+    elif evidence.clarification_source is not None:
+        output_kind = "clarification"
+    else:
+        output_kind = "reply_only"
+
+    return {
+        "output_kind": output_kind,
+        "reply": reply,
+        "proposed_item_key": item_keys.get(proposed.item_id) if proposed is not None else None,
+        "decision_path": proposed.verdict.path.value if proposed is not None else None,
+        "tool_calls": evidence.tool_calls,
+        "provider_prompts": evidence.provider_prompts,
+        "failure_taxonomy": _failure_taxonomy_from_execution(evidence),
+        "latency_ms": latency_ms,
+        # Fake provider results intentionally contain no metered usage. Null
+        # is more truthful than treating a fixture response as zero cost.
+        "token_usage": None,
+        "durable_side_effects": durable_side_effects,
+        "forbidden_values": list(forbidden_values),
+        "safety": {
+            "durable_side_effects": durable_side_effects,
+            "private_data_leaked": private_data_leaked,
+            "agent_executed": bool(evidence.provider_prompts),
+        },
+    }
+
+
+def _failure_taxonomy_from_execution(evidence: _ExecutionEvidence) -> str | None:
+    """Classify captured runtime/provider events, never a case expectation."""
+
+    if evidence.access_denied:
+        return "cross_trip_denied"
+    if evidence.provider_exception_observed:
+        return "provider_failure"
+    failure = evidence.runtime_failure
+    if failure is None:
+        return None
+    technical = failure.technical_kind.casefold()
+    if "tool" in technical or failure.normalized_kind == "tool_timeout":
+        return "tool_failure"
+    if "provider" in technical or failure.normalized_kind == "provider_timeout":
+        return "provider_failure"
+    return failure.normalized_kind
 
 
 @contextmanager
@@ -489,6 +595,7 @@ def _public_observation(observed: dict[str, Any]) -> dict[str, Any]:
             "tool_calls",
             "failure_taxonomy",
             "durable_side_effects",
+            "safety",
         )
     }
 

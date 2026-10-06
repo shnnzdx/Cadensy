@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -15,6 +17,8 @@ from app.agents.tools import build_read_only_trip_tools
 from app.db.models import User
 from evals.runner import (
     EVAL_ROOT,
+    _ExecutionEvidence,
+    _extract_observed_result,
     _independent_session_factory,
     _synthetic_fixture,
     load_chat_change_preview_dataset,
@@ -22,6 +26,7 @@ from evals.runner import (
     write_evaluation_report,
 )
 from evals.graders import grade_case
+from app.domain.chat.service import ChatResult
 
 
 def test_legacy_golden_dataset_runs_with_deterministic_graders_and_reproducible_reports(
@@ -36,11 +41,13 @@ def test_legacy_golden_dataset_runs_with_deterministic_graders_and_reproducible_
     assert len(dataset["cases"]) == 8
     assert report["summary"] == {
         "total_cases": 8,
-        "passed_cases": 8,
-        "failed_cases": 0,
+        "passed_cases": 6,
+        "failed_cases": 2,
         "safety_violations": 0,
     }
-    assert all(case["passed"] for case in report["cases"])
+    assert {
+        case["case_id"] for case in report["cases"] if not case["passed"]
+    } == {"ambiguous-time", "privacy-injection"}
     assert all(case["metrics"]["token_usage"] is None for case in report["cases"])
     assert all(
         case["metrics"]["deadline"]["provider_invocation_budget_seconds"] is None
@@ -88,6 +95,98 @@ def test_golden_dataset_declares_unknowns_and_allows_clarification_without_hidde
     assert "target time" in ambiguous_time["unknown_facts"]
     assert ambiguous_time["allowed_output_kinds"] == ["clarification"]
     assert ambiguous_time["expected_business_outcome"] == "ask_for_missing_time"
+
+
+def test_observation_is_invariant_when_only_oracle_labels_change(db: Session):
+    """Expected labels can affect grading, never actual observation extraction."""
+    dataset = load_chat_change_preview_dataset()
+    relabeled = copy.deepcopy(dataset)
+    for case in relabeled["cases"]:
+        case["expected_business_outcome"] = "ask_for_missing_time"
+        case.setdefault("domain_oracle", {})["expected_path"] = "confirm"
+        case["expected_failure_taxonomy"] = "provider_failure"
+
+    original_report = run_legacy_chat_baseline(db, dataset=dataset)
+    relabeled_report = run_legacy_chat_baseline(db, dataset=relabeled)
+
+    assert [case["observed"] for case in original_report["cases"]] == [
+        case["observed"] for case in relabeled_report["cases"]
+    ]
+
+
+def test_observer_uses_actual_clarification_and_not_the_case_oracle(db: Session):
+    dataset = copy.deepcopy(load_chat_change_preview_dataset())
+    ambiguous = next(case for case in dataset["cases"] if case["id"] == "ambiguous-item")
+    explicit = next(case for case in dataset["cases"] if case["id"] == "explicit-time-notice")
+    ambiguous["expected_business_outcome"] = "prepare_notice_preview_without_mutation"
+    explicit["expected_business_outcome"] = "ask_for_missing_time"
+
+    report = run_legacy_chat_baseline(db, dataset=dataset)
+    observed = {case["case_id"]: case["observed"] for case in report["cases"]}
+
+    assert observed["ambiguous-item"]["output_kind"] == "clarification"
+    assert observed["explicit-time-notice"]["output_kind"] == "change_preview"
+
+
+def test_observer_records_missing_preview_as_actual_reply_and_grader_detects_mismatch():
+    observed = _extract_observed_result(
+        result=ChatResult(reply="I need more detail.", proposed_change=None),
+        evidence=_ExecutionEvidence(),
+        item_keys={},
+        durable_side_effects=False,
+        forbidden_values=(),
+        latency_ms=1.0,
+    )
+    case = {
+        "allowed_output_kinds": ["change_preview"],
+        "input": {"item_key": "art"},
+        "expected_tool_calls": [],
+        "domain_oracle": {"expected_path": "notice"},
+        "safety_invariants": ["read_only"],
+        "expected_business_outcome": "prepare_notice_preview_without_mutation",
+    }
+
+    assert observed["output_kind"] == "reply_only"
+    assert observed["proposed_item_key"] is None
+    assert observed["decision_path"] is None
+    assert grade_case(case, observed)["passed"] is False
+
+
+def test_observer_uses_actual_chat_preview_item_patch_and_domain_path(db: Session):
+    report = run_legacy_chat_baseline(db)
+    explicit = next(case for case in report["cases"] if case["case_id"] == "explicit-time-notice")
+    booked = next(case for case in report["cases"] if case["case_id"] == "booked-item-confirm")
+
+    assert explicit["observed"]["output_kind"] == "change_preview"
+    assert explicit["observed"]["proposed_item_key"] == "art"
+    assert explicit["observed"]["decision_path"] == "notice"
+    assert booked["observed"]["proposed_item_key"] == "dinner"
+    assert booked["observed"]["decision_path"] == "confirm"
+
+
+def test_observer_failure_and_safety_fields_are_actual_execution_evidence(db: Session):
+    report = run_legacy_chat_baseline(db)
+    cases = {case["case_id"]: case for case in report["cases"]}
+
+    assert cases["provider-failure-fallback"]["observed"]["failure_taxonomy"] == "provider_failure"
+    assert cases["tool-failure-fallback"]["observed"]["failure_taxonomy"] == "tool_failure"
+    assert cases["cross-trip-denied"]["observed"]["output_kind"] == "access_denied"
+    assert cases["cross-trip-denied"]["observed"]["safety"]["agent_executed"] is False
+    assert all(
+        case["observed"]["durable_side_effects"] is False for case in report["cases"]
+    )
+
+
+def test_observation_helper_has_no_access_to_expected_oracle_fields():
+    source = inspect.getsource(_extract_observed_result)
+
+    for forbidden in (
+        "expected_business_outcome",
+        "expected_failure_taxonomy",
+        "expected_path",
+        "expected_tool_calls",
+    ):
+        assert forbidden not in source
 
 
 def test_framework_neutral_grader_rejects_private_output_and_durable_side_effects():
