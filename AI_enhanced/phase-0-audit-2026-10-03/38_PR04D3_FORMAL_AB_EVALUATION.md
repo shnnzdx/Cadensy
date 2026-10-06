@@ -21,12 +21,14 @@ passed`; Legacy evaluation-foundation tests were `12 passed`. The D3 runner
 then produced all 16 required observations: each frozen case once for Legacy
 and once for Pydantic.
 
-The only database used was disposable localhost PostgreSQL database
-`tripsync_pr04d3_test`, selected through `TEST_DATABASE_URL`; it was distinct
-from the configured runtime database. The process set `MOCK_AI=1`, disabled the
-scheduler, set `DEV_ALLOW_MEMBERSHIP_HEADER=0`, and blanked DeepSeek and
-Geoapify keys. The harness recorded `network_attempts=0` in every observation.
-No AWS, RDS, real Provider, deployment, or production database was accessed.
+The formal run used the explicitly configured disposable localhost PostgreSQL
+database `tripsync_pr04d3_test`. For this invocation, both
+`TEST_DATABASE_URL` and `DATABASE_URL` pointed to that same local disposable
+database. The formal runner itself constructs its engine exclusively from
+`TEST_DATABASE_URL`. The process set `MOCK_AI=1`, disabled the scheduler, set
+`DEV_ALLOW_MEMBERSHIP_HEADER=0`, and blanked DeepSeek and Geoapify keys. The
+harness recorded `network_attempts=0` in every observation. No AWS, RDS, real
+Provider, deployment, or production database was accessed.
 
 The model seams remained fake and framework-native: Legacy retained real
 `base.call_agent` and replaced only `_invoke_agent_provider`; Pydantic retained
@@ -253,16 +255,36 @@ e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f
 The evidence supports the frozen authority boundaries: both runtimes remain
 read-only, Application retains final deterministic classification, and the
 Pydantic alternative trajectory can meet the bounded preview contract without
-being treated as a tool-contract failure. However, the two observed business
-mismatches remain unresolved. They are shared by both runtimes in this
-experiment and were recorded without tuning the evaluator or product.
+being treated as a tool-contract failure.
+
+`ambiguous-time` is a shared current product/runtime-contract gap: both
+runtimes produced the same `safe_degraded` result with
+`unexpected_exception`. It is not Pydantic-specific evidence.
+
+`privacy-injection` is an Application-only product-contract gap. Application
+preflight prevented both runtimes from executing, so this case is not valid
+evidence for or against Runtime advancement.
+
+Within the five Runtime-discriminating cases, Pydantic matched Legacy's `4/5`
+business and `5/5` safety outcomes. Its preview tool trajectory differs but is
+valid under `alternate_authoritative`; no Pydantic-specific safety regression
+was observed. Pydantic nevertheless remains bounded to the evaluated
+schedule/read surface, and this result makes no full-parity claim.
 
 ## 17. Final recommendation
 
-**KEEP PYDANTIC AS POC — CAPABILITY/CORRECTNESS GAP**
+**ADVANCE PYDANTIC TO NEXT CONTROLLED INTEGRATION STAGE**
 
-There is no Pydantic safety hard-gate failure, but current frozen evidence has
-meaningful unresolved business-contract gaps (`ambiguous-time` and
-`privacy-injection`) and the Pydantic capability remains deliberately bounded.
-This recommendation does not authorize a production migration, replacement of
-Legacy, or any work beyond a separately approved controlled next stage.
+The formal frozen A/B evaluation found no Pydantic-specific safety hard-gate
+failure and no Pydantic-specific business regression across the five
+Runtime-discriminating cases. Legacy and Pydantic both achieved `4/5` business
+passes and `5/5` safety passes in that partition. The remaining
+`ambiguous-time` mismatch is shared by both runtimes, while
+`privacy-injection` is Application-owned and therefore is not valid evidence
+against one Runtime.
+
+The Pydantic path remains intentionally capability-bounded and does not yet
+establish full Legacy parity, replacement parity, real-Provider behavior,
+production concurrency guarantees, or production readiness. This
+recommendation authorizes only a next controlled integration stage, not a
+migration or rollout.
