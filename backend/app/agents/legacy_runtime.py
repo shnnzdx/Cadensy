@@ -6,9 +6,10 @@ It is not imported by the Chat route or Chat Service in this PR.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from functools import wraps
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
@@ -54,6 +55,11 @@ _SAFE_PATCH_FIELDS = frozenset(
 )
 
 
+ToolInvocationRecorder = Callable[
+    [str, Mapping[str, object], Literal["success", "failure"]], None
+]
+
+
 @dataclass(frozen=True, init=False)
 class LegacyReadTripCapability:
     """Worker-owned Session and immutable scope for current Legacy tools."""
@@ -61,6 +67,7 @@ class LegacyReadTripCapability:
     _trip_id: str
     _actor_membership_id: str
     _session_factory: Callable[[], Session]
+    _tool_invocation_recorder: ToolInvocationRecorder | None
     _legacy_tool_results: tuple[dict[str, Any], ...]
 
     def __init__(
@@ -69,10 +76,12 @@ class LegacyReadTripCapability:
         trip_id: str,
         actor_membership_id: str,
         session_factory: Callable[[], Session] = SessionLocal,
+        tool_invocation_recorder: ToolInvocationRecorder | None = None,
     ) -> None:
         object.__setattr__(self, "_trip_id", trip_id)
         object.__setattr__(self, "_actor_membership_id", actor_membership_id)
         object.__setattr__(self, "_session_factory", session_factory)
+        object.__setattr__(self, "_tool_invocation_recorder", tool_invocation_recorder)
         object.__setattr__(self, "_legacy_tool_results", ())
 
     @property
@@ -102,7 +111,38 @@ class LegacyReadTripCapability:
                 trip_id=self._trip_id,
                 actor_membership_id=self._actor_membership_id,
             )
+            if self._tool_invocation_recorder is not None:
+                tools = tuple(
+                    _record_tool_invocation(tool, self._tool_invocation_recorder)
+                    for tool in tools
+                )
             return operation(tuple(LegacyRuntimeReadTool(tool) for tool in tools))
+
+
+def _record_tool_invocation(
+    tool: base.AgentTool, recorder: ToolInvocationRecorder
+) -> base.AgentTool:
+    """Wrap one existing handler only when an eval/test recorder was supplied.
+
+    The closure deliberately retains neither output nor exception details.  The
+    recorder owns any sanitization before it persists an observation.  The
+    default capability path does not call this helper, preserving production
+    handler identity and behavior.
+    """
+
+    original_handler = tool.handler
+
+    @wraps(original_handler)
+    def observed_handler(**arguments: object) -> object:
+        try:
+            output = original_handler(**arguments)
+        except Exception:
+            recorder(tool.name, dict(arguments), "failure")
+            raise
+        recorder(tool.name, dict(arguments), "success")
+        return output
+
+    return replace(tool, handler=observed_handler)
 
 
 @dataclass(frozen=True)
