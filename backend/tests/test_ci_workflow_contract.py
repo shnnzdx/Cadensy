@@ -47,6 +47,34 @@ def test_legacy_evaluation_validation_freezes_the_approved_v1_dataset_hash():
     assert "manifest[\"dataset_hash\"]" in validation["run"]
 
 
+def test_legacy_evaluation_validation_requires_the_reviewed_fair_case_baseline():
+    validation = next(
+        step for step in _legacy_steps() if step.get("id") == "validate_evaluation_artifact"
+    )
+    script = validation["run"]
+
+    assert '"passed_cases": 6' in script
+    assert '"failed_cases": 2' in script
+    assert '"safety_violations": 0' in script
+    assert '"passed_cases": 8' not in script
+    assert '"failed_cases": 0' not in script
+    for case_id in (
+        "explicit-time-notice",
+        "ambiguous-time",
+        "ambiguous-item",
+        "booked-item-confirm",
+        "provider-failure-fallback",
+        "tool-failure-fallback",
+        "privacy-injection",
+        "cross-trip-denied",
+    ):
+        assert case_id in script
+    assert 'case_results[case_id]["passed"] is expected_passed' in script
+    assert 'ambiguous_time["observed"]["output_kind"] == "safe_degraded"' in script
+    assert 'ambiguous_time["observed"]["failure_taxonomy"] == "unexpected_exception"' in script
+    assert 'privacy_injection["observed"]["output_kind"] == "clarification"' in script
+
+
 def test_checked_in_v1_dataset_still_has_the_approved_frozen_hash():
     dataset_path = (
         REPOSITORY_ROOT / "backend" / "evals" / "datasets" / "chat_change_preview_v1.json"
@@ -80,6 +108,8 @@ def test_legacy_job_excludes_all_pydantic_modules_and_proves_no_collected_skips(
     )
 
     assert "--ignore=tests/test_pydantic_ai_poc.py" in regression["run"]
+    assert "--ignore=tests/test_pydantic_runtime.py" in regression["run"]
+    assert "--ignore=tests/test_symmetric_evaluation_harness.py" in regression["run"]
     assert "--ignore=tests/test_provider_smoke_harness.py" in regression["run"]
     assert "--ignore=tests/test_live_provider_smoke_adapter.py" in regression["run"]
     assert "--junitxml" in regression["run"]
@@ -147,6 +177,9 @@ def test_pydantic_job_requires_the_installed_poc_and_executes_its_tests():
     assert "requirements-pydantic-ai-poc.lock.txt" in install["run"]
     assert "import pydantic_ai" in install["run"]
     assert "tests/test_pydantic_ai_poc.py" in test_step["run"]
+    assert "tests/test_pydantic_runtime.py" in test_step["run"]
+    assert "tests/test_symmetric_evaluation_harness.py" in test_step["run"]
+    assert "tests/test_runtime_composition.py" in test_step["run"]
     assert "tests/test_provider_smoke_harness.py" in test_step["run"]
     assert "tests/test_live_provider_smoke_adapter.py" in test_step["run"]
     assert "tests/test_evaluation_foundation.py" in test_step["run"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from uuid import uuid4
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -8,10 +9,18 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...agents import base
 from ...agents import chat as chat_agent
-from ...agents.execution import AgentExecutionConfig, run_agent_with_deadline
-from ...agents.tools import build_read_only_trip_tools
+from ...agents.execution import AgentExecutionConfig
+from ...agents.legacy_runtime import LegacyChatAgentRuntime, LegacyReadTripCapability
+from ...agents.runtime_contract import (
+    AgentCandidateOption,
+    AgentSuggestedChange,
+    RuntimeHistoryTurn,
+    RuntimeLimits,
+    RuntimeRequest,
+    RuntimeResult,
+)
+from ...agents.runtime_factory import build_chat_runtime
 from ...db.session import SessionLocal
 from ...db.models import Plan, PlanItem, Trip, TripMembership
 from ..constraints.types import Classification
@@ -147,36 +156,67 @@ def _respond_with_agent_branch(
         return ChatResult(reply=clarification, proposed_change=None)
 
     try:
-        result = _run_chat_agent_with_timeout(
-            trip_id=trip_id,
-            actor_membership_id=membership.id,
+        request = RuntimeRequest(
             message=_agent_user_message(
                 message,
                 target,
                 selected_on_screen=selected_on_screen,
             ),
-            history=history,
+            history=tuple(
+                RuntimeHistoryTurn(role=turn.role, text=turn.text) for turn in history
+            ),
+            selected_item_ref=target.id if target is not None else None,
+            request_id=uuid4().hex,
+            limits=RuntimeLimits(
+                max_rounds=CHAT_AGENT_MAX_ROUNDS,
+                max_total_tokens=CHAT_AGENT_MAX_TOTAL_TOKENS,
+            ),
+        )
+        # This public capability surface is framework-neutral despite its
+        # Legacy name. PR-04B proves the Pydantic adapter consumes it without a
+        # request Session or an ORM/query capability.
+        capability = LegacyReadTripCapability(
+            trip_id=trip_id,
+            actor_membership_id=membership.id,
+            session_factory=SessionLocal,
+        )
+        runtime = build_chat_runtime(system_prompt=_agent_system_prompt())
+        result = runtime.run(
+            request,
+            capability,
+            execution=_chat_agent_execution_config(),
         )
     except Exception:
         return _degraded_reply(message, items, target)
 
-    if result.stopped_reason:
+    if result.observation.failure is not None:
         return _degraded_reply(message, items, target)
-    reply = (result.content or "").strip()
+    reply = result.reply.strip()
     if not reply:
         return _degraded_reply(message, items, target)
     reply = _strip_internal_reasoning(reply)
     if chat_agent._claims_change_completed(reply):
         reply = _safe_pending_agent_reply(message)
 
-    candidates = _candidate_options_from_agent(result.tool_results)
-    explicit = _proposed_change_from_agent_classification(
-        db=db,
-        items=items,
-        membership=membership,
-        tool_results=result.tool_results,
-        expected_item_id=expected_item_id,
-    )
+    candidates = _candidate_options_from_runtime(result)
+    if isinstance(runtime, LegacyChatAgentRuntime):
+        # Legacy replacements retain their additional raw tool provenance
+        # contract. The common RuntimeResult intentionally does not expose it.
+        explicit = _proposed_change_from_agent_classification(
+            db=db,
+            items=items,
+            membership=membership,
+            tool_results=capability._application_legacy_tool_results,
+            expected_item_id=expected_item_id,
+        )
+    else:
+        explicit = _proposed_change_from_runtime_suggestion(
+            db=db,
+            items=items,
+            membership=membership,
+            outcome=result.outcome,
+            expected_item_id=expected_item_id,
+        )
     if explicit is not None:
         return ChatResult(
             reply=reply,
@@ -926,51 +966,13 @@ def _contains_chinese(value: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in value)
 
 
-def _run_chat_agent_with_timeout(
-    *,
-    trip_id: str,
-    actor_membership_id: str,
-    message: str,
-    history: tuple[chat_agent.HistoryTurn, ...] = (),
-) -> base.AgentRunResult:
-    """Run Agent work with a worker-owned, short-lived read Session.
+def _chat_agent_execution_config() -> AgentExecutionConfig:
+    """Retain the PR-01C request/provider/tool deadline partition."""
 
-    The request Session is used only for the deterministic preflight in
-    ``respond_to_trip_chat``. It is never captured by this worker. A timeout
-    signals local cancellation but cannot force-stop an already running
-    synchronous provider call; in that case the worker retains exclusive
-    ownership of its Session until it returns and the result is discarded.
-    """
-
-    def worker(deadline):
-        with SessionLocal() as worker_db:
-            def tool_factory() -> tuple[base.AgentTool, ...]:
-                deadline.ensure_request_active()
-                return build_read_only_trip_tools(
-                    worker_db,
-                    trip_id=trip_id,
-                    actor_membership_id=actor_membership_id,
-                )
-
-            return base.call_agent(
-                system=_agent_system_prompt(),
-                user=message,
-                tool_factory=tool_factory,
-                history=tuple(
-                    {"role": turn.role, "content": turn.text} for turn in history
-                ),
-                max_rounds=CHAT_AGENT_MAX_ROUNDS,
-                max_total_tokens=CHAT_AGENT_MAX_TOTAL_TOKENS,
-                deadline=deadline,
-            )
-
-    return run_agent_with_deadline(
-        worker=worker,
-        config=AgentExecutionConfig(
-            request_timeout_seconds=CHAT_AGENT_TIMEOUT_SECONDS,
-            provider_timeout_seconds=CHAT_AGENT_PROVIDER_TIMEOUT_SECONDS,
-            tool_timeout_seconds=CHAT_AGENT_TOOL_TIMEOUT_SECONDS,
-        ),
+    return AgentExecutionConfig(
+        request_timeout_seconds=CHAT_AGENT_TIMEOUT_SECONDS,
+        provider_timeout_seconds=CHAT_AGENT_PROVIDER_TIMEOUT_SECONDS,
+        tool_timeout_seconds=CHAT_AGENT_TOOL_TIMEOUT_SECONDS,
     )
 
 
@@ -1046,6 +1048,23 @@ def _candidate_options_from_agent(
                 )
             )
     return tuple(options)
+
+
+def _candidate_options_from_runtime(result: RuntimeResult) -> tuple[ChatCandidateOption, ...]:
+    """Translate contract candidates without making them a primary outcome."""
+
+    return tuple(
+        ChatCandidateOption(
+            id=option.id,
+            label=option.label,
+            title=option.title,
+            body=option.body,
+            tradeoff=option.tradeoff,
+            item_id=option.item_ref,
+            patch=_normalize_patch(dict(option.safe_patch)),
+        )
+        for option in result.candidate_options
+    )
 
 
 _REPLACEMENT_CORE_FIELDS = (
@@ -1136,6 +1155,40 @@ def _proposed_change_from_agent_classification(
             verdict=verdict,
         )
     return None
+
+
+def _proposed_change_from_runtime_suggestion(
+    *,
+    db: Session,
+    items: list[PlanItem],
+    membership: TripMembership,
+    outcome: object,
+    expected_item_id: str | None = None,
+) -> ProposedChatChange | None:
+    """Validate common Runtime syntax before deterministic Domain preview.
+
+    Runtime output has neither authority nor a fresh-state/concurrency claim.
+    In PR-04C only Pydantic reaches this branch; replacement fields fail closed
+    because they require Legacy-only candidate provenance.
+    """
+
+    if not isinstance(outcome, AgentSuggestedChange):
+        return None
+    target = next((item for item in items if item.id == outcome.item_ref), None)
+    patch = _normalize_patch(dict(outcome.safe_patch))
+    if target is None or not patch:
+        return None
+    if expected_item_id is not None and target.id != expected_item_id:
+        return None
+    if not _replacement_patch_is_supported(patch, ()):
+        return None
+    verdict = orch.classify_change(db, target, patch, membership.id)
+    return ProposedChatChange(
+        item_id=target.id,
+        item_title=target.title,
+        patch=patch,
+        verdict=verdict,
+    )
 
 
 def _trip_items(db: Session, trip_id: str) -> list[PlanItem]:

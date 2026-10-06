@@ -9,7 +9,7 @@ import time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agents import base
+from app.agents import base, legacy_runtime
 from app.agents import execution
 from app.agents.execution import AgentExecutionCapacityExceeded
 from app.db.models import ChangeProposal, DecisionRound, PlanItem, Trip, TripMembership, Vote
@@ -59,12 +59,11 @@ def test_chat_agent_tools_are_built_and_closed_inside_an_independent_worker_sess
         return ()
 
     def fake_call_agent(**kwargs):
-        assert "tools" not in kwargs
-        assert kwargs["tool_factory"]() == ()
+        assert kwargs["tools"] == ()
         return _agent_result()
 
     monkeypatch.setattr(chat_service, "SessionLocal", worker_session_factory, raising=False)
-    monkeypatch.setattr(chat_service, "build_read_only_trip_tools", build_tools)
+    monkeypatch.setattr(legacy_runtime, "build_read_only_trip_tools", build_tools)
     monkeypatch.setattr(base, "call_agent", fake_call_agent)
 
     result = chat_service.respond_to_trip_chat(
@@ -108,11 +107,11 @@ def test_chat_agent_actual_session_factory_uses_a_separate_connection_and_closes
         return ()
 
     def fake_call_agent(**kwargs):
-        assert kwargs["tool_factory"]() == ()
+        assert kwargs["tools"] == ()
         return _agent_result()
 
     monkeypatch.setattr(chat_service, "SessionLocal", tracked_actual_session_factory)
-    monkeypatch.setattr(chat_service, "build_read_only_trip_tools", build_tools)
+    monkeypatch.setattr(legacy_runtime, "build_read_only_trip_tools", build_tools)
     monkeypatch.setattr(base, "call_agent", fake_call_agent)
 
     result = chat_service.respond_to_trip_chat(
@@ -185,7 +184,7 @@ def test_tool_finishing_after_request_deadline_is_discarded_and_closes_worker_se
         )
 
     monkeypatch.setattr(chat_service, "SessionLocal", worker_session_factory)
-    monkeypatch.setattr(chat_service, "build_read_only_trip_tools", build_tools)
+    monkeypatch.setattr(legacy_runtime, "build_read_only_trip_tools", build_tools)
     monkeypatch.setattr(chat_service, "CHAT_AGENT_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(chat_service, "CHAT_AGENT_TOOL_TIMEOUT_SECONDS", 1.0)
     monkeypatch.setattr(base, "is_mocked", lambda: False)
@@ -269,7 +268,7 @@ def test_worker_capacity_exhaustion_returns_the_same_safe_degraded_chat_response
     def exhausted(**_kwargs):
         raise AgentExecutionCapacityExceeded("synthetic capacity exhaustion")
 
-    monkeypatch.setattr(chat_service, "run_agent_with_deadline", exhausted)
+    monkeypatch.setattr(legacy_runtime, "run_agent_with_deadline", exhausted)
     result = chat_service.respond_to_trip_chat(
         db,
         trip_id=full_trip["trip"].id,
@@ -308,7 +307,7 @@ def test_non_cooperative_provider_result_after_http_deadline_is_not_returned_or_
         )
 
     monkeypatch.setattr(chat_service, "SessionLocal", worker_session_factory)
-    monkeypatch.setattr(chat_service, "build_read_only_trip_tools", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(legacy_runtime, "build_read_only_trip_tools", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(chat_service, "CHAT_AGENT_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(base, "is_mocked", lambda: False)
     monkeypatch.setattr(

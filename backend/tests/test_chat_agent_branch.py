@@ -3,13 +3,30 @@ from __future__ import annotations
 import time
 from datetime import date
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agents import base
+from app.agents import base, legacy_runtime
 from app.db.models import ChangeProposal, DecisionRound, PlanChange, PlanItem, Vote
 from app.domain.chat import service as chat_service
 from app.domain.constraints.types import Path, Settledness
+
+
+@pytest.fixture(autouse=True)
+def _adapter_tool_surface_without_cross_transaction_fixture_reads(monkeypatch):
+    """Keep Chat semantics tests at the adapter's public tool seam.
+
+    The real adapter constructs scoped tools in its independent worker Session.
+    These tests deliberately keep their fixtures inside pytest's uncommitted
+    transaction, so they provide an empty read-only surface rather than using
+    the request Session as a false concurrency proof. Tool/session ownership is
+    exercised separately by the PR-01C lifecycle tests.
+    """
+
+    monkeypatch.setattr(
+        legacy_runtime, "build_read_only_trip_tools", lambda *_args, **_kwargs: ()
+    )
 
 
 def test_clear_change_uses_agent_classification_result(monkeypatch, db: Session, full_trip: dict):
