@@ -89,7 +89,7 @@ parameters.
 GitHub Actions
 -> read the current backend ECS task definition
 -> keep current image, logs, DATABASE_URL secret, frontend URL, CORS, scheduler flag
--> force guest-compatible backend runtime by keeping DEV_ALLOW_MEMBERSHIP_HEADER=1
+-> force secure backend runtime with DEV_ALLOW_MEMBERSHIP_HEADER=0
 -> register a new backend task definition revision
 -> inject DEEPSEEK_API_KEY and OLLAMA_CLOUD_API_KEY from SSM
 -> set DEEPSEEK_* and OLLAMA_CLOUD_* runtime env vars
@@ -155,13 +155,10 @@ explainer_ai_provider=deepseek
 ai_fallback_provider=
 ```
 
-Important on Monday, August 17, 2026:
-
-```text
-do not set DEV_ALLOW_MEMBERSHIP_HEADER back to 0 in cloud runtime
-guest invite links rely on X-Membership-Id after join because guests do not have account bearer tokens
-if the backend runtime disables that header path, guest join can look successful but the next trip read fails with 401 Login required
-```
+PR-01B supersedes the historical header-based Guest flow: Guest join returns a
+bounded bearer credential, so production must keep
+`DEV_ALLOW_MEMBERSHIP_HEADER=0`. A truthy value fails application startup in a
+production profile.
 
 Rollback to mock mode:
 
@@ -184,7 +181,7 @@ OLLAMA_CLOUD_MODEL=qwen3.5:cloud
 CHAT_AI_PROVIDER=ollama_cloud
 PLANNER_AI_PROVIDER=deepseek
 EXPLAINER_AI_PROVIDER=deepseek
-DEV_ALLOW_MEMBERSHIP_HEADER=1
+DEV_ALLOW_MEMBERSHIP_HEADER=0
 ```
 
 Current verified cloud runtime on Monday, August 17, 2026:
@@ -261,9 +258,9 @@ Check ECS service events and the /ecs/tripsync-backend CloudWatch Logs group.
 
 ```text
 inspect the live backend ECS task definition first
-if DEV_ALLOW_MEMBERSHIP_HEADER=0, guest runtime access is broken
-re-run Backend AI Runtime Config from main with the fixed workflow that writes DEV_ALLOW_MEMBERSHIP_HEADER=1
-verify the result with a fresh guest join and then GET /api/trips/{trip_id}
+verify the browser has adopted the `guest_token` returned by join
+verify the task definition keeps DEV_ALLOW_MEMBERSHIP_HEADER=0
+verify the result with a fresh guest join and a bearer-authenticated GET /api/trips/{trip_id}
 ```
 
 ## Current Product Reality

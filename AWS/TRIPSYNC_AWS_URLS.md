@@ -241,7 +241,8 @@ Historical-only demo cleanup notes are archived at:
 AWS/archive/CLOUD_DEMO_PURGE_RUNBOOK.md
 ```
 
-Current backend AI runtime:
+Historical backend AI runtime record (pre-PR-01B; not checked or changed in
+this PR):
 
 ```text
 MOCK_AI=0
@@ -255,7 +256,8 @@ OLLAMA_CLOUD_MODEL=qwen3.5:cloud
 DEV_ALLOW_MEMBERSHIP_HEADER=1
 ```
 
-Guest invite cloud verification on Monday, August 17, 2026:
+Historical Guest invite cloud verification on Monday, August 17, 2026
+(pre-PR-01B header-based flow):
 
 ```text
 before repair:
@@ -264,9 +266,14 @@ guest join completed, then GET /api/trips/{trip_id} returned 401 {"detail":"Logi
 after repair:
 same guest join flow returned 200 for GET /api/trips/{trip_id}
 
-current live backend task definition:
+backend task definition recorded at that time:
 tripsync-backend:17
 ```
+
+For a future, separately authorized PR-01B rollout, the checked-in deployment
+templates require `DEV_ALLOW_MEMBERSHIP_HEADER=0` and Guest trip reads use the
+bounded bearer returned from invite join. This document does not assert that
+the live task definition has changed.
 
 Current backend non-AI provider secret expected in cloud runtime:
 
