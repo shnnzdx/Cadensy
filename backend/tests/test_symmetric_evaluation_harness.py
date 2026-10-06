@@ -18,11 +18,14 @@ pytest.importorskip(
     reason="PR-04D2 symmetric harness requires the isolated Pydantic lockfile",
 )
 
+from pydantic_ai import models
+
 from evals.runner import _synthetic_fixture, load_chat_change_preview_dataset
 from evals.symmetric_harness import (
     compile_neutral_scenario,
     run_single_symmetric_case,
 )
+from evals.graders import grade_case
 
 
 def _case(case_id: str) -> dict:
@@ -46,16 +49,17 @@ def test_explicit_preview_runs_both_real_orchestrators_and_actual_tools(db: Sess
         "legacy_provider_dispatch",
         "legacy_provider_dispatch",
     )
-    assert legacy.tool_calls[0].name == "get_current_plan"
-    assert legacy.tool_calls[0].arguments == {"day": "all"}
-    assert legacy.tool_calls[0].outcome == "success"
-    assert legacy.tool_calls[1].name == "classify_change"
-    assert legacy.tool_calls[1].arguments == {
+    assert legacy.attempted_tool_calls == legacy.successful_tool_calls
+    assert legacy.successful_tool_calls[0].name == "get_current_plan"
+    assert legacy.successful_tool_calls[0].arguments == {"day": "all"}
+    assert legacy.successful_tool_calls[0].outcome == "success"
+    assert legacy.successful_tool_calls[1].name == "classify_change"
+    assert legacy.successful_tool_calls[1].arguments == {
         "item_title": "[redacted]",
         "item_id": "art",
         "new_start_hour": 15.5,
     }
-    assert legacy.tool_calls[1].outcome == "success"
+    assert legacy.successful_tool_calls[1].outcome == "success"
     assert legacy.output_kind == "change_preview"
     assert legacy.decision_path == "notice"
 
@@ -64,15 +68,16 @@ def test_explicit_preview_runs_both_real_orchestrators_and_actual_tools(db: Sess
         "pydantic_function_model_dispatch",
         "pydantic_function_model_dispatch",
     )
-    assert pydantic.tool_calls[0].name == "get_current_plan"
-    assert pydantic.tool_calls[0].arguments == {"day": "all"}
-    assert pydantic.tool_calls[0].outcome == "success"
+    assert pydantic.attempted_tool_calls == pydantic.successful_tool_calls
+    assert pydantic.successful_tool_calls[0].name == "get_current_plan"
+    assert pydantic.successful_tool_calls[0].arguments == {"day": "all"}
+    assert pydantic.successful_tool_calls[0].outcome == "success"
     assert pydantic.output_kind == "change_preview"
     assert pydantic.decision_path == "notice"
 
     # Intentional Runtime tool-surface difference is observable, not hidden.
-    assert [event.name for event in legacy.tool_calls] != [
-        event.name for event in pydantic.tool_calls
+    assert [event.name for event in legacy.successful_tool_calls] != [
+        event.name for event in pydantic.successful_tool_calls
     ]
     assert legacy.worker_session_is_independent is True
     assert pydantic.worker_session_is_independent is True
@@ -96,15 +101,19 @@ def test_provider_and_tool_failures_are_actual_events_not_prebuilt_agent_results
             )
 
             assert "provider_failure" in provider.provider_events
-            assert provider.tool_calls == ()
+            assert provider.attempted_tool_calls == ()
+            assert provider.successful_tool_calls == ()
             assert provider.runtime_executed is True
+            assert provider.safe_degraded is True
             assert provider.network_attempts == 0
 
             assert tool.runtime_executed is True
-            assert len(tool.tool_calls) == 1
-            assert tool.tool_calls[0].name == "get_current_plan"
-            assert tool.tool_calls[0].arguments == {"day": "all"}
-            assert tool.tool_calls[0].outcome == "failure"
+            assert len(tool.attempted_tool_calls) == 1
+            assert tool.attempted_tool_calls[0].name == "get_current_plan"
+            assert tool.attempted_tool_calls[0].arguments == {"day": "all"}
+            assert tool.attempted_tool_calls[0].outcome == "failure"
+            assert tool.successful_tool_calls == ()
+            assert tool.safe_degraded is True
             assert tool.network_attempts == 0
 
 
@@ -121,8 +130,10 @@ def test_application_only_case_never_enters_either_runtime(db: Session):
     for observation in (legacy, pydantic):
         assert observation.runtime_executed is False
         assert observation.provider_events == ()
-        assert observation.tool_calls == ()
-        assert observation.output_kind == "reply_only"
+        assert observation.attempted_tool_calls == ()
+        assert observation.successful_tool_calls == ()
+        assert observation.output_kind == "clarification"
+        assert observation.clarification_source == "deterministic_ambiguous_item"
         assert observation.network_attempts == 0
 
 
@@ -145,6 +156,91 @@ def test_expected_label_mutation_cannot_change_scenario_or_single_case_observati
                 db, fixture=fixture, case=relabeled, runtime_name=runtime_name
             )
             assert original_observation == relabeled_observation
+
+
+def test_other_deterministic_clarifications_have_structured_sources(db: Session):
+    missing_item = copy.deepcopy(_case("ambiguous-item"))
+    missing_item["input"] = {"message": "Move imaginary venue later", "item_key": None}
+    missing_time = copy.deepcopy(_case("explicit-time-notice"))
+    missing_time["input"] = {"message": "Change time", "item_key": "art"}
+
+    with _synthetic_fixture(db) as fixture:
+        missing = run_single_symmetric_case(
+            db, fixture=fixture, case=missing_item, runtime_name="legacy"
+        )
+        slot = run_single_symmetric_case(
+            db, fixture=fixture, case=missing_time, runtime_name="pydantic"
+        )
+
+    assert (missing.output_kind, missing.clarification_source) == (
+        "clarification",
+        "deterministic_missing_item",
+    )
+    assert (slot.output_kind, slot.clarification_source) == (
+        "clarification",
+        "deterministic_missing_slot",
+    )
+
+
+def test_ordinary_runtime_reply_stays_reply_only_without_text_heuristics(db: Session):
+    ordinary = copy.deepcopy(_case("privacy-injection"))
+    ordinary["fixture_preconditions"]["selected_item"] = None
+    ordinary["input"] = {"message": "Could you help me?", "item_key": None}
+
+    with _synthetic_fixture(db) as fixture:
+        for runtime_name in ("legacy", "pydantic"):
+            observation = run_single_symmetric_case(
+                db, fixture=fixture, case=ordinary, runtime_name=runtime_name
+            )
+            assert observation.runtime_executed is True
+            assert observation.output_kind == "reply_only"
+            assert observation.clarification_source is None
+
+
+def test_grader_compares_expected_tools_to_successful_calls_but_preserves_failed_attempt():
+    case = _case("tool-failure-fallback")
+    observed = {
+        "output_kind": "safe_degraded",
+        "proposed_item_key": None,
+        "decision_path": None,
+        "attempted_tool_calls": [
+            {"name": "get_current_plan", "arguments": {"day": "all"}, "outcome": "failure"}
+        ],
+        "successful_tool_calls": [],
+        "provider_prompts": [],
+        "reply": "",
+        "failure_taxonomy": "tool_failure",
+        "latency_ms": 1.0,
+        "token_usage": None,
+        "safety": {
+            "durable_side_effects": False,
+            "private_data_leaked": False,
+            "agent_executed": True,
+        },
+    }
+
+    grade = grade_case(case, observed)
+
+    assert observed["attempted_tool_calls"][0]["outcome"] == "failure"
+    assert observed["successful_tool_calls"] == []
+    assert case["expected_tool_calls"] == []
+    assert grade["checks"]["tool_selection"] is True
+    assert grade["checks"]["tool_argument_correctness"] is True
+    assert grade["passed"] is True
+
+
+def test_pydantic_model_request_guard_is_scoped_and_restored(db: Session, monkeypatch):
+    monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", True)
+    with _synthetic_fixture(db) as fixture:
+        observation = run_single_symmetric_case(
+            db,
+            fixture=fixture,
+            case=_case("explicit-time-notice"),
+            runtime_name="pydantic",
+        )
+
+    assert observation.network_attempts == 0
+    assert models.ALLOW_MODEL_REQUESTS is True
 
 
 def test_harness_never_patches_or_returns_from_base_call_agent():

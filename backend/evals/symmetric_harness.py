@@ -19,10 +19,8 @@ from pydantic_ai.models.function import FunctionModel
 from sqlalchemy.orm import Session
 
 from app.agents import base, legacy_runtime
-from app.agents.execution import AgentExecutionConfig
 from app.agents.legacy_runtime import LegacyChatAgentRuntime, LegacyReadTripCapability
 from app.agents.pydantic_runtime import PydanticChatAgentRuntime
-from app.db.models import PlanItem
 from app.domain.chat import service as chat_service
 
 
@@ -74,8 +72,10 @@ class HarnessObservation:
     runtime: RuntimeName
     runtime_executed: bool
     provider_events: tuple[str, ...]
-    tool_calls: tuple[ToolInvocationEvent, ...]
+    attempted_tool_calls: tuple[ToolInvocationEvent, ...]
+    successful_tool_calls: tuple[ToolInvocationEvent, ...]
     output_kind: str
+    clarification_source: str | None
     decision_path: str | None
     safe_degraded: bool
     network_attempts: int
@@ -184,6 +184,8 @@ def run_single_symmetric_case(
     membership = fixture["memberships"][case["fixture_preconditions"]["actor"]]
     recorder = _SanitizingToolRecorder(fixture["item_keys"])
     provider_events: list[str] = []
+    clarification_source: str | None = None
+    safe_degradation = False
     network_attempts = 0
     base_worker_session_factory = _session_factory_for(db)
     worker_sessions: list[Session] = []
@@ -206,6 +208,33 @@ def run_single_symmetric_case(
         network_attempts += 1
         raise AssertionError("A symmetric fake harness must not dispatch HTTP")
 
+    original_degraded_reply = chat_service._degraded_reply
+    original_plain_clarification = chat_service._plain_text_clarification_reply
+    original_ambiguous_reply = chat_service._ambiguous_item_reference_reply
+    original_missing_reply = chat_service._missing_item_reference_reply
+
+    def record_degraded_reply(*args: object, **kwargs: object) -> chat_service.ChatResult:
+        nonlocal safe_degradation
+        safe_degradation = True
+        return original_degraded_reply(*args, **kwargs)
+
+    def record_plain_clarification(*args: object, **kwargs: object) -> str | None:
+        nonlocal clarification_source
+        reply = original_plain_clarification(*args, **kwargs)
+        if reply is not None:
+            clarification_source = "deterministic_missing_slot"
+        return reply
+
+    def record_ambiguous_reply(*args: object, **kwargs: object) -> str:
+        nonlocal clarification_source
+        clarification_source = "deterministic_ambiguous_item"
+        return original_ambiguous_reply(*args, **kwargs)
+
+    def record_missing_reply(*args: object, **kwargs: object) -> str:
+        nonlocal clarification_source
+        clarification_source = "deterministic_missing_item"
+        return original_missing_reply(*args, **kwargs)
+
     with ExitStack() as stack:
         # Keep real-provider traffic impossible even if a lowerer regresses.
         import httpx
@@ -213,6 +242,16 @@ def run_single_symmetric_case(
         stack.enter_context(patch.object(httpx.Client, "request", deny_http))
         stack.enter_context(patch.object(httpx.AsyncClient, "request", deny_http))
         stack.enter_context(patch.object(chat_service, "SessionLocal", worker_session_factory))
+        stack.enter_context(patch.object(chat_service, "_degraded_reply", record_degraded_reply))
+        stack.enter_context(
+            patch.object(chat_service, "_plain_text_clarification_reply", record_plain_clarification)
+        )
+        stack.enter_context(
+            patch.object(chat_service, "_ambiguous_item_reference_reply", record_ambiguous_reply)
+        )
+        stack.enter_context(
+            patch.object(chat_service, "_missing_item_reference_reply", record_missing_reply)
+        )
         stack.enter_context(
             patch.object(chat_service, "LegacyReadTripCapability", capability_factory)
         )
@@ -249,7 +288,7 @@ def run_single_symmetric_case(
                 )
             )
         elif runtime_name == "pydantic":
-            models.ALLOW_MODEL_REQUESTS = False
+            stack.enter_context(patch.object(models, "ALLOW_MODEL_REQUESTS", False))
             model = FunctionModel(_pydantic_model_script(scenario, fixture, provider_events))
             stack.enter_context(
                 patch.object(
@@ -278,7 +317,9 @@ def run_single_symmetric_case(
         runtime_name=runtime_name,
         result=result,
         provider_events=provider_events,
-        tool_calls=recorder.events,
+        attempted_tool_calls=recorder.events,
+        clarification_source=clarification_source,
+        safe_degradation=safe_degradation,
         network_attempts=network_attempts,
         worker_session_is_independent=bool(worker_sessions)
         and all(worker is not db for worker in worker_sessions),
@@ -449,7 +490,9 @@ def _observation(
     runtime_name: RuntimeName,
     result: chat_service.ChatResult | None,
     provider_events: list[str],
-    tool_calls: list[ToolInvocationEvent],
+    attempted_tool_calls: list[ToolInvocationEvent],
+    clarification_source: str | None,
+    safe_degradation: bool,
     network_attempts: int,
     worker_session_is_independent: bool,
 ) -> HarnessObservation:
@@ -458,16 +501,26 @@ def _observation(
             runtime=runtime_name,
             runtime_executed=False,
             provider_events=tuple(provider_events),
-            tool_calls=tuple(tool_calls),
+            attempted_tool_calls=tuple(attempted_tool_calls),
+            successful_tool_calls=tuple(
+                event for event in attempted_tool_calls if event.outcome == "success"
+            ),
             output_kind="access_denied",
+            clarification_source=clarification_source,
             decision_path=None,
             safe_degraded=False,
             network_attempts=network_attempts,
             worker_session_is_independent=worker_session_is_independent,
         )
-    if result.proposed_change is not None:
+    if safe_degradation:
+        output_kind = "safe_degraded"
+        decision_path = None
+    elif result.proposed_change is not None:
         output_kind = "change_preview"
         decision_path = result.proposed_change.verdict.path
+    elif clarification_source is not None:
+        output_kind = "clarification"
+        decision_path = None
     else:
         output_kind = "reply_only"
         decision_path = None
@@ -475,10 +528,14 @@ def _observation(
         runtime=runtime_name,
         runtime_executed=bool(provider_events),
         provider_events=tuple(provider_events),
-        tool_calls=tuple(tool_calls),
+        attempted_tool_calls=tuple(attempted_tool_calls),
+        successful_tool_calls=tuple(
+            event for event in attempted_tool_calls if event.outcome == "success"
+        ),
         output_kind=output_kind,
+        clarification_source=clarification_source,
         decision_path=decision_path,
-        safe_degraded=result.reply.startswith("I couldn't prepare"),
+        safe_degraded=safe_degradation,
         network_attempts=network_attempts,
         worker_session_is_independent=worker_session_is_independent,
     )
