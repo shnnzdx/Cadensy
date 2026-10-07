@@ -144,6 +144,7 @@ Put runtime variables in `backend/.env`. Do not commit real secrets.
 | `DEEPSEEK_API_KEY` | DeepSeek cloud API key | none |
 | `DEEPSEEK_BASE_URL` | DeepSeek base URL | `https://api.deepseek.com` |
 | `DEEPSEEK_MODEL` | DeepSeek model name | `deepseek-v4-flash` |
+| `CHAT_AGENT_RUNTIME` | Chat Runtime selector | `legacy` |
 | `MOCK_AI` | use local mock AI when `1` | `1` |
 | `SETTLE_TICK_SECONDS` | settlement polling interval | `60` |
 | `DISABLE_SCHEDULER` | disable scheduler when `1` | none |
@@ -158,6 +159,14 @@ chat      -> deepseek
 planner   -> deepseek
 explainer -> deepseek
 ```
+
+`CHAT_AGENT_RUNTIME=legacy` is the default and current safe Chat behavior.
+`CHAT_AGENT_RUNTIME=pydantic` is an explicit opt-in composition path. It
+requires `MOCK_AI=0`, a present `DEEPSEEK_API_KEY`, the official
+`https://api.deepseek.com` endpoint, and a configured or defaulted
+`DEEPSEEK_MODEL`. Selecting it never falls back to Legacy: a composition
+failure returns the existing safe degraded Chat response. The Pydantic path
+pins model thinking off and does not inherit `DEEPSEEK_THINKING`.
 
 Never hard-code real credentials into source files.
 

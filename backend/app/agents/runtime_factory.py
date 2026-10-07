@@ -20,6 +20,16 @@ class ChatRuntimeConfigurationError(RuntimeError):
 
 PydanticRuntimeFactory = Callable[[], ChatAgentRuntime]
 
+_PYDANTIC_CONFIGURATION_ERROR = "Pydantic Chat Runtime configuration is unavailable"
+
+
+def _build_production_pydantic_runtime(*, system_prompt: str) -> ChatAgentRuntime:
+    """Load production Pydantic composition only after explicit selection."""
+
+    from .pydantic_composition import build_pydantic_chat_runtime
+
+    return build_pydantic_chat_runtime(system_prompt=system_prompt)
+
 
 def build_chat_runtime(
     *,
@@ -28,21 +38,21 @@ def build_chat_runtime(
 ) -> ChatAgentRuntime:
     """Build exactly one selected runtime; default directly to Legacy.
 
-    A Pydantic runtime has no reviewed production Provider composition in
-    PR-04C. Callers selecting it must inject an already composed Pydantic
-    Runtime (tests do so with local fake models), otherwise configuration fails
-    closed before Agent execution.
+    Tests may inject an already composed Pydantic Runtime.  Production
+    composition is loaded only when Pydantic is explicitly selected without
+    that test seam; any failure is normalized and never falls back to Legacy.
     """
 
     selector = os.getenv("CHAT_AGENT_RUNTIME", "").strip()
     if not selector or selector == "legacy":
         return LegacyChatAgentRuntime(system_prompt=system_prompt)
     if selector == "pydantic":
-        if pydantic_runtime_factory is None:
-            raise ChatRuntimeConfigurationError(
-                "CHAT_AGENT_RUNTIME=pydantic requires explicit Pydantic runtime composition"
-            )
-        return pydantic_runtime_factory()
+        if pydantic_runtime_factory is not None:
+            return pydantic_runtime_factory()
+        try:
+            return _build_production_pydantic_runtime(system_prompt=system_prompt)
+        except Exception as error:
+            raise ChatRuntimeConfigurationError(_PYDANTIC_CONFIGURATION_ERROR) from error
     raise ChatRuntimeConfigurationError(
         "CHAT_AGENT_RUNTIME must be one of: legacy, pydantic"
     )
