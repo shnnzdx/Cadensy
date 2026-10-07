@@ -109,6 +109,7 @@ def test_legacy_job_excludes_all_pydantic_modules_and_proves_no_collected_skips(
 
     assert "--ignore=tests/test_pydantic_ai_poc.py" in regression["run"]
     assert "--ignore=tests/test_pydantic_runtime.py" in regression["run"]
+    assert "--ignore=tests/test_pydantic_composition.py" in regression["run"]
     assert "--ignore=tests/test_symmetric_evaluation_harness.py" in regression["run"]
     assert "--ignore=tests/test_provider_smoke_harness.py" in regression["run"]
     assert "--ignore=tests/test_live_provider_smoke_adapter.py" in regression["run"]
@@ -127,6 +128,7 @@ def test_ci_remote_job_contract_has_pinned_runtimes_isolated_postgres_and_no_sof
     assert set(jobs) == {
         "backend-legacy-full-regression",
         "pydantic-ai-isolated-fake-compatibility",
+        "backend-production-pydantic-image-proof",
         "frontend-regression",
     }
     for job in jobs.values():
@@ -177,9 +179,31 @@ def test_pydantic_job_requires_the_installed_poc_and_executes_its_tests():
     assert "requirements-pydantic-ai-poc.lock.txt" in install["run"]
     assert "import pydantic_ai" in install["run"]
     assert "tests/test_pydantic_ai_poc.py" in test_step["run"]
+    assert "tests/test_pydantic_composition.py" in test_step["run"]
     assert "tests/test_pydantic_runtime.py" in test_step["run"]
     assert "tests/test_symmetric_evaluation_harness.py" in test_step["run"]
     assert "tests/test_runtime_composition.py" in test_step["run"]
     assert "tests/test_provider_smoke_harness.py" in test_step["run"]
     assert "tests/test_live_provider_smoke_adapter.py" in test_step["run"]
     assert "tests/test_evaluation_foundation.py" in test_step["run"]
+
+
+def test_production_image_proof_installs_and_imports_pydantic_without_provider_execution():
+    steps = _workflow()["jobs"]["backend-production-pydantic-image-proof"]["steps"]
+    build = next(step for step in steps if step["name"] == "Build production backend image")
+    proof = next(
+        step
+        for step in steps
+        if step["name"] == "Verify production Pydantic imports without network access"
+    )
+
+    assert "docker build" in build["run"]
+    assert "backend" in build["run"]
+    assert "docker run --rm --network none" in proof["run"]
+    assert "python -m pip check" in proof["run"]
+    assert "import pydantic_ai" in proof["run"]
+    assert "import app.agents.pydantic_composition" in proof["run"]
+    assert "import app.domain.chat.service" in proof["run"]
+    assert "build_chat_runtime" not in proof["run"]
+    assert "runtime.run" not in proof["run"]
+    assert "DEEPSEEK_API_KEY" not in proof["run"]

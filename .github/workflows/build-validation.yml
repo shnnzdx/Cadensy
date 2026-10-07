@@ -96,6 +96,7 @@ jobs:
           python -m pytest -q \
             --ignore=tests/test_pydantic_ai_poc.py \
             --ignore=tests/test_pydantic_runtime.py \
+            --ignore=tests/test_pydantic_composition.py \
             --ignore=tests/test_symmetric_evaluation_harness.py \
             --ignore=tests/test_formal_ab_runner.py \
             --ignore=tests/test_provider_smoke_harness.py \
@@ -313,6 +314,7 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_pydantic_ai_poc.py
+          tests/test_pydantic_composition.py
           tests/test_pydantic_runtime.py
           tests/test_symmetric_evaluation_harness.py
           tests/test_formal_ab_runner.py
@@ -320,6 +322,23 @@ jobs:
           tests/test_provider_smoke_harness.py
           tests/test_live_provider_smoke_adapter.py
           tests/test_evaluation_foundation.py
+
+  backend-production-pydantic-image-proof:
+    name: Backend — Production Pydantic Image Proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build production backend image
+        run: docker build --tag cadensy-backend-pr04e-proof backend
+
+      - name: Verify production Pydantic imports without network access
+        run: >-
+          docker run --rm --network none cadensy-backend-pr04e-proof
+          sh -c 'python -m pip check && python -c "import pydantic_ai" && python -c "import app.agents.pydantic_composition" && python -c "import app.domain.chat.service"'
 
   frontend-regression:
     name: Frontend — Regression and Builds

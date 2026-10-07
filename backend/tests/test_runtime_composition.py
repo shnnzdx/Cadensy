@@ -21,6 +21,7 @@ from app.agents.runtime_factory import (
     ChatRuntimeConfigurationError,
     build_chat_runtime,
 )
+from app.agents import runtime_factory
 from app.domain.chat import service as chat_service
 
 
@@ -61,6 +62,8 @@ def test_missing_selector_chooses_legacy_without_importing_pydantic(monkeypatch)
     runtime = build_chat_runtime(system_prompt="test prompt")
 
     assert isinstance(runtime, LegacyChatAgentRuntime)
+    if importlib.util.find_spec("pydantic_ai") is None:
+        assert "app.agents.pydantic_composition" not in sys.modules
 
 
 def test_legacy_only_environment_imports_chat_service_without_pydantic_runtime():
@@ -77,6 +80,8 @@ def test_explicit_legacy_selector_chooses_legacy(monkeypatch):
     runtime = build_chat_runtime(system_prompt="test prompt")
 
     assert isinstance(runtime, LegacyChatAgentRuntime)
+    if importlib.util.find_spec("pydantic_ai") is None:
+        assert "app.agents.pydantic_composition" not in sys.modules
 
 
 def test_explicit_pydantic_selector_uses_only_injected_pydantic_composition(monkeypatch):
@@ -97,6 +102,8 @@ def test_explicit_pydantic_selector_uses_only_injected_pydantic_composition(monk
 
     assert runtime is selected
     assert calls == 1
+    if importlib.util.find_spec("pydantic_ai") is None:
+        assert "app.agents.pydantic_composition" not in sys.modules
 
 
 def test_empty_selector_chooses_legacy(monkeypatch):
@@ -115,11 +122,40 @@ def test_invalid_explicit_selector_fails_closed(monkeypatch, selector: str):
         build_chat_runtime(system_prompt="test prompt")
 
 
-def test_pydantic_without_provider_composition_fails_closed(monkeypatch):
+def test_pydantic_without_installed_dependency_fails_closed_without_legacy_fallback(monkeypatch):
     monkeypatch.setenv("CHAT_AGENT_RUNTIME", "pydantic")
+    monkeypatch.setenv("MOCK_AI", "0")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-pr04e-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setitem(sys.modules, "pydantic_ai", None)
+    monkeypatch.setattr(
+        runtime_factory,
+        "LegacyChatAgentRuntime",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no Legacy fallback")),
+    )
 
     with pytest.raises(ChatRuntimeConfigurationError):
         build_chat_runtime(system_prompt="test prompt")
+
+
+def test_pydantic_production_composition_exception_is_normalized_without_fallback(monkeypatch):
+    monkeypatch.setenv("CHAT_AGENT_RUNTIME", "pydantic")
+    monkeypatch.setattr(
+        runtime_factory,
+        "_build_production_pydantic_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("credential=never-expose")),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "LegacyChatAgentRuntime",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no Legacy fallback")),
+    )
+
+    with pytest.raises(ChatRuntimeConfigurationError) as error:
+        build_chat_runtime(system_prompt="test prompt")
+
+    assert str(error.value) == "Pydantic Chat Runtime configuration is unavailable"
+    assert "never-expose" not in str(error.value)
 
 
 def test_chat_service_uses_selected_runtime_with_one_neutral_request(
