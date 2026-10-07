@@ -463,7 +463,7 @@ def test_request_timeout_discards_late_pydantic_result(monkeypatch):
 
     def blocking_model(_messages, _info):
         started.set()
-        release.wait(timeout=0.5)
+        release.wait(timeout=5.0)
         finished.set()
         return ModelResponse(
             parts=[
