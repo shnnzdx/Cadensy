@@ -122,20 +122,28 @@ def test_invalid_explicit_selector_fails_closed(monkeypatch, selector: str):
         build_chat_runtime(system_prompt="test prompt")
 
 
-def test_pydantic_without_installed_dependency_fails_closed_without_legacy_fallback(monkeypatch):
+def test_pydantic_dependency_unavailable_fails_closed_without_legacy_fallback(monkeypatch):
     monkeypatch.setenv("CHAT_AGENT_RUNTIME", "pydantic")
     monkeypatch.setenv("MOCK_AI", "0")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-pr04e-key")
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    monkeypatch.setitem(sys.modules, "pydantic_ai", None)
     monkeypatch.setattr(
         runtime_factory,
         "LegacyChatAgentRuntime",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no Legacy fallback")),
     )
 
-    with pytest.raises(ChatRuntimeConfigurationError):
+    if importlib.util.find_spec("pydantic_ai") is not None:
+        monkeypatch.setattr(
+            runtime_factory,
+            "_build_production_pydantic_runtime",
+            lambda **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("pydantic_ai")),
+        )
+
+    with pytest.raises(ChatRuntimeConfigurationError) as error:
         build_chat_runtime(system_prompt="test prompt")
+
+    assert str(error.value) == "Pydantic Chat Runtime configuration is unavailable"
 
 
 def test_pydantic_production_composition_exception_is_normalized_without_fallback(monkeypatch):

@@ -480,20 +480,41 @@ def test_request_timeout_discards_late_pydantic_result(monkeypatch):
         "record_agent_lifecycle",
         lambda **event: lifecycle_events.append(event),
     )
+    result_holder: dict[str, RuntimeResult] = {}
+    caller_errors: list[BaseException] = []
+
+    def call_runtime() -> None:
+        try:
+            result_holder["result"] = _runtime(FunctionModel(blocking_model)).run(
+                _request(),
+                _SyntheticCapability(),
+                execution=_execution(request=0.5),
+            )
+        except BaseException as error:
+            caller_errors.append(error)
+
+    caller = threading.Thread(target=call_runtime)
+    caller.start()
     try:
-        result = _runtime(FunctionModel(blocking_model)).run(
-            _request(),
-            _SyntheticCapability(),
-            execution=_execution(request=0.01),
-        )
-        assert started.is_set()
+        assert started.wait(timeout=2.0)
+        caller.join(timeout=2.0)
+        assert not caller.is_alive()
+        assert not caller_errors
+        result = result_holder["result"]
         assert result.observation.failure is not None
         assert result.observation.failure.normalized_kind == "request_timeout"
     finally:
         release.set()
 
-    assert _wait_until(finished.is_set)
+    caller.join(timeout=2.0)
+    assert not caller.is_alive()
+    assert finished.wait(timeout=2.0)
     assert _wait_until(lambda: any(event["phase"] == "late_completion" for event in lifecycle_events))
+    late_completion = next(
+        event for event in lifecycle_events if event["phase"] == "late_completion"
+    )
+    assert late_completion["result_consumed"] is False
+    assert late_completion["worker_cancel_requested"] is False
 
 
 def test_usage_limit_and_malformed_output_are_normalized_and_bounded():
