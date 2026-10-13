@@ -219,7 +219,7 @@ def test_migration_runner_image_proof_includes_the_full_offline_alembic_contract
         if step["name"] == "Verify runner contains the complete offline migration contract"
     )
 
-    assert "Dockerfile.migration-runner" in build["run"]
+    assert "Dockerfile.r5-migration-runner" in build["run"]
     assert "docker run --rm --network none" in proof["run"]
     assert "alembic.ini" in proof["run"]
     assert "f9ff23b7b84d" in proof["run"]
