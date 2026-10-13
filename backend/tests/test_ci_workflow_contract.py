@@ -129,6 +129,7 @@ def test_ci_remote_job_contract_has_pinned_runtimes_isolated_postgres_and_no_sof
         "backend-legacy-full-regression",
         "pydantic-ai-isolated-fake-compatibility",
         "backend-production-pydantic-image-proof",
+        "backend-migration-runner-image-proof",
         "frontend-regression",
     }
     for job in jobs.values():
@@ -207,3 +208,21 @@ def test_production_image_proof_installs_and_imports_pydantic_without_provider_e
     assert "build_chat_runtime" not in proof["run"]
     assert "runtime.run" not in proof["run"]
     assert "DEEPSEEK_API_KEY" not in proof["run"]
+
+
+def test_migration_runner_image_proof_includes_the_full_offline_alembic_contract():
+    steps = _workflow()["jobs"]["backend-migration-runner-image-proof"]["steps"]
+    build = next(step for step in steps if step["name"] == "Build one-off Alembic runner image")
+    proof = next(
+        step
+        for step in steps
+        if step["name"] == "Verify runner contains the complete offline migration contract"
+    )
+
+    assert "Dockerfile.migration-runner" in build["run"]
+    assert "docker run --rm --network none" in proof["run"]
+    assert "alembic.ini" in proof["run"]
+    assert "f9ff23b7b84d" in proof["run"]
+    assert "c2a4b6d8e0f1" in proof["run"]
+    assert "python -m alembic -c alembic.ini heads" in proof["run"]
+    assert "legacy_schema_compat" in proof["run"]
