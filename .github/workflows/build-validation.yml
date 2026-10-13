@@ -340,6 +340,27 @@ jobs:
           docker run --rm --network none cadensy-backend-pr04e-proof
           sh -c 'python -m pip check && python -c "import pydantic_ai" && python -c "import app.agents.pydantic_composition" && python -c "import app.domain.chat.service"'
 
+  backend-migration-runner-image-proof:
+    name: Backend — Migration Runner Image Proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build one-off Alembic runner image
+        run: >-
+          docker build
+          --file backend/Dockerfile.migration-runner
+          --tag cadensy-backend-migration-runner-proof
+          backend
+
+      - name: Verify runner contains the complete offline migration contract
+        run: >-
+          docker run --rm --network none cadensy-backend-migration-runner-proof
+          sh -c 'python -m pip check && test -f alembic.ini && test -f alembic/versions/f9ff23b7b84d_baseline_existing_schema.py && test -f alembic/versions/c2a4b6d8e0f1_pr05b_phase1_trip_ledger_schema.py && python -m alembic -c alembic.ini heads && python -c "import app.db.legacy_schema_compat"'
+
   frontend-regression:
     name: Frontend — Regression and Builds
     runs-on: ubuntu-latest
