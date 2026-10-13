@@ -45,7 +45,12 @@ def api_session(test_engine):
 
 
 @pytest.fixture
-def client(api_session: Session):
+def client(api_session: Session, monkeypatch):
+    # B.2D5's default-off route owns its Legacy Session explicitly so the
+    # protected branch cannot inherit a request transaction.  This fixture
+    # keeps the established transaction-isolated legacy tests on their shared
+    # test Session without altering production Session ownership.
+    monkeypatch.setattr(api, "SessionLocal", lambda: api_session)
     api.app.dependency_overrides[api.get_session] = lambda: api_session
     with TestClient(api.app) as test_client:
         yield test_client
@@ -528,6 +533,7 @@ def test_existing_items_block_regeneration_without_changing_them(
     )
     api_session.add(original)
     api_session.flush()
+    original_id = original.id
     before = (
         original.title,
         original.place,
@@ -542,12 +548,14 @@ def test_existing_items_block_regeneration_without_changing_them(
     )
 
     assert response.status_code == 409
+    persisted = api_session.get(PlanItem, original_id)
+    assert persisted is not None
     after = (
-        original.title,
-        original.place,
-        original.start_hour,
-        original.price_per_person,
-        original.source,
+        persisted.title,
+        persisted.place,
+        persisted.start_hour,
+        persisted.price_per_person,
+        persisted.source,
     )
     assert after == before
     assert api_session.query(PlanItem).count() == 1
@@ -1321,6 +1329,8 @@ def test_blocked_api_response_currently_reports_rules_and_writes_no_items(
     client: TestClient, api_session: Session, monkeypatch
 ):
     setup = _make_trip(api_session, days=4, budget_ceiling=1.0)
+    start_date = setup["trip"].preferred_start_date
+    assert start_date is not None
     monkeypatch.setattr(
         generator.place_service, "places_for_planner", lambda *_args: _paid_places()
     )
@@ -1338,10 +1348,10 @@ def test_blocked_api_response_currently_reports_rules_and_writes_no_items(
     assert body["planner_note"] is None
     assert body["blocked_reason"]
     assert body["days"] == [
-        {"day_index": 1, "day_date": setup["trip"].preferred_start_date.isoformat(), "items": []},
-        {"day_index": 2, "day_date": (setup["trip"].preferred_start_date + timedelta(days=1)).isoformat(), "items": []},
-        {"day_index": 3, "day_date": (setup["trip"].preferred_start_date + timedelta(days=2)).isoformat(), "items": []},
-        {"day_index": 4, "day_date": (setup["trip"].preferred_start_date + timedelta(days=3)).isoformat(), "items": []},
+            {"day_index": 1, "day_date": start_date.isoformat(), "items": []},
+            {"day_index": 2, "day_date": (start_date + timedelta(days=1)).isoformat(), "items": []},
+            {"day_index": 3, "day_date": (start_date + timedelta(days=2)).isoformat(), "items": []},
+            {"day_index": 4, "day_date": (start_date + timedelta(days=3)).isoformat(), "items": []},
     ]
     assert api_session.query(PlanItem).count() == 0
 

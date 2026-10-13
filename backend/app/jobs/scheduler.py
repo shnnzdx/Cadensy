@@ -13,17 +13,64 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
+
+from sqlalchemy import select
 
 from ..db.session import SessionLocal
+from ..db.models import ChangeProposal, DecisionRound, Plan, PlanItem
 from ..domain.decisions.orchestrator import expire_due_proposals, settle_due_rounds
+from ..domain.transactions import scheduler as protected_scheduler
 
 log = logging.getLogger("tripsync.scheduler")
 
 TICK_SECONDS = int(os.getenv("SETTLE_TICK_SECONDS", "60"))
+_PROTECTED_SCHEDULER_GATE = "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES"
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_NON_PRODUCTION = {"dev", "development", "local", "test", "testing", "ci", "staging"}
+
+
+def _protected_scheduler_enabled() -> bool:
+    return (
+        os.getenv(_PROTECTED_SCHEDULER_GATE, "0").strip().lower() in _TRUE_VALUES
+        and os.getenv("APP_ENV", "").strip().lower() in _NON_PRODUCTION
+    )
+
+
+def _protected_run_once() -> dict[str, list[str]]:
+    """Discover due IDs without locks, then claim each under its Trip root."""
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        rounds = db.execute(
+            select(DecisionRound.id, Plan.trip_id)
+            .join(PlanItem, DecisionRound.plan_item_id == PlanItem.id)
+            .join(Plan, PlanItem.plan_id == Plan.id)
+            .where(DecisionRound.status == "open", DecisionRound.deadline <= now)
+        ).all()
+        proposals = db.execute(
+            select(ChangeProposal.id, Plan.trip_id)
+            .join(PlanItem, ChangeProposal.plan_item_id == PlanItem.id)
+            .join(Plan, PlanItem.plan_id == Plan.id)
+            .where(
+                ChangeProposal.status.in_(("waiting_affected_members", "escalated")),
+                ChangeProposal.deadline.is_not(None),
+                ChangeProposal.deadline <= now,
+            )
+        ).all()
+    settled = [round_id for round_id, trip_id in rounds if protected_scheduler.settle_due_round(session_factory=SessionLocal, trip_id=trip_id, round_id=round_id, now=now)]
+    expired = [proposal_id for proposal_id, trip_id in proposals if protected_scheduler.expire_due_proposal(session_factory=SessionLocal, trip_id=trip_id, proposal_id=proposal_id, now=now)]
+    return {"settled": settled, "expired": expired}
 
 
 def run_once() -> dict[str, list[str]]:
     """结算到期的投票 + 作废到期的确认。跑多少次都安全。"""
+    if _protected_scheduler_enabled():
+        result = _protected_run_once()
+        if result["settled"]:
+            log.info("结算了 %d 轮投票: %s", len(result["settled"]), result["settled"])
+        if result["expired"]:
+            log.info("作废了 %d 个过期提案: %s", len(result["expired"]), result["expired"])
+        return result
     with SessionLocal() as db:
         settled = settle_due_rounds(db)
         expired = expire_due_proposals(db)

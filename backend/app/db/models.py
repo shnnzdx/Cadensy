@@ -17,6 +17,9 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    BigInteger,
+    CHAR,
+    CheckConstraint,
     JSON,
     Boolean,
     Date,
@@ -25,11 +28,14 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -104,6 +110,12 @@ class GuestSession(Base, TimestampMixin):
 
 class Trip(Base, TimestampMixin):
     __tablename__ = "trip"
+    __table_args__ = (
+        CheckConstraint(
+            "planning_facts_revision >= 0",
+            name="ck_trip_planning_facts_revision_nonnegative",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200))
@@ -124,6 +136,11 @@ class Trip(Base, TimestampMixin):
     cover_attribution_url: Mapped[str | None] = mapped_column(String(1000))
     cover_source_url: Mapped[str | None] = mapped_column(String(1000))
     cover_image_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Schema-only Phase 1 token for future Trip-bound planning-fact commands.
+    # No current writer owns increments in this migration.
+    planning_facts_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
 
     memberships: Mapped[list["TripMembership"]] = relationship(back_populates="trip")
 
@@ -232,9 +249,17 @@ class MemberConstraintPrivate(Base):
 
 class Plan(Base, TimestampMixin):
     __tablename__ = "plan"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_plan_revision_nonnegative"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     trip_id: Mapped[str] = mapped_column(ForeignKey("trip.id"))
+    # This is deliberately dormant in B.1. Later write paths own the rule for
+    # when it advances; the schema only guarantees a non-negative starting value.
+    revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
     status: Mapped[str] = mapped_column(String(20), default="active")  # active | blocked
     blocked_reason: Mapped[str | None] = mapped_column(Text)
     # Null means one or more itinerary prices are unknown. It must not be
@@ -246,6 +271,71 @@ class Plan(Base, TimestampMixin):
     needs_refresh: Mapped[bool] = mapped_column(Boolean, default=False)
 
     items: Mapped[list["PlanItem"]] = relationship(back_populates="plan")
+
+
+class MutationIdempotency(Base, TimestampMixin):
+    """Completed safe mutation outcomes, with no runtime behavior in B.1.
+
+    Later write commands must create and complete rows atomically with their
+    domain effect. This model intentionally does not provide replay, locking,
+    expiry cleanup, or public HTTP behavior.
+    """
+
+    __tablename__ = "mutation_idempotency"
+    __table_args__ = (
+        UniqueConstraint(
+            "trip_id",
+            "actor_membership_id",
+            "idempotency_key",
+            name="uq_mutation_idempotency_trip_actor_key",
+        ),
+        Index("ix_mutation_idempotency_expires_at", "expires_at"),
+        CheckConstraint(
+            "aggregate_scope IN ('plan', 'trip_planning_facts')",
+            name="ck_mutation_idempotency_aggregate_scope",
+        ),
+        CheckConstraint(
+            "resulting_plan_revision IS NULL OR resulting_plan_revision >= 0",
+            name="ck_mutation_idempotency_plan_result_nonnegative",
+        ),
+        CheckConstraint(
+            "resulting_trip_planning_facts_revision IS NULL "
+            "OR resulting_trip_planning_facts_revision >= 0",
+            name="ck_mutation_idempotency_trip_result_nonnegative",
+        ),
+        CheckConstraint(
+            "(aggregate_scope = 'plan' "
+            "AND resulting_plan_revision IS NOT NULL "
+            "AND resulting_trip_planning_facts_revision IS NULL) "
+            "OR (aggregate_scope = 'trip_planning_facts' "
+            "AND resulting_plan_revision IS NULL "
+            "AND resulting_trip_planning_facts_revision IS NOT NULL)",
+            name="ck_mutation_idempotency_result_scope",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trip.id"), nullable=False)
+    actor_membership_id: Mapped[str] = mapped_column(
+        ForeignKey("trip_membership.id"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    operation_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    resource_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    fingerprint_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    request_hmac: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    hmac_key_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    outcome_contract_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    response_status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    outcome_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    aggregate_scope: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="plan", server_default=text("'plan'")
+    )
+    resulting_plan_revision: Mapped[int | None] = mapped_column(BigInteger)
+    resulting_trip_planning_facts_revision: Mapped[int | None] = mapped_column(BigInteger)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class PlanItem(Base, TimestampMixin):

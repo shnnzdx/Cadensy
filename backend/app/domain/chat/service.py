@@ -25,6 +25,7 @@ from ...db.session import SessionLocal
 from ...db.models import Plan, PlanItem, Trip, TripMembership
 from ..constraints.types import Classification
 from ..decisions import orchestrator as orch
+from ..preview_apply import PreviewRequest, PreviewResult, RevisionBracketedPreview
 
 CHAT_AGENT_TIMEOUT_SECONDS = 30.0
 CHAT_AGENT_PROVIDER_TIMEOUT_SECONDS = 20.0
@@ -47,6 +48,40 @@ class ChatTripNotFound(Exception):
 
 class ChatItemNotFound(Exception):
     pass
+
+
+def preview_trip_chat_revision_bracketed(
+    *,
+    session_factory,
+    trip_id: str,
+    actor_membership_id: str,
+    message: str,
+    item_id: str | None = None,
+    history: tuple[chat_agent.HistoryTurn, ...] = (),
+) -> PreviewResult:
+    """Build the B.3 Preview through fresh bounded Sessions only.
+
+    Unlike ``respond_to_trip_chat`` this boundary accepts primitives, never a
+    request-owned SQLAlchemy Session or membership entity.  The Runtime remains
+    read-only and the returned candidate is explicitly non-authoritative.
+    """
+
+    runtime = build_chat_runtime(system_prompt=_agent_system_prompt())
+    return RevisionBracketedPreview(
+        session_factory=session_factory,
+        runtime=runtime,
+        execution=_chat_agent_execution_config(),
+    ).preview(
+        PreviewRequest(
+            trip_id=trip_id,
+            actor_membership_id=actor_membership_id,
+            message=message,
+            selected_item_id=item_id,
+            history=tuple(
+                RuntimeHistoryTurn(role=turn.role, text=turn.text) for turn in history
+            ),
+        )
+    )
 
 
 @dataclass(frozen=True)

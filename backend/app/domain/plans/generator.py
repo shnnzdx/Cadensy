@@ -7,7 +7,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Iterable
+from typing import Callable, Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -508,6 +508,7 @@ def _build_day(
     allow_reuse_across_days: bool,
     poi_pool: tuple[Poi, ...],
     meal_budget_cap: float | None,
+    planner_call: Callable[[planner.PlanDayInput], planner.PlanDayResult] | None = None,
 ) -> DayDraft | None:
     for attempt in range(2):
         effective_already_used = (
@@ -539,6 +540,7 @@ def _build_day(
             already_used=effective_already_used,
             interests=interests,
             preferred_activity_count=preferred_activity_count,
+            planner_call=planner_call,
         )
         if day is None:
             day = _rules_day(
@@ -620,6 +622,7 @@ def _planner_day(
     already_used: set[str],
     interests: tuple[str, ...],
     preferred_activity_count: int,
+    planner_call: Callable[[planner.PlanDayInput], planner.PlanDayResult] | None = None,
 ) -> DayDraft | None:
     sightseeing_candidates = tuple(poi for poi in candidates if not poi.is_meal)
     candidate_by_id = {poi.candidate_id: poi for poi in sightseeing_candidates}
@@ -653,7 +656,10 @@ def _planner_day(
     )
 
     try:
-        day_result = planner.plan_day(payload)
+        # Legacy callers intentionally resolve ``planner.plan_day`` at call time so
+        # their existing monkeypatch/model behavior remains unchanged.  The new
+        # detached lifecycle seam supplies this capability explicitly instead.
+        day_result = (planner.plan_day if planner_call is None else planner_call)(payload)
     except (base.AgentUnavailable, planner.PlannerDayUnusable):
         return None
 
