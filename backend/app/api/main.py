@@ -11,15 +11,17 @@ from __future__ import annotations
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..agents import chat as chat_agent
+from ..agents import planner as planner_agent
 from ..agents import tools as agent_tools
 from ..agents.tools import DAY_END_HOUR, DAY_START_HOUR
 from ..db.models import (
@@ -36,16 +38,79 @@ from ..db.models import (
     User,
     Vote,
 )
-from ..db.session import get_session
+from ..db.session import SessionLocal, get_session
 from ..domain.access import ForeignTripAccess, ScopedResourceNotFound, for_membership
 from ..domain import auth as auth_service
 from ..domain.chat import service as chat_service
 from ..domain.decisions import orchestrator as orch
+from ..domain.preview_apply import (
+    PreviewAccessDenied,
+    PreviewDuplicatePlans,
+    PreviewItemNotFound,
+    PreviewMissingPlan,
+    PreviewTripNotFound,
+    StalePreview,
+)
 from ..domain.decisions import organizer as org_actions
 from ..domain.plans import generator as plan_generator
+from ..domain.plans import generator_commit as protected_generator_commit
+from ..domain.plans import manual_items
+from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
 from ..domain.trips import service as trip_service
 from ..domain.trips import cover_service as trip_cover_service
+from ..domain.transactions import (
+    CredentialProof,
+    DuplicatePlans,
+    FingerprintVersionMismatch,
+    GeneratorDurableCoordinator,
+    GeneratorIdempotentCommand,
+    HmacSigningKey,
+    IdempotencyKeyReused,
+    IdempotencyRecordExpired,
+    InvalidDurableCommand,
+    InvalidIdempotencyKey,
+    InvalidCredential,
+    InsufficientRole,
+    LockUnavailable,
+    MembershipNotAuthorized,
+    MissingPlan,
+    PlanRevisionOverflow,
+    PreliminaryActorScope,
+    RetriableDeadlock,
+    RetriableSerializationFailure,
+    StalePlanRevision,
+    StaleGeneratorPreconditions,
+    StaleTripPlanningFactsRevision,
+    StaticOutcomeContractRegistry,
+    TripNotFound,
+    TripPlanningFactsRevisionOverflow,
+    TripTransactionKernel,
+    TransactionIntegrityViolation,
+    TransactionDatabaseFailure,
+    UnknownHmacKeyVersion,
+    UnsafeDurableOutcome,
+    UnsupportedGeneratorOutcome,
+    UnsupportedFingerprintVersion,
+    UnsupportedOutcomeContract,
+    generator_outcome_contract,
+)
+from ..domain.transactions import manual_plan_item as protected_manual_items
+from ..domain.transactions import booking as protected_booking
+from ..domain.transactions import change_proposal as protected_changes
+from ..domain.transactions import vote as protected_vote
+from ..domain.transactions import proposal_decision as protected_proposal_decisions
+from ..domain.transactions import notice_objection as protected_notice_objections
+from ..domain.transactions import round_settlement as protected_round_settlements
+from ..domain.transactions import constraint_create as protected_constraint_create
+from ..domain.transactions import constraint_update as protected_constraint_update
+from ..domain.transactions import constraint_delete as protected_constraint_delete
+from ..domain.transactions import preferences_save as protected_preferences_save
+from ..domain.transactions import organizer_actions as protected_organizer_actions
+from ..domain.transactions import membership_remove as protected_membership_remove
+from ..domain.transactions import membership_join as protected_membership_join
+from ..domain.transactions.protected_profile import b3_profile_admission
+from ..domain.transactions.trip_preferences_common import ProtectedConstraintMissing, StaticHmacKeyring as TripStaticHmacKeyring
 
 DEFAULT_CORS_ORIGINS = (
     "http://localhost:5173",
@@ -53,6 +118,28 @@ DEFAULT_CORS_ORIGINS = (
     "http://localhost:3000",
 )
 PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod"})
+_B2C_MANUAL_ITEM_GATE = "CADENSY_B2C_PROTECTED_MANUAL_ITEM_WRITES"
+_B2C_BOOKING_GATE = "CADENSY_B2C_PROTECTED_BOOKING_WRITES"
+_B2C_CHANGE_PROPOSAL_GATE = "CADENSY_B2C_PROTECTED_CHANGE_PROPOSAL_WRITES"
+_B2C_VOTE_GATE = "CADENSY_B2C_PROTECTED_VOTE_WRITES"
+_B2C_PROPOSAL_DECISION_GATE = "CADENSY_B2C_PROTECTED_PROPOSAL_DECISION_WRITES"
+_B2C_NOTICE_OBJECTION_GATE = "CADENSY_B2C_PROTECTED_NOTICE_OBJECTION_WRITES"
+_B2C_ROUND_SETTLEMENT_GATE = "CADENSY_B2C_PROTECTED_ROUND_SETTLEMENT_WRITES"
+_B2C_CONSTRAINT_CREATE_GATE = "CADENSY_B2C_PROTECTED_CONSTRAINT_CREATE_WRITES"
+_B2C_CONSTRAINT_UPDATE_GATE = "CADENSY_B2C_PROTECTED_CONSTRAINT_UPDATE_WRITES"
+_B2C_CONSTRAINT_DELETE_GATE = "CADENSY_B2C_PROTECTED_CONSTRAINT_DELETE_WRITES"
+_B2C_PREFERENCES_GATE = "CADENSY_B2C_PROTECTED_PREFERENCES_WRITES"
+_B2C_HMAC_KEY = "CADENSY_B2C_HMAC_KEY"
+_B2D_GENERATOR_GATE = "CADENSY_B2D_PROTECTED_GENERATOR_WRITES"
+_B2E_ORGANIZER_GATE = "CADENSY_B2E_PROTECTED_ORGANIZER_WRITES"
+_B2E_MEMBERSHIP_GATE = "CADENSY_B2E_PROTECTED_MEMBERSHIP_WRITES"
+_B2E_SCHEDULER_GATE = "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES"
+_B3_PREVIEW_APPLY_GATE = "CADENSY_B3_PROTECTED_PREVIEW_APPLY"
+_B2D_NON_PRODUCTION_ENVIRONMENTS = frozenset(
+    {"development", "dev", "local", "test", "testing", "ci", "staging"}
+)
+_FALSE_GATE_VALUES = frozenset({"", "0", "false", "no", "off"})
+_TRUE_GATE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def parse_cors_origins(raw: str | None = None) -> list[str]:
@@ -82,6 +169,7 @@ app.add_middleware(
     allow_origins=parse_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Trip-Facts-Revision", "X-Current-Trip-Facts-Revision"],
 )
 
 
@@ -176,6 +264,150 @@ def _bearer_token(authorization: str | None) -> str | None:
     if scheme.lower() != "bearer" or not token.strip():
         return None
     return token.strip()
+
+
+def _preliminary_actor_scope(membership: TripMembership) -> PreliminaryActorScope:
+    """Detach request-auth facts before a protected writer owns its Session."""
+
+    return PreliminaryActorScope(
+        trip_id=membership.trip_id,
+        membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+
+
+def _b2c_manual_item_gate_enabled() -> bool:
+    return _b2c_manual_item_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_manual_item_gate_requested() -> bool:
+    return os.getenv(_B2C_MANUAL_ITEM_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_booking_gate_requested() -> bool:
+    return os.getenv(_B2C_BOOKING_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_booking_gate_enabled() -> bool:
+    return _b2c_booking_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_change_proposal_gate_requested() -> bool:
+    return os.getenv(_B2C_CHANGE_PROPOSAL_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_change_proposal_gate_enabled() -> bool:
+    return _b2c_change_proposal_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_vote_gate_requested() -> bool:
+    return os.getenv(_B2C_VOTE_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_vote_gate_enabled() -> bool:
+    return _b2c_vote_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_proposal_decision_gate_requested() -> bool:
+    return os.getenv(_B2C_PROPOSAL_DECISION_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_proposal_decision_gate_enabled() -> bool:
+    return _b2c_proposal_decision_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_notice_objection_gate_requested() -> bool:
+    return os.getenv(_B2C_NOTICE_OBJECTION_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_notice_objection_gate_enabled() -> bool:
+    return _b2c_notice_objection_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_round_settlement_gate_requested() -> bool:
+    return os.getenv(_B2C_ROUND_SETTLEMENT_GATE, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_round_settlement_gate_enabled() -> bool:
+    return _b2c_round_settlement_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2c_trip_writer_gate_requested(gate: str) -> bool:
+    return os.getenv(gate, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b2c_trip_writer_gate_enabled(gate: str) -> bool:
+    return _b2c_trip_writer_gate_requested(gate) and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+
+
+def _b2d_generator_gate_state() -> str:
+    """Classify the sole B.2D Generator gate without opening a DB Session.
+
+    ``off`` deliberately preserves Legacy behavior.  Every non-false malformed
+    flag or environment selection fails closed instead of accidentally making a
+    protected request eligible.  The route uses this before either auth or a
+    request Session can be constructed.
+    """
+
+    raw_gate = os.getenv(_B2D_GENERATOR_GATE, "0").strip().lower()
+    if raw_gate in _FALSE_GATE_VALUES:
+        return "off"
+    if raw_gate not in _TRUE_GATE_VALUES:
+        return "invalid"
+    raw_environment = os.getenv("APP_ENV")
+    if raw_environment is None:
+        return "invalid"
+    environment = raw_environment.strip().lower()
+    if environment in PRODUCTION_ENVIRONMENTS:
+        return "production"
+    if environment not in _B2D_NON_PRODUCTION_ENVIRONMENTS:
+        return "invalid"
+    return "enabled"
+
+
+def _b3_preview_apply_gate_state() -> str:
+    """Return the effective B.3 admission state without opening a Session.
+
+    The new B.3 switch is intentionally separate from every B.2C/B.2D writer
+    flag.  When requested it checks the *effective* protected profile rather
+    than treating raw environment strings as evidence that every writer uses
+    the same protocol.  Every unexpected value fails closed.
+    """
+
+    raw_gate = os.getenv(_B3_PREVIEW_APPLY_GATE, "0").strip().lower()
+    if raw_gate in _FALSE_GATE_VALUES:
+        return "off"
+    if raw_gate not in _TRUE_GATE_VALUES:
+        return "invalid"
+    environment = os.getenv("APP_ENV")
+    if environment is None:
+        return "invalid"
+    normalized_environment = environment.strip().lower()
+    if normalized_environment in PRODUCTION_ENVIRONMENTS:
+        return "production"
+    configured_gates = {
+        _B2C_MANUAL_ITEM_GATE: _b2c_manual_item_gate_enabled(),
+        _B2C_BOOKING_GATE: _b2c_booking_gate_enabled(),
+        _B2C_CHANGE_PROPOSAL_GATE: _b2c_change_proposal_gate_enabled(),
+        _B2C_VOTE_GATE: _b2c_vote_gate_enabled(),
+        _B2C_PROPOSAL_DECISION_GATE: _b2c_proposal_decision_gate_enabled(),
+        _B2C_NOTICE_OBJECTION_GATE: _b2c_notice_objection_gate_enabled(),
+        _B2C_ROUND_SETTLEMENT_GATE: _b2c_round_settlement_gate_enabled(),
+        _B2C_CONSTRAINT_CREATE_GATE: _b2c_trip_writer_gate_enabled(_B2C_CONSTRAINT_CREATE_GATE),
+        _B2C_CONSTRAINT_UPDATE_GATE: _b2c_trip_writer_gate_enabled(_B2C_CONSTRAINT_UPDATE_GATE),
+        _B2C_CONSTRAINT_DELETE_GATE: _b2c_trip_writer_gate_enabled(_B2C_CONSTRAINT_DELETE_GATE),
+        _B2C_PREFERENCES_GATE: _b2c_trip_writer_gate_enabled(_B2C_PREFERENCES_GATE),
+        _B2D_GENERATOR_GATE: _b2d_generator_gate_state() == "enabled",
+        _B2E_MEMBERSHIP_GATE: _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE),
+        _B2E_SCHEDULER_GATE: _b2c_trip_writer_gate_enabled(_B2E_SCHEDULER_GATE),
+        _B2E_ORGANIZER_GATE: _b2c_trip_writer_gate_enabled(_B2E_ORGANIZER_GATE),
+    }
+    admission = b3_profile_admission(
+        environment=normalized_environment,
+        configured_gates=configured_gates,
+    )
+    return "enabled" if admission.admitted else "incomplete-profile"
 
 
 # -------------------- Request and response shapes --------------------
@@ -693,65 +925,132 @@ def add_plan_item(
     body: AddPlanItemRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
     """Insert a manually named stop between two adjacent current-plan items."""
+    if _b2c_manual_item_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected manual-item writes are not available in production")
+    if _b2c_manual_item_gate_enabled():
+        return _protected_manual_plan_item_add(
+            plan_id=plan_id,
+            body=body,
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
     if not body.title.strip():
         raise HTTPException(422, "A stop name is required")
     try:
         plan = for_membership(db, me).require_plan(plan_id)
     except ScopedResourceNotFound as exc:
         raise HTTPException(404, "Plan not found") from exc
-
-    items = db.scalars(
-        select(PlanItem)
-        .where(PlanItem.plan_id == plan.id, PlanItem.settledness != "removed")
-        .order_by(PlanItem.day_index, PlanItem.start_hour, PlanItem.id)
-    ).all()
-    after_index = next((index for index, item in enumerate(items) if item.id == body.after_item_id), None)
-    before_index = next((index for index, item in enumerate(items) if item.id == body.before_item_id), None)
-    if after_index is None or before_index is None or before_index != after_index + 1:
-        raise HTTPException(409, "These stops are no longer adjacent")
-
-    after = items[after_index]
-    before = items[before_index]
-    if after.day_index != before.day_index or before.start_hour <= after.start_hour:
-        raise HTTPException(409, "There is no open time between these stops")
-
-    # Manual stops use a short, deterministic prototype duration. If the client
-    # supplies a time, it must fit inside the real gap between adjacent stops.
-    manual_duration_min = 30
-    default_block_minutes = 90
-    after_end_hour = after.start_hour + (after.duration_min or default_block_minutes) / 60
-    latest_start_hour = before.start_hour - manual_duration_min / 60
-    if latest_start_hour < after_end_hour:
-        raise HTTPException(409, "This stop may affect the next activity's time.")
-    start_hour = body.start_hour if body.start_hour is not None else (after_end_hour + latest_start_hour) / 2
-    if start_hour < after_end_hour or start_hour > latest_start_hour:
-        raise HTTPException(422, "Choose a time that fits between these stops.")
-
-    inserted = PlanItem(
-        plan_id=plan.id,
-        day_index=after.day_index,
-        day_date=after.day_date,
-        start_hour=start_hour,
-        duration_min=manual_duration_min,
-        title=body.title.strip(),
-        local_title=None,
-        place=body.title.strip(),
-        price_per_person=None,
-        tags=[],
-        dietary_tags=[],
-        is_meal=False,
-        lat=None,
-        lng=None,
-        photo_url=None,
-        source="manual",
-        settledness="loose",
-    )
-    db.add(inserted)
+    try:
+        inserted = manual_items.add_manual_plan_item(
+            db,
+            plan,
+            manual_items.ManualPlanItemCommand(
+                title=body.title,
+                after_item_id=body.after_item_id,
+                before_item_id=body.before_item_id,
+                start_hour=body.start_hour,
+            ),
+            lock_children=False,
+        )
+    except manual_items.ManualPlanItemInvalid as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except manual_items.ManualPlanItemConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     db.commit()
     db.refresh(inserted)
     return _item_out(inserted)
+
+
+def _protected_manual_plan_item_add(
+    *,
+    plan_id: str,
+    body: AddPlanItemRequest,
+    membership: TripMembership,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_plan_revision: str | None,
+) -> dict:
+    """Disabled-by-default B.2C adapter for the real manual-item route.
+
+    This boundary consumes the request Session's membership only to construct
+    primitive preliminary scope. The protected command reauthorizes the bearer
+    in its own Session before it reads the ledger or mutable business rows.
+    """
+
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected manual-item writes require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected manual-item writer is not configured")
+    scope = PreliminaryActorScope(
+        trip_id=membership.trip_id,
+        membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+    try:
+        result = protected_manual_items.execute_protected_manual_plan_item_add(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=CredentialProof.from_bearer_token(token),
+            command=protected_manual_items.ProtectedManualPlanItemAdd(
+                plan_id=plan_id,
+                idempotency_key=idempotency_key,
+                expected_plan_revision=revision,
+                title=body.title,
+                after_item_id=body.after_item_id,
+                before_item_id=body.before_item_id,
+                start_hour=body.start_hour,
+            ),
+            keyring=protected_manual_items.StaticHmacKeyring(
+                protected_manual_items.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))
+            ),
+        )
+    except protected_manual_items.ManualPlanMismatch as exc:
+        raise HTTPException(404, "Plan not found") from exc
+    except manual_items.ManualPlanItemInvalid as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except manual_items.ManualPlanItemConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected manual-item authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected manual-item authorization failed") from exc
+    except MissingPlan as exc:
+        raise HTTPException(404, "Plan not found") from exc
+    except TripNotFound as exc:
+        raise HTTPException(404, "Plan not found") from exc
+    except DuplicatePlans as exc:
+        raise HTTPException(409, "Protected manual-item aggregate is unavailable") from exc
+    except (UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected manual-item replay is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected manual-item revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected manual-item command could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected manual-item command could not be completed") from exc
+    return result.payload
 
 
 @app.get("/api/trips/{trip_id}/comments")
@@ -864,6 +1163,84 @@ def chat_with_trip(
     classify(), and the response tells the frontend what it could submit later.
     This endpoint never calls propose_change().
     """
+    b3_state = _b3_preview_apply_gate_state()
+    if b3_state != "off":
+        if b3_state != "enabled":
+            raise HTTPException(503, "Protected Preview is not available")
+        # Extract only preliminary primitives while the request Session is
+        # live.  Close it before Runtime/provider work so it cannot retain an
+        # identity map or transaction through any bounded B.3 read tool.
+        if me.trip_id != trip_id:
+            raise HTTPException(403, "This membership does not belong to this trip")
+        actor_membership_id = me.id
+        db.close()
+        try:
+            preview = chat_service.preview_trip_chat_revision_bracketed(
+                session_factory=SessionLocal,
+                trip_id=trip_id,
+                actor_membership_id=actor_membership_id,
+                message=body.message,
+                item_id=body.item_id,
+                history=tuple(
+                    chat_agent.HistoryTurn(
+                        role=turn.role,
+                        text=turn.text,
+                        candidate_options=tuple(
+                            chat_agent.HistoryCandidateOption(
+                                id=option.id,
+                                label=option.label,
+                                title=option.title,
+                                body=option.body,
+                                tradeoff=option.tradeoff,
+                                item_id=option.item_id,
+                                patch=option.patch,
+                            )
+                            for option in turn.candidate_options
+                        ),
+                    )
+                    for turn in body.history
+                ),
+            )
+        except PreviewAccessDenied as exc:
+            raise HTTPException(403, "Protected Preview authorization failed") from exc
+        except PreviewTripNotFound as exc:
+            raise HTTPException(404, "Trip not found") from exc
+        except (PreviewItemNotFound, PreviewMissingPlan) as exc:
+            raise HTTPException(404, "Preview target is not available") from exc
+        except (PreviewDuplicatePlans, StalePreview) as exc:
+            raise HTTPException(409, "Preview conflicts with current planning state") from exc
+
+        candidate = None
+        if preview.candidate is not None:
+            candidate = {
+                "item_id": preview.candidate.item_id,
+                "item_title": preview.candidate.item_title,
+                "patch": preview.candidate.patch,
+                "verdict": _classification_out(preview.candidate.classification),
+            }
+        return {
+            "reply": preview.reply,
+            "proposed_change": candidate,
+            "candidate_options": [
+                {
+                    "id": option.id,
+                    "label": option.label,
+                    "title": option.title,
+                    "body": option.body,
+                    "tradeoff": option.tradeoff,
+                    "item_id": option.item_id,
+                    "patch": option.patch,
+                }
+                for option in preview.candidate_options
+            ],
+            "preview": {
+                "plan_id": preview.plan_id,
+                "plan_revision": preview.plan_revision,
+                "planning_facts_revision": preview.planning_facts_revision,
+                "authoritative": False,
+            },
+        }
+
     _require_scoped_trip(db, me, trip_id)
     try:
         result = chat_service.respond_to_trip_chat(
@@ -1166,12 +1543,19 @@ def join_invite(
     if not body.display_name.strip():
         raise HTTPException(422, "Display name is required")
     try:
-        joined = trip_service.join_invite(
-            db,
-            token,
-            display_name=body.display_name,
-            email=body.email,
-        )
+        if _b2c_trip_writer_gate_requested(_B2E_MEMBERSHIP_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+            raise HTTPException(503, "Protected membership writes are not available in production")
+        if _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE):
+            joined = protected_membership_join.join_invite_under_trip_root(
+                session_factory=SessionLocal, token=token, display_name=body.display_name, email=body.email,
+            )
+        else:
+            joined = trip_service.join_invite(
+                db,
+                token,
+                display_name=body.display_name,
+                email=body.email,
+            )
     except trip_service.InviteNotFound as exc:
         raise HTTPException(404, "Invite not found") from exc
     db.commit()
@@ -1209,7 +1593,33 @@ def remove_membership(
     membership_id: str,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
 ) -> dict:
+    if _b2c_trip_writer_gate_requested(_B2E_MEMBERSHIP_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected membership writes are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE):
+        try:
+            scope, credential, key, revision, keyring = _protected_trip_revision(
+                membership=me, authorization=authorization, idempotency_key=idempotency_key,
+                expected_trip_facts_revision=expected_trip_facts_revision,
+            )
+            result = protected_membership_remove.execute_protected_membership_remove(
+                session_factory=SessionLocal, scope=scope, credential=credential,
+                command=protected_membership_remove.ProtectedMembershipRemove(membership_id, key, revision),
+                keyring=keyring,
+            )
+        except protected_membership_remove.MembershipTargetMissing as exc:
+            raise HTTPException(404, "Trip membership not found") from exc
+        except trip_service.MembershipRemovalDenied as exc:
+            raise HTTPException(409, "Membership cannot be removed") from exc
+        except Exception as exc:
+            _protected_trip_error(exc)
+        if response is not None:
+            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+        return result.payload
     _require_scoped_trip(db, me, trip_id)
     try:
         trip_service.remove_membership(
@@ -1226,24 +1636,9 @@ def remove_membership(
     return {"removed": True}
 
 
-@app.post("/api/trips/{trip_id}/plans/generate")
-def generate_trip_plan(
-    trip_id: str,
-    db: Session = Depends(get_session),
-    me: TripMembership = Depends(current_membership),
-) -> dict:
-    _require_scoped_trip(db, me, trip_id)
-    try:
-        result = plan_generator.generate_plan(db, trip_id, me)
-    except plan_generator.OrganizerRequired as exc:
-        raise HTTPException(403, str(exc)) from exc
-    except plan_generator.OrganizerPreferencesRequired as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except plan_generator.PlanAlreadyHasItems as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except plan_generator.TripNotFound as exc:
-        raise HTTPException(404, str(exc)) from exc
-    db.commit()
+def _generator_result_out(result: plan_generator.GenerationResult) -> dict:
+    """Serialize the established Legacy Generator response shape exactly once."""
+
     return {
         "plan_id": result.plan.id,
         "status": result.status,
@@ -1258,6 +1653,208 @@ def generate_trip_plan(
             else None
         ),
     }
+
+
+def _generate_trip_plan_legacy(
+    *, trip_id: str, authorization: str | None, x_trip_id: str | None
+) -> dict:
+    """Retain the historical request-Session/commit path while the gate is off."""
+
+    db = SessionLocal()
+    try:
+        me = current_membership(
+            db=db, authorization=authorization, x_trip_id=x_trip_id
+        )
+        _require_scoped_trip(db, me, trip_id)
+        try:
+            result = plan_generator.generate_plan(db, trip_id, me)
+        except plan_generator.OrganizerRequired as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except plan_generator.OrganizerPreferencesRequired as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except plan_generator.PlanAlreadyHasItems as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except plan_generator.TripNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        db.commit()
+        return _generator_result_out(result)
+    finally:
+        db.close()
+
+
+def _protected_generator_scope(
+    *, trip_id: str, authorization: str | None, x_trip_id: str | None
+) -> tuple[PreliminaryActorScope, CredentialProof]:
+    """Resolve only primitive, trusted Generator admission facts.
+
+    Account-first bearer resolution remains in ``current_membership``.  The
+    short preliminary Session is always closed before replay preflight,
+    detached Prepare, and especially provider/planner execution.  The final
+    coordinator transaction repeats authoritative credential, membership, and
+    organizer authorization under the Trip root lock.
+    """
+
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    try:
+        db = SessionLocal()
+        try:
+            membership = current_membership(
+                db=db, authorization=authorization, x_trip_id=x_trip_id
+            )
+            if membership.trip_id != trip_id:
+                raise HTTPException(403, "This identity belongs to a different trip")
+            scope = PreliminaryActorScope(
+                trip_id=trip_id,
+                membership_id=membership.id,
+                credential_kind="account" if membership.user_id is not None else "guest",
+                expected_user_id=membership.user_id,
+            )
+            return scope, CredentialProof.from_bearer_token(token)
+        finally:
+            db.close()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            503, "Protected Generator authentication is temporarily unavailable"
+        ) from exc
+
+
+def _generator_protected_coordinator() -> GeneratorDurableCoordinator:
+    """Create the one reviewed B.2D3 coordinator from protected-only config."""
+
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if key_material is None or not key_material.strip():
+        raise HTTPException(503, "Protected Generator is not configured")
+    try:
+        key = HmacSigningKey("b2c-local-v1", key_material.encode("utf-8", "strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise HTTPException(503, "Protected Generator is not configured") from exc
+    return GeneratorDurableCoordinator(
+        TripTransactionKernel(SessionLocal),
+        TripStaticHmacKeyring(key),
+        StaticOutcomeContractRegistry((generator_outcome_contract(),)),
+    )
+
+
+def _generator_http_provider_fetch(destination: str):
+    """Narrow test seam; production delegates to the established Geoapify adapter."""
+
+    return geoapify.fetch_places(destination)
+
+
+def _generator_http_planner_call(payload):
+    """Narrow test seam; production delegates to the established planner adapter."""
+
+    return planner_agent.plan_day(payload)
+
+
+def _protected_generator_error(exc: Exception) -> None:
+    """Map only reviewed protected-command failures without exposing internals."""
+
+    if isinstance(exc, (InvalidIdempotencyKey, InvalidDurableCommand)):
+        raise HTTPException(422, "Protected Generator command is invalid") from exc
+    if isinstance(
+        exc,
+        (
+            StaleGeneratorPreconditions,
+            plan_generator.PlanAlreadyHasItems,
+            DuplicatePlans,
+            IdempotencyKeyReused,
+            IdempotencyRecordExpired,
+            FingerprintVersionMismatch,
+            UnknownHmacKeyVersion,
+            UnsupportedFingerprintVersion,
+            UnsupportedOutcomeContract,
+            UnsupportedGeneratorOutcome,
+            UnsafeDurableOutcome,
+            PlanRevisionOverflow,
+            MissingPlan,
+        ),
+    ):
+        raise HTTPException(409, "Protected Generator command conflicts with current state") from exc
+    if isinstance(exc, InvalidCredential):
+        raise HTTPException(401, "Protected Generator authorization failed") from exc
+    if isinstance(exc, (MembershipNotAuthorized, InsufficientRole, plan_generator.OrganizerRequired)):
+        raise HTTPException(403, "Protected Generator authorization failed") from exc
+    if isinstance(exc, (TripNotFound, plan_generator.TripNotFound)):
+        raise HTTPException(404, "Trip not found") from exc
+    if isinstance(exc, plan_generator.OrganizerPreferencesRequired):
+        raise HTTPException(422, "The organizer must submit preferences before generating a plan") from exc
+    if isinstance(
+        exc,
+        (
+            LockUnavailable,
+            RetriableDeadlock,
+            RetriableSerializationFailure,
+            TransactionIntegrityViolation,
+            TransactionDatabaseFailure,
+        ),
+    ):
+        raise HTTPException(503, "Protected Generator could not be completed safely") from exc
+    raise exc
+
+
+def _generate_trip_plan_protected(
+    *,
+    trip_id: str,
+    authorization: str | None,
+    x_trip_id: str | None,
+    idempotency_key: str | None,
+) -> dict:
+    if idempotency_key is None:
+        raise HTTPException(428, "Protected Generator requires an Idempotency-Key")
+    try:
+        command = GeneratorIdempotentCommand(
+            idempotency_key=idempotency_key,
+            fingerprint_version=1,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+    except (InvalidIdempotencyKey, InvalidDurableCommand) as exc:
+        raise HTTPException(422, "Protected Generator command is invalid") from exc
+    coordinator = _generator_protected_coordinator()
+    scope, credential = _protected_generator_scope(
+        trip_id=trip_id, authorization=authorization, x_trip_id=x_trip_id
+    )
+    try:
+        result = protected_generator_commit.execute_protected_plan_generation(
+            session_factory=SessionLocal,
+            coordinator=coordinator,
+            scope=scope,
+            credential=credential,
+            command=command,
+            provider_fetch=_generator_http_provider_fetch,
+            planner_call=_generator_http_planner_call,
+        )
+    except Exception as exc:
+        _protected_generator_error(exc)
+    return result.payload
+
+
+@app.post("/api/trips/{trip_id}/plans/generate")
+def generate_trip_plan(
+    trip_id: str,
+    authorization: str | None = Header(default=None),
+    x_trip_id: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    """Run Legacy by default, or the frozen B.2D lifecycle when explicitly gated."""
+
+    gate_state = _b2d_generator_gate_state()
+    if gate_state == "off":
+        return _generate_trip_plan_legacy(
+            trip_id=trip_id, authorization=authorization, x_trip_id=x_trip_id
+        )
+    if gate_state == "production":
+        raise HTTPException(503, "Protected Generator is not available in production")
+    if gate_state == "invalid":
+        raise HTTPException(503, "Protected Generator configuration is unavailable")
+    return _generate_trip_plan_protected(
+        trip_id=trip_id,
+        authorization=authorization,
+        x_trip_id=x_trip_id,
+        idempotency_key=idempotency_key,
+    )
 
 
 @app.post("/api/plans/items/{item_id}/classify")
@@ -1289,8 +1886,39 @@ def submit_change(
     body: ChangeRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
     """Submit a real change. Classification and execution happen together."""
+    b3_state = _b3_preview_apply_gate_state()
+    if b3_state != "off":
+        if b3_state != "enabled":
+            raise HTTPException(503, "Protected Apply is not available")
+        # B.3 Apply intentionally composes the existing protected Change
+        # Proposal command.  Extract scope before closing the request Session;
+        # the writer then opens and owns its fresh Trip-first transaction.
+        scope = _preliminary_actor_scope(me)
+        db.close()
+        return _protected_submit_change(
+            item_id=item_id,
+            body=body,
+            scope=scope,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
+    if _b2c_change_proposal_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected change writes are not available in production")
+    if _b2c_change_proposal_gate_enabled():
+        return _protected_submit_change(
+            item_id=item_id,
+            body=body,
+            scope=_preliminary_actor_scope(me),
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
     item = _require_scoped_plan_item(db, me, item_id)
     alternatives = _validated_change_options(db, item, me.id, body.options)
     try:
@@ -1309,6 +1937,83 @@ def submit_change(
         raise HTTPException(409, str(exc)) from exc
     db.commit()
     return _outcome_out(outcome)
+
+
+def _protected_submit_change(
+    *,
+    item_id: str,
+    body: ChangeRequest,
+    scope: PreliminaryActorScope,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_plan_revision: str | None,
+) -> dict:
+    """Default-off adapter for the existing Change Proposal submission route.
+
+    The request Session contributes only primitive preliminary identity facts.
+    The protected command opens a fresh Session, then reauthorizes before its
+    durable ledger lookup and locked state-machine classification.
+    """
+
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected change writes require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected change writer is not configured")
+    try:
+        result = protected_changes.execute_protected_change_proposal(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=CredentialProof.from_bearer_token(token),
+            command=protected_changes.ProtectedChangeProposal(
+                item_id=item_id,
+                idempotency_key=idempotency_key,
+                expected_plan_revision=revision,
+                patch=body.patch(),
+                request=body.request,
+                reason=body.reason,
+                alternatives=tuple(option.model_dump() for option in body.options),
+            ),
+            keyring=protected_changes.StaticHmacKeyring(
+                protected_changes.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))
+            ),
+        )
+    except protected_changes.ChangeProposalItemMissing as exc:
+        raise HTTPException(404, "Plan item not found") from exc
+    except protected_changes.ChangeProposalCommandInvalid as exc:
+        raise HTTPException(422, "Protected change command is invalid") from exc
+    except orch.ReasonRequired as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except orch.AlreadyPending as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, "Protected change command conflicts with current state") from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:
+        raise HTTPException(422, "Protected change command is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected change authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected change authorization failed") from exc
+    except (MissingPlan, TripNotFound) as exc:
+        raise HTTPException(404, "Plan item not found") from exc
+    except (DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected change command is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected change revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected change command could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected change command could not be completed") from exc
+    return result.payload
 
 
 @app.get("/api/plans/items/{item_id}/replacement-places")
@@ -1364,7 +2069,21 @@ def set_item_booking(
     body: BookingRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
+    if _b2c_booking_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected booking writes are not available in production")
+    if _b2c_booking_gate_enabled():
+        return _protected_item_booking(
+            item_id=item_id,
+            body=body,
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
     item = _require_scoped_plan_item(db, me, item_id)
     try:
         updated = orch.set_booking_status(db, item, me, body.booked)
@@ -1375,13 +2094,104 @@ def set_item_booking(
     return _item_out(updated)
 
 
+def _protected_item_booking(
+    *,
+    item_id: str,
+    body: BookingRequest,
+    membership: TripMembership,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_plan_revision: str | None,
+) -> dict:
+    """Default-off adapter for the existing booking writer.
+
+    The dependency performed ordinary Account-first/Guest preliminary
+    authentication. Only primitive scope facts cross into the fresh owned
+    command Session, which reauthorizes and locks them again.
+    """
+
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected booking writes require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected booking writer is not configured")
+    scope = PreliminaryActorScope(
+        trip_id=membership.trip_id,
+        membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+    try:
+        result = protected_booking.execute_protected_booking(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=CredentialProof.from_bearer_token(token),
+            command=protected_booking.ProtectedBooking(
+                item_id=item_id,
+                idempotency_key=idempotency_key,
+                expected_plan_revision=revision,
+                booked=body.booked,
+            ),
+            keyring=protected_booking.StaticHmacKeyring(
+                protected_booking.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))
+            ),
+        )
+    except (protected_booking.BookingItemMissing, protected_booking.BookingPlanMismatch) as exc:
+        raise HTTPException(404, "Plan item not found") from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, "Protected booking command conflicts with current state") from exc
+    except (
+        InvalidIdempotencyKey,
+        InvalidDurableCommand,
+        UnsupportedFingerprintVersion,
+    ) as exc:
+        raise HTTPException(422, "Protected booking command is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected booking authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected booking authorization failed") from exc
+    except (MissingPlan, TripNotFound) as exc:
+        raise HTTPException(404, "Plan item not found") from exc
+    except (DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected booking command is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected booking revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected booking command could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected booking command could not be completed") from exc
+    return result.payload
+
+
 @app.post("/api/updates/{notice_id}/object")
 def object_to_notice(
     notice_id: str,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
     """Clicking "I have a different idea" on a notice escalates it to a vote."""
+    if _b2c_notice_objection_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected notice objections are not available in production")
+    if _b2c_notice_objection_gate_enabled():
+        return _protected_notice_objection(
+            notice_id=notice_id,
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
     notice = _require_scoped_notice(db, me, notice_id)
     if not notice.can_object:
         raise HTTPException(404, "Nothing to object to")
@@ -1393,21 +2203,191 @@ def object_to_notice(
     return _outcome_out(outcome)
 
 
+def _protected_notice_objection(
+    *,
+    notice_id: str,
+    membership: TripMembership,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_plan_revision: str | None,
+) -> dict:
+    """Default-off adapter for the established Notice objection state machine."""
+
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected notice objections require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected notice objection writer is not configured")
+    scope = PreliminaryActorScope(
+        trip_id=membership.trip_id,
+        membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+    try:
+        result = protected_notice_objections.execute_protected_notice_objection(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=CredentialProof.from_bearer_token(token),
+            command=protected_notice_objections.ProtectedNoticeObjection(
+                notice_id=notice_id,
+                idempotency_key=idempotency_key,
+                expected_plan_revision=revision,
+            ),
+            keyring=protected_notice_objections.StaticHmacKeyring(
+                protected_notice_objections.HmacSigningKey(
+                    "b2c-local-v1", key_material.encode("utf-8")
+                )
+            ),
+        )
+    except protected_notice_objections.NoticeObjectionNoticeMissing as exc:
+        raise HTTPException(404, "Notice not found") from exc
+    except protected_notice_objections.NoticeObjectionIneligible as exc:
+        raise HTTPException(404, "Nothing to object to") from exc
+    except orch.AlreadyPending as exc:
+        raise HTTPException(409, "Notice objection conflicts with current decision") from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, "Protected notice objection conflicts with current state") from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:
+        raise HTTPException(422, "Protected notice objection is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected notice objection authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected notice objection authorization failed") from exc
+    except (MissingPlan, TripNotFound) as exc:
+        raise HTTPException(404, "Notice not found") from exc
+    except (DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected notice objection is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected notice objection revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected notice objection could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected notice objection could not be completed") from exc
+    return result.payload
+
+
 @app.post("/api/rounds/{round_id}/votes")
 def vote(
     round_id: str,
     body: VoteRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
+    if _b2c_vote_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected vote writes are not available in production")
+    if _b2c_vote_gate_enabled():
+        return _protected_round_vote(
+            round_id=round_id,
+            body=body,
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
     round_ = _require_scoped_round(db, me, round_id)
     if round_.status != "open":
         raise HTTPException(404, "Round is not open")
-    orch.cast_vote(db, round_, me.id, body.option_id)
+    try:
+        orch.cast_vote(db, round_, me.id, body.option_id)
+    except orch.InvalidVoteOption as exc:
+        raise HTTPException(422, "Vote option is invalid for this round") from exc
     if _round_has_all_votes(db, round_):
         orch.settle_round(db, round_)
     db.commit()
     return _round_out(db, round_, me)
+
+
+def _protected_round_vote(
+    *,
+    round_id: str,
+    body: VoteRequest,
+    membership: TripMembership,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_plan_revision: str | None,
+) -> dict:
+    """Default-off protected adapter for the legacy Round vote route.
+
+    The request Session contributes only primitive preliminary scope facts. A
+    fresh owned Session reauthorizes and locks before the durable ledger and
+    authoritative vote/settlement state machine are reached.
+    """
+
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected vote writes require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected vote writer is not configured")
+    scope = PreliminaryActorScope(
+        trip_id=membership.trip_id,
+        membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+    try:
+        result = protected_vote.execute_protected_vote(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=CredentialProof.from_bearer_token(token),
+            command=protected_vote.ProtectedVote(
+                round_id=round_id,
+                idempotency_key=idempotency_key,
+                expected_plan_revision=revision,
+                option_id=body.option_id,
+            ),
+            keyring=protected_vote.StaticHmacKeyring(
+                protected_vote.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))
+            ),
+        )
+    except protected_vote.VoteRoundMissing as exc:
+        raise HTTPException(404, "Round not found") from exc
+    except protected_vote.VoteRoundNotOpen as exc:
+        raise HTTPException(404, "Round is not open") from exc
+    except protected_vote.VoteCommandInvalid as exc:
+        raise HTTPException(422, "Protected vote command is invalid") from exc
+    except orch.InvalidVoteOption as exc:
+        raise HTTPException(422, "Vote option is invalid for this round") from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, "Protected vote command conflicts with current state") from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:
+        raise HTTPException(422, "Protected vote command is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected vote authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected vote authorization failed") from exc
+    except (MissingPlan, TripNotFound) as exc:
+        raise HTTPException(404, "Round not found") from exc
+    except (DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected vote command is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected vote revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected vote command could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected vote command could not be completed") from exc
+    return result.payload
 
 
 @app.post("/api/rounds/{round_id}/settle")
@@ -1415,12 +2395,57 @@ def settle(
     round_id: str,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
     """Manual settlement. Real usage is driven by the scheduler calling settle_due_rounds; this endpoint is for demos."""
+    if _b2c_round_settlement_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected round settlement is not available in production")
+    if _b2c_round_settlement_gate_enabled():
+        return _protected_round_settlement(round_id=round_id, membership=me, authorization=authorization, idempotency_key=idempotency_key, expected_plan_revision=expected_plan_revision)
     round_ = _require_scoped_round(db, me, round_id)
     orch.settle_round(db, round_)
     db.commit()
     return _round_out(db, round_, me)
+
+
+def _protected_round_settlement(*, round_id: str, membership: TripMembership, authorization: str | None, idempotency_key: str | None, expected_plan_revision: str | None) -> dict:
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected round settlement requires idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0: raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None: raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material: raise HTTPException(503, "Protected round settlement writer is not configured")
+    scope = PreliminaryActorScope(trip_id=membership.trip_id, membership_id=membership.id, credential_kind="account" if membership.user_id is not None else "guest", expected_user_id=membership.user_id)
+    try:
+        result = protected_round_settlements.execute_protected_round_settlement(session_factory=SessionLocal, scope=scope, credential=CredentialProof.from_bearer_token(token), command=protected_round_settlements.ProtectedRoundSettlement(round_id, idempotency_key, revision), keyring=protected_round_settlements.StaticHmacKeyring(protected_round_settlements.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))))
+    except protected_round_settlements.RoundSettlementRoundMissing as exc:
+        raise HTTPException(404, "Round not found") from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, "Protected round settlement conflicts with current state") from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:
+        raise HTTPException(422, "Protected round settlement is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected round settlement authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected round settlement authorization failed") from exc
+    except (MissingPlan, TripNotFound) as exc:
+        raise HTTPException(404, "Round not found") from exc
+    except (DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected round settlement is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected round revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected round settlement could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected round settlement could not be completed") from exc
+    return result.payload
 
 
 @app.post("/api/proposals/{proposal_id}/decisions")
@@ -1429,13 +2454,100 @@ def decide(
     body: DecisionRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
+    if _b2c_proposal_decision_gate_requested() and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected proposal decisions are not available in production")
+    if _b2c_proposal_decision_gate_enabled():
+        return _protected_proposal_decision(
+            proposal_id=proposal_id,
+            body=body,
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_plan_revision=expected_plan_revision,
+        )
     proposal = _require_scoped_proposal(db, me, proposal_id)
     applied = orch.decide_proposal(db, proposal, me.id, body.status)
     db.commit()
     result = _proposal_out(db, proposal, me)
     result["applied"] = applied
     return result
+
+
+def _protected_proposal_decision(
+    *,
+    proposal_id: str,
+    body: DecisionRequest,
+    membership: TripMembership,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_plan_revision: str | None,
+) -> dict:
+    """Default-off protected adapter for the legacy Proposal Decision route."""
+
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected proposal decisions require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected proposal decision writer is not configured")
+    scope = PreliminaryActorScope(
+        trip_id=membership.trip_id,
+        membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+    try:
+        result = protected_proposal_decisions.execute_protected_proposal_decision(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=CredentialProof.from_bearer_token(token),
+            command=protected_proposal_decisions.ProtectedProposalDecision(
+                proposal_id=proposal_id,
+                idempotency_key=idempotency_key,
+                expected_plan_revision=revision,
+                status=body.status,
+            ),
+            keyring=protected_proposal_decisions.StaticHmacKeyring(
+                protected_proposal_decisions.HmacSigningKey(
+                    "b2c-local-v1", key_material.encode("utf-8")
+                )
+            ),
+        )
+    except protected_proposal_decisions.ProposalDecisionProposalMissing as exc:
+        raise HTTPException(404, "Proposal not found") from exc
+    except protected_proposal_decisions.ProposalDecisionCommandInvalid as exc:
+        raise HTTPException(422, "Protected proposal decision is invalid") from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
+        raise HTTPException(409, "Protected proposal decision conflicts with current state") from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:
+        raise HTTPException(422, "Protected proposal decision is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected proposal decision authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected proposal decision authorization failed") from exc
+    except (MissingPlan, TripNotFound) as exc:
+        raise HTTPException(404, "Proposal not found") from exc
+    except (DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome) as exc:
+        raise HTTPException(409, "Protected proposal decision is unavailable") from exc
+    except PlanRevisionOverflow as exc:
+        raise HTTPException(409, "Protected proposal revision cannot advance") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure) as exc:
+        raise HTTPException(503, "Protected proposal decision could not acquire a safe transaction") from exc
+    except (TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected proposal decision could not be completed") from exc
+    return result.payload
 
 
 @app.get("/api/proposals/{proposal_id}")
@@ -1455,13 +2567,73 @@ def get_proposal(
 # This is blocked by shape, not just by an authorization check.
 
 
+def _protected_trip_revision(
+    *,
+    membership: TripMembership,
+    authorization: str | None,
+    idempotency_key: str | None,
+    expected_trip_facts_revision: str | None,
+):
+    if not idempotency_key or expected_trip_facts_revision is None:
+        raise HTTPException(428, "Protected writes require idempotency and revision headers")
+    try:
+        revision = int(expected_trip_facts_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Trip facts revision must be an integer") from exc
+    if revision < 0 or revision > 9_223_372_036_854_775_807:
+        raise HTTPException(422, "Expected Trip facts revision is invalid")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected writer is not configured")
+    return (
+        PreliminaryActorScope(
+            trip_id=membership.trip_id,
+            membership_id=membership.id,
+            credential_kind="account" if membership.user_id is not None else "guest",
+            expected_user_id=membership.user_id,
+        ),
+        CredentialProof.from_bearer_token(token),
+        idempotency_key,
+        revision,
+        TripStaticHmacKeyring(HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))),
+    )
+
+
+def _protected_trip_error(exc: Exception) -> None:
+    if isinstance(exc, pref_service.NotYours | ProtectedConstraintMissing):
+        raise HTTPException(404, "Constraint not found") from exc
+    if isinstance(exc, (pref_service.UnknownConstraintKind, pref_service.InvalidConstraintParams, pref_service.PreferenceDateOutOfTripRange, InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion, ValueError)):
+        raise HTTPException(422, "Protected command is invalid") from exc
+    if isinstance(exc, StaleTripPlanningFactsRevision):
+        error = HTTPException(409, "Protected command conflicts with current Trip facts")
+        error.headers = {"X-Current-Trip-Facts-Revision": str(exc.current)}
+        raise error from exc
+    if isinstance(exc, (IdempotencyKeyReused, IdempotencyRecordExpired, DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome, TripPlanningFactsRevisionOverflow)):
+        raise HTTPException(409, "Protected command is unavailable") from exc
+    if isinstance(exc, InvalidCredential):
+        raise HTTPException(401, "Protected command authorization failed") from exc
+    if isinstance(exc, MembershipNotAuthorized):
+        raise HTTPException(403, "Protected command authorization failed") from exc
+    if isinstance(exc, TripNotFound):
+        raise HTTPException(404, "Trip not found") from exc
+    if isinstance(exc, (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure, TransactionIntegrityViolation, TransactionDatabaseFailure)):
+        raise HTTPException(503, "Protected command could not be completed safely") from exc
+    raise exc
+
+
 @app.get("/api/trips/{trip_id}/preferences/me")
 def get_my_preferences(
     trip_id: str,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    response: Response = None,
 ) -> dict:
-    _require_scoped_trip(db, me, trip_id)
+    trip = _require_scoped_trip(db, me, trip_id)
+    if response is not None:
+        response.headers["X-Trip-Facts-Revision"] = str(trip.planning_facts_revision)
     return pref_service.read_mine(db, me)
 
 
@@ -1471,8 +2643,29 @@ def save_my_preferences(
     body: PreferenceRequest,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
 ) -> dict:
     _require_scoped_trip(db, me, trip_id)
+    if _b2c_trip_writer_gate_requested(_B2C_PREFERENCES_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected preferences writes are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2C_PREFERENCES_GATE):
+        try:
+            scope, credential, key, revision, keyring = _protected_trip_revision(
+                membership=me, authorization=authorization, idempotency_key=idempotency_key,
+                expected_trip_facts_revision=expected_trip_facts_revision,
+            )
+            result = protected_preferences_save.execute_protected_preferences_save(
+                session_factory=SessionLocal, scope=scope, credential=credential,
+                command=protected_preferences_save.ProtectedPreferencesSave(key, revision, body.model_dump()), keyring=keyring,
+            )
+        except Exception as exc:
+            _protected_trip_error(exc)
+        if response is not None:
+            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+        return result.payload
     try:
         result = pref_service.save_mine(
             db, me, pref_service.PreferenceData(**body.model_dump())
@@ -1489,8 +2682,26 @@ def add_my_constraint(
     body: ConstraintRequest,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
 ) -> dict:
     _require_scoped_trip(db, me, trip_id)
+    if _b2c_trip_writer_gate_requested(_B2C_CONSTRAINT_CREATE_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected constraint writes are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2C_CONSTRAINT_CREATE_GATE):
+        try:
+            scope, credential, key, revision, keyring = _protected_trip_revision(membership=me, authorization=authorization, idempotency_key=idempotency_key, expected_trip_facts_revision=expected_trip_facts_revision)
+            result = protected_constraint_create.execute_protected_constraint_create(
+                session_factory=SessionLocal, scope=scope, credential=credential,
+                command=protected_constraint_create.ProtectedConstraintCreate(key, revision, **body.model_dump()), keyring=keyring,
+            )
+        except Exception as exc:
+            _protected_trip_error(exc)
+        if response is not None:
+            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+        return result.payload
     try:
         row, conflicts = pref_service.add_constraint(db, me, **body.model_dump())
     except (
@@ -1508,7 +2719,25 @@ def patch_my_constraint(
     body: ConstraintPatch,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
 ) -> dict:
+    if _b2c_trip_writer_gate_requested(_B2C_CONSTRAINT_UPDATE_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected constraint writes are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2C_CONSTRAINT_UPDATE_GATE):
+        try:
+            scope, credential, key, revision, keyring = _protected_trip_revision(membership=me, authorization=authorization, idempotency_key=idempotency_key, expected_trip_facts_revision=expected_trip_facts_revision)
+            result = protected_constraint_update.execute_protected_constraint_update(
+                session_factory=SessionLocal, scope=scope, credential=credential,
+                command=protected_constraint_update.ProtectedConstraintUpdate(constraint_id, key, revision, body.model_dump(exclude_unset=True)), keyring=keyring,
+            )
+        except Exception as exc:
+            _protected_trip_error(exc)
+        if response is not None:
+            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+        return result.payload
     try:
         row, conflicts = pref_service.update_constraint(
             db, me, constraint_id, params=body.params, importance=body.importance
@@ -1526,7 +2755,25 @@ def delete_my_constraint(
     constraint_id: str,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
 ) -> dict:
+    if _b2c_trip_writer_gate_requested(_B2C_CONSTRAINT_DELETE_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected constraint writes are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2C_CONSTRAINT_DELETE_GATE):
+        try:
+            scope, credential, key, revision, keyring = _protected_trip_revision(membership=me, authorization=authorization, idempotency_key=idempotency_key, expected_trip_facts_revision=expected_trip_facts_revision)
+            result = protected_constraint_delete.execute_protected_constraint_delete(
+                session_factory=SessionLocal, scope=scope, credential=credential,
+                command=protected_constraint_delete.ProtectedConstraintDelete(constraint_id, key, revision), keyring=keyring,
+            )
+        except Exception as exc:
+            _protected_trip_error(exc)
+        if response is not None:
+            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+        return result.payload
     try:
         pref_service.delete_constraint(db, me, constraint_id)
     except pref_service.NotYours as exc:
@@ -1588,7 +2835,18 @@ def extend_round(
     round_id: str,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
+    if _b2c_trip_writer_gate_requested(_B2E_ORGANIZER_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected organizer actions are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2E_ORGANIZER_GATE):
+        return _protected_organizer_action(
+            operation_code=protected_organizer_actions.ROUND_EXTEND_OPERATION,
+            resource_id=round_id, action=None, membership=me, authorization=authorization,
+            idempotency_key=idempotency_key, expected_plan_revision=expected_plan_revision,
+        )
     _require_scoped_round(db, me, round_id)
     try:
         round_ = org_actions.extend_round(db, me, round_id)
@@ -1603,8 +2861,19 @@ def escalate_proposal(
     proposal_id: str,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
     """Any affected member can escalate, not just the proposer."""
+    if _b2c_trip_writer_gate_requested(_B2E_ORGANIZER_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected organizer actions are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2E_ORGANIZER_GATE):
+        return _protected_organizer_action(
+            operation_code=protected_organizer_actions.PROPOSAL_ESCALATE_OPERATION,
+            resource_id=proposal_id, action=None, membership=me, authorization=authorization,
+            idempotency_key=idempotency_key, expected_plan_revision=expected_plan_revision,
+        )
     _require_scoped_proposal(db, me, proposal_id)
     try:
         proposal = org_actions.escalate(db, me, proposal_id)
@@ -1620,7 +2889,18 @@ def resolve_deadlock(
     body: DeadlockRequest,
     me: TripMembership = Depends(current_membership),
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_plan_revision: str | None = Header(default=None, alias="X-Expected-Plan-Revision"),
 ) -> dict:
+    if _b2c_trip_writer_gate_requested(_B2E_ORGANIZER_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
+        raise HTTPException(503, "Protected organizer actions are not available in production")
+    if _b2c_trip_writer_gate_enabled(_B2E_ORGANIZER_GATE):
+        return _protected_organizer_action(
+            operation_code=protected_organizer_actions.PROPOSAL_DEADLOCK_OPERATION,
+            resource_id=proposal_id, action=body.action, membership=me, authorization=authorization,
+            idempotency_key=idempotency_key, expected_plan_revision=expected_plan_revision,
+        )
     _require_scoped_proposal(db, me, proposal_id)
     try:
         item = org_actions.resolve_deadlock(db, me, proposal_id, body.action)
@@ -1628,3 +2908,54 @@ def resolve_deadlock(
         raise _organizer_error(exc) from exc
     db.commit()
     return {"item_id": item.id, "title": item.title, "action": body.action}
+
+
+def _protected_organizer_action(
+    *, operation_code: str, resource_id: str, action: str | None,
+    membership: TripMembership, authorization: str | None,
+    idempotency_key: str | None, expected_plan_revision: str | None,
+) -> dict:
+    if not idempotency_key or expected_plan_revision is None:
+        raise HTTPException(428, "Protected organizer actions require idempotency and revision headers")
+    try:
+        revision = int(expected_plan_revision)
+    except ValueError as exc:
+        raise HTTPException(422, "Expected Plan revision must be an integer") from exc
+    if revision < 0:
+        raise HTTPException(422, "Expected Plan revision must be non-negative")
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Login required")
+    key_material = os.getenv(_B2C_HMAC_KEY)
+    if not key_material:
+        raise HTTPException(503, "Protected organizer writer is not configured")
+    scope = PreliminaryActorScope(
+        trip_id=membership.trip_id, membership_id=membership.id,
+        credential_kind="account" if membership.user_id is not None else "guest",
+        expected_user_id=membership.user_id,
+    )
+    try:
+        result = protected_organizer_actions.execute_protected_organizer_action(
+            session_factory=SessionLocal, scope=scope, credential=CredentialProof.from_bearer_token(token),
+            command=protected_organizer_actions.ProtectedOrganizerAction(
+                operation_code, resource_id, idempotency_key, revision, action
+            ),
+            keyring=TripStaticHmacKeyring(HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))),
+        )
+    except protected_organizer_actions.OrganizerResourceMissing as exc:
+        raise HTTPException(404, "Organizer action target not found") from exc
+    except org_actions.OrganizerOnly as exc:
+        raise HTTPException(403, "Organizer authorization required") from exc
+    except (org_actions.NothingToDo, org_actions.AlreadyExtended) as exc:
+        raise HTTPException(409, "Organizer action conflicts with current state") from exc
+    except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired, DuplicatePlans, UnsupportedOutcomeContract, UnknownHmacKeyVersion, UnsafeDurableOutcome, PlanRevisionOverflow) as exc:
+        raise HTTPException(409, "Protected organizer action is unavailable") from exc
+    except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion, ValueError) as exc:
+        raise HTTPException(422, "Protected organizer action is invalid") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Protected organizer authorization failed") from exc
+    except MembershipNotAuthorized as exc:
+        raise HTTPException(403, "Protected organizer authorization failed") from exc
+    except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure, TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
+        raise HTTPException(503, "Protected organizer action could not be completed safely") from exc
+    return result.payload

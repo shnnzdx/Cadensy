@@ -220,8 +220,14 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
             legacy_result = run_agent_with_deadline(worker=worker, config=execution)
         except Exception as error:
             return _failure_result(error)
-        if isinstance(capability, LegacyReadTripCapability):
-            capability._record_legacy_tool_results(legacy_result.tool_results)
+        # B.3's revision-bracketed capability intentionally has a different
+        # Session lifetime, but it retains this private provenance hook so a
+        # replacement candidate can still be checked against an actual
+        # read-only ``find_replacement_place`` result.  Do not require the
+        # concrete Legacy capability type merely to record that evidence.
+        recorder = getattr(capability, "_record_legacy_tool_results", None)
+        if callable(recorder):
+            recorder(legacy_result.tool_results)
         return _map_legacy_result(legacy_result)
 
 

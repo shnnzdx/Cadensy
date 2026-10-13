@@ -22,6 +22,7 @@ from ..db.models import AuthSession, GuestSession, TripMembership, User
 SESSION_TTL = timedelta(days=14)
 GUEST_SESSION_TTL = timedelta(days=7)
 GUEST_TOKEN_PREFIX = "gst_"
+ACTIVE_GUEST_MEMBERSHIP_STATUSES = frozenset({"joined", "preferences_submitted"})
 HASH_ALGO = "pbkdf2_sha256"
 HASH_ROUNDS = 210_000
 
@@ -133,6 +134,16 @@ def _start_session(db: Session, user: User) -> LoginResult:
 
 def is_guest_token(token: str | None) -> bool:
     return bool(token and token.startswith(GUEST_TOKEN_PREFIX))
+
+
+def is_active_guest_membership_status(status: str | None) -> bool:
+    """Return whether an anonymous Guest membership remains authenticated.
+
+    This deliberately does not alter Account membership policy.  The frozen
+    Trip-bound protocol treats a completed preference submission as an active
+    Guest state while every other status fails closed.
+    """
+    return status in ACTIVE_GUEST_MEMBERSHIP_STATUSES
 
 
 def start_guest_session(db: Session, membership: TripMembership) -> GuestSessionResult:
@@ -253,7 +264,7 @@ def membership_for_guest_token(db: Session, token: str | None) -> TripMembership
         membership is None
         or membership.trip_id != session.trip_id
         or membership.user_id is not None
-        or membership.status != "joined"
+        or not is_active_guest_membership_status(membership.status)
     ):
         raise AuthRequired("Guest membership is no longer active")
     return membership

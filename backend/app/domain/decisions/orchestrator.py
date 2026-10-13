@@ -13,6 +13,7 @@ Rules it must never break:
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import re
@@ -74,6 +75,10 @@ class AlreadyPending(Exception):
 
 class WrongTrip(Exception):
     """This identity does not belong to this trip."""
+
+
+class InvalidVoteOption(ValueError):
+    """A vote must select one authoritative option of its DecisionRound."""
 
 
 @dataclass
@@ -550,6 +555,30 @@ def set_booking_status(
     if membership.trip_id != trip.id:
         raise WrongTrip("Membership does not belong to this trip")
 
+    return set_booking_status_for_actor(
+        db,
+        item,
+        trip_id=trip.id,
+        actor_membership_id=membership.id,
+        booked=booked,
+    )
+
+
+def set_booking_status_for_actor(
+    db: Session,
+    item: PlanItem,
+    *,
+    trip_id: str,
+    actor_membership_id: str,
+    booked: bool,
+) -> PlanItem:
+    """Apply the existing booking side effects for an already-authorized actor.
+
+    Protected writers have freshly locked the Trip, credential, membership, and
+    Plan before reaching this function.  They pass primitive actor facts rather
+    than letting a request-owned ``TripMembership`` escape into that transaction.
+    """
+
     before = item.settledness
     after = Settledness.BOOKED.value if booked else Settledness.SETTLED.value
     if before == after:
@@ -558,10 +587,10 @@ def set_booking_status(
     item.settledness = after
     item.settled_at = _now() if booked else None
     patch = {"settledness": after}
-    _log(db, item, "booking", patch, actor_membership_id=membership.id)
+    _log(db, item, "booking", patch, actor_membership_id=actor_membership_id)
     db.add(
         UpdateNotice(
-            trip_id=trip.id,
+            trip_id=trip_id,
             plan_item_id=item.id,
             kind="plan",
             title=f"{item.title} booking {'added' if booked else 'removed'}",
@@ -658,8 +687,36 @@ def _do_round(
     return Outcome(classification=verdict, round_id=round_.id)
 
 
+def validate_vote_option(round_: DecisionRound, option_id: object) -> str:
+    """Return one exact stored option ID or fail before any Vote mutation.
+
+    ``DecisionRound.options`` is the authoritative per-round policy.  This is
+    intentionally shared by the legacy and protected vote entry points so an
+    unknown value cannot be stored and later turn settlement into an internal
+    error.  No normalization is performed: a valid vote must exactly select an
+    existing option ID.
+    """
+
+    if not isinstance(option_id, str) or not option_id.strip():
+        raise InvalidVoteOption("Vote option is required")
+    raw_options = round_.options
+    if not isinstance(raw_options, list):
+        raise InvalidVoteOption("Round has no valid vote options")
+    option_ids = {
+        raw_option.get("id")
+        for raw_option in raw_options
+        if isinstance(raw_option, Mapping)
+        and isinstance(raw_option.get("id"), str)
+        and raw_option["id"].strip()
+    }
+    if option_id not in option_ids:
+        raise InvalidVoteOption("Vote option is not available for this round")
+    return option_id
+
+
 def cast_vote(db: Session, round_: DecisionRound, membership_id: str, option_id: str) -> Vote:
     """Vote or change vote. There is no abstain option; not voting means no record."""
+    validate_vote_option(round_, option_id)
     existing = db.scalar(
         select(Vote).where(
             Vote.round_id == round_.id, Vote.trip_membership_id == membership_id

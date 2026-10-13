@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from math import isfinite
+from collections.abc import Callable
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 
@@ -19,6 +22,14 @@ MAX_FOOD_PLACES = 24
 
 class DestinationNotFound(Exception):
     """The provider could not resolve a destination to a city."""
+
+
+class ProviderResultInvalid(Exception):
+    """An injected provider did not return the normalized Geoapify value contract."""
+
+
+class CachePersistenceFailure(Exception):
+    """A valid provider response could not be atomically written to the Place cache."""
 
 DISPLAY_NAME_ALIASES = {
     "charlemagne et ses leudes": "Charlemagne Monument",
@@ -69,6 +80,18 @@ class PlannerPlace:
     local_name: str | None = None
 
 
+@dataclass(frozen=True)
+class PlannerCacheSnapshot:
+    """Detached cache facts returned after an owned cache Session has closed."""
+
+    destination: str
+    candidates: tuple[PlannerPlace, ...]
+    needs_refresh: bool
+
+
+SessionFactory = Callable[[], Session]
+
+
 def places_for_planner(
     db: Session,
     destination: str,
@@ -77,7 +100,7 @@ def places_for_planner(
 ) -> tuple[PlannerPlace, ...]:
     """Return cached/provider-backed global places for Planner."""
     rows = _provider_places_for_destination(db, destination, minimum=minimum)
-    return tuple(_database_place(row) for row in _balanced_places(rows))
+    return _planner_candidates(rows)
 
 
 def places_for_replacement(
@@ -119,17 +142,107 @@ def _provider_places_for_destination(
 
     if fetched:
         _upsert_geoapify(db, fetched)
-        cached = _cached_places(db, destination)
-        # Some providers normalize the city name differently from the input.
-        # The just-fetched rows remain authoritative for this request.
-        if not cached:
-            ids = [place.provider_place_id for place in fetched]
-            cached = db.scalars(
-                select(Place)
-                .where(Place.provider == "geoapify", Place.provider_place_id.in_(ids))
-                .order_by(Place.name)
-            ).all()
+        cached = _rows_after_geoapify_upsert(db, destination, fetched)
     return cached
+
+
+def read_planner_cache(
+    session_factory: SessionFactory,
+    destination: str,
+    *,
+    minimum: int = DEFAULT_MINIMUM_PLACES,
+) -> PlannerCacheSnapshot:
+    """Read one detached cache snapshot in an owned, short-lived transaction.
+
+    This helper is deliberately dormant from Legacy request handling.  It has no
+    provider hook and returns no ORM state, so a caller cannot accidentally carry
+    its cache transaction across external provider or planner execution.
+    """
+
+    canonical_destination = _canonical_destination(destination)
+    session = session_factory()
+    try:
+        with session.begin():
+            rows = _cached_places(session, canonical_destination)
+            return PlannerCacheSnapshot(
+                destination=canonical_destination,
+                candidates=_planner_candidates(rows),
+                needs_refresh=_cache_needs_refresh(rows, minimum=minimum),
+            )
+    finally:
+        session.close()
+
+
+def persist_geoapify_cache(
+    session_factory: SessionFactory,
+    destination: str,
+    fetched: tuple[geoapify.GeoapifyPlace, ...],
+    *,
+    minimum: int = DEFAULT_MINIMUM_PLACES,
+) -> PlannerCacheSnapshot:
+    """Atomically upsert normalized provider rows using one owned short Session.
+
+    A concurrent refresh may lose the existing provider identity race.  The
+    database constraint remains authoritative; after its rollback, a fresh
+    detached read observes the winning cache state without issuing another
+    provider request.  Other database failures fail closed rather than turning
+    possibly-partial cache state into a successful generation.
+    """
+
+    canonical_destination = _canonical_destination(destination)
+    values = validate_geoapify_places(fetched)
+    session = session_factory()
+    retry_after_identity_conflict = False
+    try:
+        try:
+            with session.begin():
+                _upsert_geoapify(session, values)
+                rows = _rows_after_geoapify_upsert(session, canonical_destination, values)
+                return PlannerCacheSnapshot(
+                    destination=canonical_destination,
+                    candidates=_planner_candidates(rows),
+                    needs_refresh=_cache_needs_refresh(rows, minimum=minimum),
+                )
+        except IntegrityError:
+            # The context manager has rolled back before this branch.  Defer the
+            # new reader until this failed write Session is closed in ``finally``.
+            retry_after_identity_conflict = True
+        except SQLAlchemyError as exc:
+            raise CachePersistenceFailure("Place cache update could not be persisted") from exc
+    finally:
+        session.close()
+    if retry_after_identity_conflict:
+        # A new reader Session makes the concurrent winner visible and stays
+        # fully detached from the failed write Session.
+        return read_planner_cache(
+            session_factory,
+            canonical_destination,
+            minimum=minimum,
+        )
+    raise AssertionError("cache persistence exited without a result")
+
+
+def validate_geoapify_places(fetched: object) -> tuple[geoapify.GeoapifyPlace, ...]:
+    """Accept only the normalized provider values that Legacy persistence expects."""
+
+    if not isinstance(fetched, tuple):
+        raise ProviderResultInvalid("Provider result must be a normalized tuple")
+    values = tuple(fetched)
+    for place in values:
+        if not isinstance(place, geoapify.GeoapifyPlace):
+            raise ProviderResultInvalid("Provider result contains an invalid place")
+        if not place.provider_place_id.strip() or not place.name.strip():
+            raise ProviderResultInvalid("Provider place identity and name are required")
+        if (
+            isinstance(place.latitude, bool)
+            or isinstance(place.longitude, bool)
+            or not isinstance(place.latitude, (int, float))
+            or not isinstance(place.longitude, (int, float))
+            or not isfinite(place.latitude)
+            or not isfinite(place.longitude)
+        ):
+            raise ProviderResultInvalid("Provider place coordinates are invalid")
+    return values
 
 
 def normalize_destination(destination: str) -> str:
@@ -160,6 +273,27 @@ def _cached_places(db: Session, destination: str) -> list[Place]:
             Place.provider == "geoapify",
             func.lower(Place.city) == city.lower(),
         )
+        .order_by(Place.name)
+    ).all()
+
+
+def _rows_after_geoapify_upsert(
+    db: Session,
+    destination: str,
+    fetched: tuple[geoapify.GeoapifyPlace, ...],
+) -> list[Place]:
+    """Mirror Legacy's just-fetched fallback when Geoapify canonicalizes a city."""
+
+    cached = _cached_places(db, destination)
+    if cached:
+        return cached
+    # Some providers normalize the city name differently from the request.  The
+    # rows just accepted by this persistence transaction remain authoritative for
+    # this acquisition, exactly as they do on the Legacy path.
+    ids = [place.provider_place_id for place in fetched]
+    return db.scalars(
+        select(Place)
+        .where(Place.provider == "geoapify", Place.provider_place_id.in_(ids))
         .order_by(Place.name)
     ).all()
 
@@ -237,6 +371,12 @@ def _balanced_places(rows: list[Place]) -> list[Place]:
             if queues[group]:
                 balanced.append(queues[group].pop(0))
     return balanced
+
+
+def _planner_candidates(rows: list[Place]) -> tuple[PlannerPlace, ...]:
+    """Apply the unchanged Legacy filtering, spreading, and DTO projection."""
+
+    return tuple(_database_place(row) for row in _balanced_places(rows))
 
 
 def _spatially_spread(rows: list[Place]) -> list[Place]:
