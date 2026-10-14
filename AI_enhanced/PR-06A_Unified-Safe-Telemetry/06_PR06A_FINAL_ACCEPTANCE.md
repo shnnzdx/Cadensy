@@ -21,6 +21,10 @@
   [CI Regression Gates #76](https://github.com/shnnzdx/Cadensy/actions/runs/38644609017)
   passed its Legacy full regression, isolated Pydantic compatibility, production
   Pydantic image proof, migration-runner image proof, and frontend regression/build.
+- [x] Hosted CI for `7c0566a866fea55d06cead45493bb67143a4425c` completed:
+  [CI Regression Gates #78](https://github.com/shnnzdx/Cadensy/actions/runs/38650331806)
+  passed **1043 Legacy tests** and **121 isolated Pydantic tests**, plus the
+  production Pydantic image, migration-runner image, and frontend regression/build.
 
 ## Correlation and lifecycle limits
 

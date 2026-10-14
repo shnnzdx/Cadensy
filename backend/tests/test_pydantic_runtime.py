@@ -28,6 +28,7 @@ pytest.importorskip(
 
 from pydantic_ai import ModelResponse, ToolCallPart, models
 from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models import ModelRequestParameters
 
 from app.agents import execution
 from app.agents import pydantic_runtime
@@ -498,6 +499,63 @@ def test_post_return_deadline_keeps_pydantic_wrapper_return_telemetry(monkeypatc
 
     assert result.observation.failure is not None
     assert result.observation.failure.normalized_kind == "request_timeout"
+    model_events = [event for event in emitted if isinstance(event, ModelCallCompleted)]
+    assert len(model_events) == 1
+    assert model_events[0].invocation_outcome.value == "returned"
+    assert model_events[0].usage_status.value == "not_reported"
+
+
+def test_wrapper_return_does_not_access_response_usage_for_telemetry(monkeypatch):
+    """Telemetry must not touch an otherwise successful provider response."""
+
+    marker = "response usage must stay untouched"
+    emitted: list[object] = []
+
+    class Deadline:
+        after_provider_calls = 0
+
+        def before_provider(self) -> float:
+            return 0.25
+
+        def after_provider(self) -> None:
+            self.after_provider_calls += 1
+
+    response = ModelResponse(parts=[])
+    monkeypatch.setattr(
+        ModelResponse,
+        "usage",
+        property(lambda _self: (_ for _ in ()).throw(RuntimeError(marker))),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pydantic_runtime,
+        "emit_event_safely",
+        lambda factory: emitted.append(factory()) or True,
+    )
+    deadline = Deadline()
+    wrapper = pydantic_runtime._DeadlineBoundModel(
+        FunctionModel(lambda _messages, _info: ModelResponse(parts=[])),
+        deadline,  # type: ignore[arg-type]
+        TelemetryContext(
+            request_id="request_12345678",
+            trace_id="trace_12345678",
+            execution_id="execution_12345678",
+        ),
+    )
+    async def successful_provider_request(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return response
+
+    # Isolate the provider seam. FunctionModel itself validates usage, whereas
+    # this regression is specifically about the wrapper's telemetry behavior
+    # after a provider has successfully returned a response.
+    monkeypatch.setattr(wrapper.wrapped, "request", successful_provider_request)
+
+    returned = asyncio.run(
+        wrapper.request([], None, ModelRequestParameters())
+    )
+
+    assert returned is response
+    assert deadline.after_provider_calls == 1
     model_events = [event for event in emitted if isinstance(event, ModelCallCompleted)]
     assert len(model_events) == 1
     assert model_events[0].invocation_outcome.value == "returned"

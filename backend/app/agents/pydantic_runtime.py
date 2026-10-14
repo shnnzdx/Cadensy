@@ -187,7 +187,6 @@ class _DeadlineBoundModel(WrapperModel):
             context=self._telemetry_context, model=self.wrapped,
             invocation_index=invocation_index, outcome=InvocationOutcome.RETURNED,
             elapsed_ms=(time.perf_counter() - started_at) * 1000, error=None,
-            usage=getattr(response, "usage", None),
         )
         # The wrapper invocation has returned even if the local request budget
         # subsequently rejects consumption of that response.
@@ -443,7 +442,6 @@ def _emit_pydantic_model_call(
     outcome: InvocationOutcome,
     elapsed_ms: float,
     error: Exception | None,
-    usage: object | None = None,
 ) -> None:
     """Observe one Pydantic model wrapper call without guessing provider I/O."""
     if context is None:

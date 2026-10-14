@@ -20,10 +20,11 @@ The final request wrapper is an observation boundary: event construction, correl
 creation, enum mapping, replacement, emitter, and sink failures cannot alter the
 existing response, authorization, transaction, or fallback behavior.
 
-Domain classifications preserve `request_id` correlation. Deterministic history and
-Preview classifications do not own a real runtime execution, so they deliberately use
-null trace/execution IDs instead of inventing them. Runtime model/tool events retain
-their actual trace/execution IDs at the worker boundary.
+Domain classifications preserve `request_id` correlation. Deterministic history
+classification does not own a runtime execution. Preview classification can follow a
+real Runtime execution, but its current Domain event is deliberately request-only;
+it does not propagate or invent the Runtime trace/execution identifiers. Runtime
+model/tool events retain their actual trace/execution IDs at the worker boundary.
 
 No domain authorization, transaction, revision, idempotency, API response shape, or
 Preview authority policy was changed.
