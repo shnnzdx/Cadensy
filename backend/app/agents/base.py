@@ -598,6 +598,7 @@ def call_agent(
                 tool_result=None,
                 elapsed_ms=(time.perf_counter() - round_started) * 1000,
                 tokens=reply.tokens,
+                dispatch_statuses=(),
             )
             rounds.append(event)
             return AgentRunResult(
@@ -629,6 +630,7 @@ def call_agent(
         )
 
         call_summaries = []
+        dispatch_statuses = []
         force_stop_reason = None
         for call in reply.tool_calls:
             tool = tool_by_name.get(call.name)
@@ -638,6 +640,7 @@ def call_agent(
                 guard_reason = None
                 guard_limit_exceeded = False
                 cached = False
+                dispatch_status = "unknown_tool"
             else:
                 state = _agent_state(called_tools)
                 guard_reason = tool.guard(state, call.arguments) if tool.guard else None
@@ -648,6 +651,7 @@ def call_agent(
                     guard_rejections[call.name] = guard_rejections.get(call.name, 0) + 1
                     guard_limit_exceeded = guard_rejections[call.name] > guard_reject_limit
                     output = guard_reason
+                    dispatch_status = "guard_rejected"
                     if guard_limit_exceeded:
                         force_stop_reason = "guard_rejection_limit_exceeded"
                 else:
@@ -656,8 +660,10 @@ def call_agent(
                     if tool.cache and key in cache:
                         output = cache[key]
                         cached = True
+                        dispatch_status = "cache_hit"
                     else:
                         output = tool.handler(**call.arguments)
+                        dispatch_status = "handler_succeeded"
                         if deadline is not None:
                             # A blocking read-only tool cannot be forcibly
                             # killed. Its late result is never appended to the
@@ -689,6 +695,7 @@ def call_agent(
             }
             tool_results.append(result)
             call_summaries.append(result)
+            dispatch_statuses.append(dispatch_status)
 
         event = trace.record_agent_round(
             trace_id=trace_id,
@@ -710,6 +717,7 @@ def call_agent(
             tool_result={"calls": call_summaries},
             elapsed_ms=(time.perf_counter() - round_started) * 1000,
             tokens=reply.tokens,
+            dispatch_statuses=tuple(dispatch_statuses),
         )
         rounds.append(event)
 

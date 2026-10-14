@@ -8,11 +8,10 @@ it; later work must propagate ``TelemetryContext`` explicitly.
 from __future__ import annotations
 
 import json
-import logging
 import math
 import re
 import sys
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, ClassVar
@@ -178,6 +177,11 @@ def _validate_non_negative(value: int | float, field_name: str, maximum: int) ->
         raise ValueError(f"{field_name} must be a non-negative bounded number")
 
 
+def _validate_non_negative_int(value: object, field_name: str, maximum: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
+        raise ValueError(f"{field_name} must be a non-negative bounded integer")
+
+
 def _require_enum(value: object, enum_type: type[Enum], field_name: str) -> None:
     if not isinstance(value, enum_type):
         raise ValueError(f"{field_name} must be a closed {enum_type.__name__} value")
@@ -186,6 +190,11 @@ def _require_enum(value: object, enum_type: type[Enum], field_name: str) -> None
 def _require_bool(value: object, field_name: str) -> None:
     if not isinstance(value, bool):
         raise ValueError(f"{field_name} must be a bool")
+
+
+def _require_agent_correlation(context: "TelemetryContext", event_name: str) -> None:
+    if context.trace_id is None or context.execution_id is None:
+        raise ValueError(f"{event_name} requires trace_id and execution_id")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -215,9 +224,14 @@ class TelemetryEvent:
     event_name: ClassVar[EventName]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.context, TelemetryContext):
+            raise ValueError("context must be a TelemetryContext")
         _validate_timestamp(self.timestamp_utc)
 
     def to_dict(self) -> dict[str, object]:
+        payload_fields = _APPROVED_EVENT_PAYLOAD_FIELDS.get(type(self))
+        if payload_fields is None:
+            raise ValueError("unregistered telemetry event type")
         payload: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "event_name": self.event_name.value,
@@ -227,11 +241,9 @@ class TelemetryEvent:
             "execution_id": self.context.execution_id,
             "route_category": RouteCategory.TRIP_CHAT.value,
         }
-        for field in fields(self):
-            if field.name in {"context", "timestamp_utc"}:
-                continue
-            value = getattr(self, field.name)
-            payload[field.name] = value.value if isinstance(value, Enum) else value
+        for field_name in payload_fields:
+            value = getattr(self, field_name)
+            payload[field_name] = value.value if isinstance(value, Enum) else value
         return payload
 
 
@@ -253,6 +265,7 @@ class RuntimeSelected(TelemetryEvent):
     def __post_init__(self) -> None:
         super().__post_init__()
         _require_enum(self.runtime_name, RuntimeName, "runtime_name")
+        _require_agent_correlation(self.context, self.event_name.value)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -283,13 +296,14 @@ class ModelCallCompleted(TelemetryEvent):
         _require_enum(self.model_id, ModelId, "model_id")
         _require_enum(self.invocation_outcome, InvocationOutcome, "invocation_outcome")
         _require_enum(self.usage_status, UsageStatus, "usage_status")
+        _require_agent_correlation(self.context, self.event_name.value)
         if self.failure_category is not None:
             _require_enum(self.failure_category, FailureCategory, "failure_category")
         _validate_non_negative(self.elapsed_ms, "elapsed_ms", _MAX_ELAPSED_MS)
         for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
             value = getattr(self, name)
             if value is not None:
-                _validate_non_negative(value, name, _MAX_TOKEN_COUNT)
+                _validate_non_negative_int(value, name, _MAX_TOKEN_COUNT)
         if self.invocation_outcome is InvocationOutcome.RETURNED and self.failure_category is not None:
             raise ValueError("returned invocation cannot have a failure category")
         if self.invocation_outcome is InvocationOutcome.FAILED and self.failure_category is None:
@@ -319,6 +333,7 @@ class ToolCallCompleted(TelemetryEvent):
         _require_enum(self.tool_dispatch_status, ToolDispatchStatus, "tool_dispatch_status")
         _require_bool(self.handler_executed, "handler_executed")
         _require_bool(self.cache_hit, "cache_hit")
+        _require_agent_correlation(self.context, self.event_name.value)
         if self.tool_name is not None and not isinstance(self.tool_name, ApprovedToolName):
             raise ValueError("tool_name must be an approved tool name or null")
         if self.tool_dispatch_status is ToolDispatchStatus.UNKNOWN_TOOL:
@@ -362,6 +377,13 @@ class AgentDeadlineExceeded(TelemetryEvent):
         _validate_non_negative(self.elapsed_ms, "elapsed_ms", _MAX_ELAPSED_MS)
         if self.failure_category is FailureCategory.RUNTIME_CAPACITY:
             raise ValueError("capacity rejection is not a deadline event")
+        allowed_categories = {
+            DeadlineScope.REQUEST: {FailureCategory.REQUEST_TIMEOUT},
+            DeadlineScope.PROVIDER: {FailureCategory.PROVIDER_TIMEOUT},
+            DeadlineScope.TOOL: {FailureCategory.TOOL_TIMEOUT},
+        }
+        if self.failure_category not in allowed_categories[self.deadline_scope]:
+            raise ValueError("deadline scope and failure category do not match")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -437,26 +459,74 @@ class ChatRequestCompleted(TelemetryEvent):
         _require_enum(self.terminal_category, TerminalCategory, "terminal_category")
 
 
-def _default_sink() -> Callable[[str], None]:
-    logger = logging.getLogger("cadensy.safe_telemetry")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
-    return logger.info
+_APPROVED_EVENT_PAYLOAD_FIELDS: dict[type[TelemetryEvent], tuple[str, ...]] = {
+    ChatRequestStarted: ("request_path",),
+    RuntimeSelected: ("runtime_name",),
+    ModelCallCompleted: (
+        "model_invocation_index",
+        "invocation_source",
+        "provider",
+        "model_id",
+        "invocation_outcome",
+        "failure_category",
+        "elapsed_ms",
+        "usage_status",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    ),
+    ToolCallCompleted: (
+        "tool_name",
+        "tool_dispatch_status",
+        "handler_executed",
+        "cache_hit",
+    ),
+    AgentDeadlineExceeded: (
+        "deadline_scope",
+        "failure_category",
+        "elapsed_ms",
+        "result_consumed",
+        "cancellation_requested",
+    ),
+    AgentCapacityRejected: ("elapsed_ms",),
+    AgentLateCompletion: (
+        "late_completion_kind",
+        "elapsed_ms",
+        "result_consumed",
+        "cancellation_requested",
+    ),
+    AgentFallback: ("fallback_reason", "fallback_surface"),
+    DomainClassificationCompleted: ("classification_outcome", "failure_category"),
+    ChatRequestCompleted: ("terminal_category",),
+}
+
+_APPROVED_EVENT_TYPES = frozenset(_APPROVED_EVENT_PAYLOAD_FIELDS)
+
+
+def _default_sink(line: str) -> None:
+    """Write directly so failures are observable to the emitter, not logging.
+
+    ``logging.StreamHandler`` reports a failed stream through ``handleError``,
+    which can write an exception/traceback to stderr while making ``logger.info``
+    appear successful. A minimal direct writer lets ``emit`` return ``False``
+    without producing a recursive diagnostic.
+    """
+    output = f"{line}\n"
+    written = sys.stdout.write(output)
+    if written is not None and written != len(output):
+        raise OSError("telemetry stdout write was incomplete")
+    sys.stdout.flush()
 
 
 class SafeTelemetryEmitter:
     """One-line JSON emission that is incapable of changing business flow."""
 
     def __init__(self, sink: Callable[[str], None] | None = None) -> None:
-        self._sink = sink or _default_sink()
+        self._sink = sink or _default_sink
 
     def emit(self, event: TelemetryEvent) -> bool:
-        if not isinstance(event, TelemetryEvent):
-            raise TypeError("SafeTelemetryEmitter accepts only typed TelemetryEvent values")
+        if type(event) not in _APPROVED_EVENT_TYPES:
+            return False
         try:
             line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
             self._sink(line)

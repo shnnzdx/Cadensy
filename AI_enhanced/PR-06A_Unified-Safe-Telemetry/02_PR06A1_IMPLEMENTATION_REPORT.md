@@ -78,3 +78,74 @@ Rollback is a single-commit revert after merge (or restore these files from its 
 ## Mutation evidence
 
 Only local repository files on this feature branch were changed. No AWS/API/deployment/CI configuration command, production database command, Alembic migration, protected-gate enablement, real provider call, or production data mutation was performed.
+
+## Independent Review Findings Resolution
+
+This section records the follow-up to the independent review of
+`d5343b1060f4f794155fba2478fb4630d02176b7`.
+
+### P0 — closed event registry
+
+Before the correction, `TelemetryEvent.to_dict()` reflected all dataclass fields and
+`SafeTelemetryEmitter.emit()` accepted any `isinstance(TelemetryEvent)`. An untrusted
+dataclass subclass could therefore attach a `raw_user_message` field.
+
+The corrected implementation has an exact concrete-type registry and a separate,
+fixed payload-field tuple for every approved event class. `to_dict()` rejects an
+unregistered concrete type; `emit()` returns `False` without calling a sink for any
+unregistered type. An adversarial `LeakyEvent(ChatRequestStarted)` with
+`SYNTHETIC_PRIVATE_MARKER_12345` proves the marker reaches neither JSON, stdout, nor
+stderr.
+
+### P0 — controlled default stdout sink
+
+The default sink no longer uses `logging.StreamHandler`. A direct controlled writer
+calls `sys.stdout.write` once for the complete JSON line and then flushes. This was
+selected because a standard logging handler can invoke `handleError()` on write
+failure, emit an exception/traceback to stderr, and leave `logger.info()` appearing
+successful. The controlled writer lets `SafeTelemetryEmitter.emit()` catch the error,
+return `False`, and emit no recursive diagnostic.
+
+The adversarial default-sink test replaces `stdout.write` with a writer that raises an
+exception containing `SYNTHETIC_PRIVATE_MARKER_12345`. It verifies `False`, no marker,
+no `Logging error`, and no traceback on stdout/stderr.
+
+### P1 — true legacy dispatch facts
+
+`base.call_agent` now derives a closed safe status in its actual Unknown Tool, Guard,
+Cache Hit, and handler-return branches, and passes the status tuple to
+`record_agent_round`. The trace compatibility layer no longer infers
+`handler_succeeded` from the absence of guard/cache flags. When no supplied status can
+prove success, its safe summary is `dispatch_unavailable`.
+
+The regression test uses mock replies to prove these outcomes: Unknown Tool →
+`unknown_tool` with a null safe tool name; Guard → `guard_rejected`; first handler
+return → `handler_succeeded`; cached second call → `cache_hit`. Internal
+`tool_results` provenance remains unchanged.
+
+### P2 — schema hardening
+
+Token counts now require non-negative integers: `1.5`, `True`, negatives, and values
+above the configured maximum are rejected. Deadline category pairs are closed:
+request/request-timeout, provider/provider-timeout, and tool/tool-timeout; capacity
+remains a separate event. Runtime, model, and tool events require non-null opaque
+trace and execution IDs. Null usage remains distinct from a genuinely reported zero.
+
+Typed construction remains the contract-validation boundary; the emitter itself is
+no-throw for unregistered values, serialization faults, and sink faults, returning
+`False` rather than affecting a future runtime caller.
+
+### Verification after review fixes
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_telemetry_contract.py tests/test_telemetry_privacy.py tests/test_agents_call_agent.py tests/test_agents_base.py tests/test_agent_execution_lifecycle.py -q
+```
+
+Result: **45 passed in 0.34s**. `compileall` and `git diff --check` also succeeded.
+
+### Operational release gate
+
+`record_agent_lifecycle()` remains intentionally neutralized pending PR-06A.2 safe
+lifecycle-event wiring. **PR-06A.1 must not be independently promoted to production
+while lifecycle telemetry remains disabled.** The Draft PR is a contract/privacy
+remediation review artifact, not a production observability release.

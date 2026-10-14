@@ -29,6 +29,17 @@ _APPROVED_TOOL_NAMES = frozenset(
         "propose_options",
     }
 )
+_APPROVED_DISPATCH_STATUSES = frozenset(
+    {
+        "unknown_tool",
+        "guard_rejected",
+        "cache_hit",
+        "handler_succeeded",
+        "handler_failed",
+        "dispatch_failed",
+        "tool_deadline_exceeded",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +122,7 @@ def record_agent_round(
     tool_result: Any,
     elapsed_ms: float,
     tokens: TokenUsage | None,
+    dispatch_statuses: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Build the safe in-memory legacy round summary without I/O.
 
@@ -118,7 +130,7 @@ def record_agent_round(
     migration. Only the fixed fields below can reach ``AgentRunResult.rounds``.
     """
     del trace_id, route, provider, model, tool_arguments, elapsed_ms, tokens
-    guard_rejected, guard_limit_exceeded, statuses = _agent_round_status(tool_result)
+    guard_rejected, guard_limit_exceeded = _agent_round_guard_flags(tool_result)
     safe_name = _safe_tool_name(tool_name)
     return {
         "round_index": round_index,
@@ -128,7 +140,7 @@ def record_agent_round(
         "guard_limit_exceeded": guard_limit_exceeded,
         "tool_dispatch_status": _summary_dispatch_status(
             requested_tool=requested_tool,
-            statuses=statuses,
+            statuses=dispatch_statuses or (),
         ),
     }
 
@@ -150,36 +162,29 @@ def _safe_tool_name(value: str | None) -> str | None:
     return value if value in _APPROVED_TOOL_NAMES else None
 
 
-def _agent_round_status(tool_result: Any) -> tuple[bool, bool, set[str]]:
+def _agent_round_guard_flags(tool_result: Any) -> tuple[bool, bool]:
     calls = tool_result.get("calls", []) if isinstance(tool_result, dict) else []
     guard_rejected = False
     guard_limit_exceeded = False
-    statuses: set[str] = set()
     for call in calls:
         if not isinstance(call, dict):
             continue
         if bool(call.get("guard_rejected")):
             guard_rejected = True
-            statuses.add("guard_rejected")
-        elif bool(call.get("cached")):
-            statuses.add("cache_hit")
-        else:
-            # This compatibility function only sees completed dispatches. A
-            # pre-handler/handler failure retains existing propagation and is
-            # represented by the typed future telemetry contract, not raw
-            # trace output.
-            statuses.add("handler_succeeded")
         guard_limit_exceeded = guard_limit_exceeded or bool(
             call.get("guard_limit_exceeded")
         )
-    return guard_rejected, guard_limit_exceeded, statuses
+    return guard_rejected, guard_limit_exceeded
 
 
-def _summary_dispatch_status(*, requested_tool: bool, statuses: set[str]) -> str | None:
+def _summary_dispatch_status(
+    *, requested_tool: bool, statuses: tuple[str, ...]
+) -> str | None:
     if not requested_tool:
         return None
-    if len(statuses) == 1:
-        return next(iter(statuses))
-    if len(statuses) > 1:
+    safe_statuses = {status for status in statuses if status in _APPROVED_DISPATCH_STATUSES}
+    if len(safe_statuses) == 1:
+        return next(iter(safe_statuses))
+    if len(safe_statuses) > 1:
         return "multiple_dispatches"
     return "dispatch_unavailable"

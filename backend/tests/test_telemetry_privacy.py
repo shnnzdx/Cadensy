@@ -33,6 +33,7 @@ def test_legacy_trace_calls_neither_log_nor_persist_sensitive_markers(capsys, mo
         },
         elapsed_ms=1.0,
         tokens=trace.TokenUsage(total_tokens=1),
+        dispatch_statuses=("guard_rejected",),
     )
     trace.record_model_call(
         trace_id=marker,
@@ -134,3 +135,82 @@ def test_agent_rounds_keep_behavioral_flags_but_not_tool_contents(monkeypatch):
     assert marker not in repr(result.rounds)
     # Provenance remains internal for the existing deterministic agent path.
     assert result.tool_results[0]["guard_reason"] == marker
+
+
+def test_agent_round_summary_uses_real_unknown_guard_cache_and_handler_dispatch_facts(
+    monkeypatch,
+):
+    monkeypatch.setenv("MOCK_AI", "1")
+
+    unknown = base.call_agent(
+        system="system",
+        user="user",
+        mock_rounds=(
+            base.AgentProviderReply(
+                content="",
+                tool_calls=(base.AgentToolCall("unknown-call", "unknown_from_model", {}),),
+            ),
+        ),
+        max_rounds=1,
+    )
+    assert unknown.rounds[0]["tool_name"] is None
+    assert unknown.rounds[0]["tool_dispatch_status"] == "unknown_tool"
+
+    guarded = base.call_agent(
+        system="system",
+        user="user",
+        tools=(
+            base.AgentTool(
+                name="guarded",
+                description="guarded",
+                parameters={"type": "object"},
+                handler=lambda: "must not run",
+                guard=lambda _state, _args: "blocked",
+            ),
+        ),
+        mock_rounds=(
+            base.AgentProviderReply(
+                content="",
+                tool_calls=(base.AgentToolCall("guard-call", "guarded", {}),),
+            ),
+        ),
+        max_rounds=1,
+    )
+    assert guarded.rounds[0]["tool_dispatch_status"] == "guard_rejected"
+
+    calls = 0
+
+    def handler() -> str:
+        nonlocal calls
+        calls += 1
+        return "ok"
+
+    cached = base.call_agent(
+        system="system",
+        user="user",
+        tools=(
+            base.AgentTool(
+                name="cached_tool",
+                description="cached",
+                parameters={"type": "object"},
+                handler=handler,
+            ),
+        ),
+        mock_rounds=(
+            base.AgentProviderReply(
+                content="",
+                tool_calls=(base.AgentToolCall("first", "cached_tool", {}),),
+            ),
+            base.AgentProviderReply(
+                content="",
+                tool_calls=(base.AgentToolCall("second", "cached_tool", {}),),
+            ),
+            base.AgentProviderReply(content="done"),
+        ),
+    )
+    assert calls == 1
+    assert [round_["tool_dispatch_status"] for round_ in cached.rounds] == [
+        "handler_succeeded",
+        "cache_hit",
+        None,
+    ]
