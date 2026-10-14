@@ -37,7 +37,7 @@ from ..observability.telemetry import (
     ToolCallCompleted,
     ToolDispatchStatus,
     UsageStatus,
-    emit_safely,
+    emit_event_safely,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -582,7 +582,7 @@ def _emit_model_call(
             value is not None
             for value in (tokens.prompt_tokens, tokens.completion_tokens, tokens.total_tokens)
         )
-        emit_safely(ModelCallCompleted(
+        emit_event_safely(lambda: ModelCallCompleted(
             context=context,
             model_invocation_index=invocation_index,
             invocation_source=source,
@@ -633,14 +633,20 @@ def _provider_failure_category(error: Exception) -> FailureCategory:
 
 def _emit_tool_call(
     *, context: TelemetryContext | None, emitter: SafeTelemetryEmitter | None,
-    tool_name: str | None, status: str,
+    tool_name: str | None, status: str, exposed: bool,
 ) -> None:
     if context is None:
         return
     try:
         resolved = ToolDispatchStatus(status)
-        approved = ApprovedToolName(tool_name) if tool_name in {item.value for item in ApprovedToolName} else None
-        emit_safely(ToolCallCompleted(
+        # An allow-listed enum name is still unknown if it was not exposed by
+        # this bounded runtime invocation.
+        approved = (
+            ApprovedToolName(tool_name)
+            if exposed and tool_name in {item.value for item in ApprovedToolName}
+            else None
+        )
+        emit_event_safely(lambda: ToolCallCompleted(
             context=context, tool_name=approved, tool_dispatch_status=resolved,
             handler_executed=resolved in {ToolDispatchStatus.HANDLER_SUCCEEDED, ToolDispatchStatus.HANDLER_FAILED, ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED},
             cache_hit=resolved is ToolDispatchStatus.CACHE_HIT,
@@ -808,7 +814,7 @@ def call_agent(
                 try:
                     guard_reason = tool.guard(state, call.arguments) if tool.guard else None
                 except Exception:
-                    _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="dispatch_failed")
+                    _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="dispatch_failed", exposed=True)
                     raise
                 guard_rejected = bool(guard_reason)
                 guard_limit_exceeded = False
@@ -822,7 +828,11 @@ def call_agent(
                         force_stop_reason = "guard_rejection_limit_exceeded"
                 else:
                     key = _cache_key(call.name, call.arguments)
-                    tool_started = deadline.before_tool() if deadline is not None else None
+                    try:
+                        tool_started = deadline.before_tool() if deadline is not None else None
+                    except Exception:
+                        _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="dispatch_failed", exposed=True)
+                        raise
                     if tool.cache and key in cache:
                         output = cache[key]
                         cached = True
@@ -837,18 +847,28 @@ def call_agent(
                                 deadline.after_tool(tool_started)
                             dispatch_status = "handler_succeeded"
                         except AgentToolDeadlineExceeded:
-                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="tool_deadline_exceeded")
+                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="tool_deadline_exceeded", exposed=True)
                             raise
                         except Exception:
-                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="handler_failed")
+                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="handler_failed", exposed=True)
                             raise
                         if tool.cache:
                             cache[key] = output
                     if deadline is not None and cached:
-                        deadline.after_tool(tool_started)
+                        try:
+                            deadline.after_tool(tool_started)
+                        except AgentToolDeadlineExceeded:
+                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="tool_deadline_exceeded", exposed=True)
+                            raise
                     called_tools.append({"name": call.name, "arguments": call.arguments})
 
-            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status=dispatch_status)
+            _emit_tool_call(
+                context=telemetry_context,
+                emitter=telemetry_emitter,
+                tool_name=call.name,
+                status=dispatch_status,
+                exposed=tool is not None,
+            )
 
             output_text = _stringify_tool_result(output)
             messages.append(

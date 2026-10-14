@@ -551,3 +551,17 @@ def emit_safely(event: TelemetryEvent, *, emitter: SafeTelemetryEmitter | None =
         return (emitter or DEFAULT_TELEMETRY_EMITTER).emit(event)
     except Exception:
         return False
+
+
+def emit_event_safely(
+    event_factory: Callable[[], TelemetryEvent], *, emitter: SafeTelemetryEmitter | None = None
+) -> bool:
+    """Protect event construction, closed-value mapping, and emission together.
+
+    Runtime hooks must fail open even if a constructor, a dataclass replacement,
+    an enum mapping, an injected emitter, or its sink fails.
+    """
+    try:
+        return emit_safely(event_factory(), emitter=emitter)
+    except Exception:
+        return False

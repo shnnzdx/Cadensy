@@ -42,6 +42,12 @@ from ..agents.runtime_contract import (
 from ..agents.tools import build_read_only_trip_tools
 from ..db.models import Plan, PlanItem, Trip, TripMembership
 from ..observability.telemetry import TelemetryContext
+from ..observability.telemetry import (
+    ClassificationOutcome,
+    DomainClassificationCompleted,
+    FailureCategory,
+    emit_event_safely,
+)
 from . import auth as auth_service
 from .constraints.types import Classification
 from .decisions import orchestrator as orch
@@ -296,6 +302,12 @@ class RevisionBracketedPreview:
             session_factory=self._session_factory,
             captured=captured,
         )
+        execution = self._execution
+        if request.telemetry_context is not None:
+            try:
+                execution = replace(execution, telemetry_context=request.telemetry_context)
+            except Exception:
+                pass
         runtime_result = self._runtime.run(
             RuntimeRequest(
                 message=request.message,
@@ -307,16 +319,19 @@ class RevisionBracketedPreview:
                 limits=_runtime_limits(),
             ),
             capability,
-            execution=replace(self._execution, telemetry_context=request.telemetry_context),
+            execution=execution,
         )
         if capability.stale:
             raise StalePreview("A scoped tool observed newer planning facts")
 
-        candidate = self._classify_candidate(captured, runtime_result, capability)
+        candidate = self._classify_candidate(
+            captured, runtime_result, capability, request.telemetry_context
+        )
         candidate_options = self._safe_options(
             captured,
             runtime_result.candidate_options,
             capability._application_legacy_tool_results,
+            request.telemetry_context,
         )
         self._verify_final(captured)
         return PreviewResult(
@@ -363,6 +378,7 @@ class RevisionBracketedPreview:
         captured: _CapturedRevisions,
         runtime_result: RuntimeResult,
         capability: RevisionBracketedReadTripCapability,
+        telemetry_context: TelemetryContext | None = None,
     ) -> PreviewCandidate | None:
         if not isinstance(runtime_result.outcome, AgentSuggestedChange):
             return None
@@ -388,12 +404,14 @@ class RevisionBracketedPreview:
             )
             if item is None:
                 raise PreviewItemNotFound("Suggested item is not in the authoritative Plan")
-            classification = orch.classify_change(
-                db,
-                item,
-                patch,
-                captured.actor_membership_id,
-            )
+            try:
+                classification = orch.classify_change(
+                    db, item, patch, captured.actor_membership_id,
+                )
+            except Exception:
+                _emit_classification(telemetry_context, succeeded=False)
+                raise
+            _emit_classification(telemetry_context, succeeded=True)
             return PreviewCandidate(
                 item_id=item.id,
                 item_title=item.title,
@@ -406,6 +424,7 @@ class RevisionBracketedPreview:
         captured: _CapturedRevisions,
         options: tuple[AgentCandidateOption, ...],
         tool_results: tuple[dict[str, Any], ...],
+        telemetry_context: TelemetryContext | None = None,
     ) -> tuple[PreviewOption, ...]:
         """Return only options whose target is still public and Plan-scoped.
 
@@ -437,10 +456,12 @@ class RevisionBracketedPreview:
                     try:
                         orch.classify_change(db, item, patch, captured.actor_membership_id)
                     except Exception:
+                        _emit_classification(telemetry_context, succeeded=False)
                         # Candidate options are non-authoritative display data.
                         # An unusable option is omitted without exposing domain
                         # details or poisoning the bounded read transaction.
                         continue
+                    _emit_classification(telemetry_context, succeeded=True)
                 safe.append(
                     PreviewOption(
                         id=option.id,
@@ -468,6 +489,19 @@ class RevisionBracketedPreview:
                 yield db
         finally:
             db.close()
+
+
+def _emit_classification(context: TelemetryContext | None, *, succeeded: bool) -> None:
+    if context is None:
+        return
+    emit_event_safely(lambda: DomainClassificationCompleted(
+        context=context,
+        classification_outcome=(
+            ClassificationOutcome.SUCCEEDED
+            if succeeded else ClassificationOutcome.FAILED
+        ),
+        failure_category=None if succeeded else FailureCategory.DOMAIN_ERROR,
+    ))
 
 
 def _assert_captured_current(db: Session, captured: _CapturedRevisions) -> None:

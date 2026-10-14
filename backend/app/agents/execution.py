@@ -29,7 +29,7 @@ from ..observability.telemetry import (
     LateCompletionKind,
     SafeTelemetryEmitter,
     TelemetryContext,
-    emit_safely,
+    emit_event_safely,
 )
 
 
@@ -316,8 +316,8 @@ def _emit_lifecycle_event(
     try:
         context = replace(telemetry_context, execution_id=event.execution_id)
         if event.phase == AgentExecutionCapacityExceeded.kind:
-            emit_safely(
-                AgentCapacityRejected(context=context, elapsed_ms=event.elapsed_ms),
+            emit_event_safely(
+                lambda: AgentCapacityRejected(context=context, elapsed_ms=event.elapsed_ms),
                 emitter=telemetry_emitter,
             )
         elif event.phase in {
@@ -332,8 +332,8 @@ def _emit_lifecycle_event(
                 AgentProviderDeadlineExceeded.kind: (DeadlineScope.PROVIDER, FailureCategory.PROVIDER_TIMEOUT),
                 AgentToolDeadlineExceeded.kind: (DeadlineScope.TOOL, FailureCategory.TOOL_TIMEOUT),
             }[event.phase]
-            emit_safely(
-                AgentDeadlineExceeded(
+            emit_event_safely(
+                lambda: AgentDeadlineExceeded(
                     context=context,
                     deadline_scope=scope,
                     failure_category=category,
@@ -344,8 +344,8 @@ def _emit_lifecycle_event(
                 emitter=telemetry_emitter,
             )
         elif event.phase in {"queued_cancellation", "late_completion"}:
-            emit_safely(
-                AgentLateCompletion(
+            emit_event_safely(
+                lambda: AgentLateCompletion(
                     context=context,
                     late_completion_kind=(
                         LateCompletionKind.QUEUED_CANCELLED

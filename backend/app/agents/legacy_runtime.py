@@ -39,7 +39,7 @@ from .runtime_contract import (
 )
 from .tools import build_read_only_trip_tools
 from ..db.session import SessionLocal
-from ..observability.telemetry import RuntimeName, RuntimeSelected, TelemetryContext, emit_safely
+from ..observability.telemetry import RuntimeName, RuntimeSelected, TelemetryContext, emit_event_safely
 from . import trace
 
 
@@ -194,15 +194,18 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
             # Selection is before bounded-worker admission, so it has no
             # execution id. The execution id below is passed into the actual
             # worker boundary rather than being fabricated by a telemetry hook.
-            emit_safely(RuntimeSelected(
+            emit_event_safely(lambda: RuntimeSelected(
                 context=replace(telemetry_context, trace_id=trace_id, execution_id=None),
                 runtime_name=RuntimeName.LEGACY,
             ))
         execution_id = trace.new_trace_id()
-        execution_context = (
-            replace(telemetry_context, trace_id=trace_id, execution_id=execution_id)
-            if telemetry_context is not None else None
-        )
+        try:
+            execution_context = (
+                replace(telemetry_context, trace_id=trace_id, execution_id=execution_id)
+                if telemetry_context is not None else None
+            )
+        except Exception:
+            execution_context = None
         def worker(deadline):
             def call_with_tools(read_tools: tuple[RuntimeReadTool, ...]) -> base.AgentRunResult:
                 # The capability keeps the worker Session open around the

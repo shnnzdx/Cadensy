@@ -65,7 +65,7 @@ from ..observability.telemetry import (
     RouteCategory,
     TelemetryContext,
     TerminalCategory,
-    emit_safely,
+    emit_event_safely,
 )
 from ..domain.transactions import (
     CredentialProof,
@@ -541,6 +541,14 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     item_id: str | None = None
     history: list[ChatTurnRequest] = Field(default_factory=list, max_length=10)
+
+
+class _ChatTelemetryResponse(dict):
+    """Preserve the public JSON mapping while carrying a typed internal outcome."""
+
+    def __init__(self, payload: dict, terminal: TerminalCategory) -> None:
+        super().__init__(payload)
+        self.telemetry_terminal = terminal
 
 
 class CommentRequest(BaseModel):
@@ -1227,7 +1235,7 @@ def _chat_with_trip_impl(
                 "patch": preview.candidate.patch,
                 "verdict": _classification_out(preview.candidate.classification),
             }
-        return {
+        return _ChatTelemetryResponse({
             "reply": preview.reply,
             "proposed_change": candidate,
             "candidate_options": [
@@ -1248,7 +1256,7 @@ def _chat_with_trip_impl(
                 "planning_facts_revision": preview.planning_facts_revision,
                 "authoritative": False,
             },
-        }
+        }, TerminalCategory.SUCCEEDED)
 
     _require_scoped_trip(db, me, trip_id)
     try:
@@ -1304,11 +1312,11 @@ def _chat_with_trip_impl(
         }
         for option in result.candidate_options
     ]
-    return {
+    return _ChatTelemetryResponse({
         "reply": result.reply,
         "proposed_change": proposed,
         "candidate_options": candidate_options,
-    }
+    }, result.telemetry_terminal)
 
 
 @app.post("/api/trips/{trip_id}/chat")
@@ -1319,24 +1327,34 @@ def chat_with_trip(
     me: TripMembership = Depends(current_membership),
 ) -> dict:
     """Own exactly one request start and terminal telemetry event."""
-    context = TelemetryContext.new()
-    emit_safely(ChatRequestStarted(context=context, request_path=RouteCategory.TRIP_CHAT))
+    try:
+        context = TelemetryContext.new()
+    except Exception:
+        context = None
+    if context is not None:
+        emit_event_safely(
+            lambda: ChatRequestStarted(context=context, request_path=RouteCategory.TRIP_CHAT)
+        )
     terminal = TerminalCategory.UNHANDLED_ERROR
     try:
         response = _chat_with_trip_impl(
             trip_id, body, db=db, me=me, telemetry_context=context,
         )
-        terminal = TerminalCategory.SUCCEEDED
+        terminal = getattr(response, "telemetry_terminal", TerminalCategory.SUCCEEDED)
         return response
     except HTTPException as error:
         terminal = {
             403: TerminalCategory.ACCESS_DENIED,
             404: TerminalCategory.NOT_FOUND,
             409: TerminalCategory.CONFLICT,
+            503: TerminalCategory.RUNTIME_FAILURE,
         }.get(error.status_code, TerminalCategory.UNHANDLED_ERROR)
         raise
     finally:
-        emit_safely(ChatRequestCompleted(context=context, terminal_category=terminal))
+        if context is not None:
+            emit_event_safely(
+                lambda: ChatRequestCompleted(context=context, terminal_category=terminal)
+            )
 
 
 def _require_scoped_plan(

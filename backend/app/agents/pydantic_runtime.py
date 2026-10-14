@@ -63,7 +63,7 @@ from ..observability.telemetry import (
     ToolCallCompleted,
     ToolDispatchStatus,
     UsageStatus,
-    emit_safely,
+    emit_event_safely,
 )
 
 
@@ -183,13 +183,15 @@ class _DeadlineBoundModel(WrapperModel):
                 elapsed_ms=(time.perf_counter() - started_at) * 1000, error=error,
             )
             raise
-        self._deadline.after_provider()
         _emit_pydantic_model_call(
             context=self._telemetry_context, model=self.wrapped,
             invocation_index=invocation_index, outcome=InvocationOutcome.RETURNED,
             elapsed_ms=(time.perf_counter() - started_at) * 1000, error=None,
             usage=getattr(response, "usage", None),
         )
+        # The wrapper invocation has returned even if the local request budget
+        # subsequently rejects consumption of that response.
+        self._deadline.after_provider()
         return response
 
 
@@ -210,15 +212,18 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
         telemetry_context = execution.telemetry_context
         trace_id = trace.new_trace_id()
         if telemetry_context is not None:
-            emit_safely(RuntimeSelected(
+            emit_event_safely(lambda: RuntimeSelected(
                 context=replace(telemetry_context, trace_id=trace_id, execution_id=None),
                 runtime_name=RuntimeName.PYDANTIC,
             ))
         execution_id = trace.new_trace_id()
-        execution_context = (
-            replace(telemetry_context, trace_id=trace_id, execution_id=execution_id)
-            if telemetry_context is not None else None
-        )
+        try:
+            execution_context = (
+                replace(telemetry_context, trace_id=trace_id, execution_id=execution_id)
+                if telemetry_context is not None else None
+            )
+        except Exception:
+            execution_context = None
         def worker(deadline: AgentExecutionContext) -> RuntimeResult:
             # Keep PR-04A's pre-capability deadline ordering and let the
             # capability own the independent worker Session for the full run.
@@ -282,7 +287,17 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             """Read the Current Plan for a day in the capability-bound trip."""
 
             tool = ctx.deps.tools_by_name["get_current_plan"]
-            tool_started_at = ctx.deps.deadline.before_tool()
+            try:
+                tool_started_at = ctx.deps.deadline.before_tool()
+            except Exception:
+                # The handler has not started.  Do not turn a deadline-gate
+                # rejection into a handler failure.
+                _emit_pydantic_tool_call(
+                    telemetry_context,
+                    "get_current_plan",
+                    ToolDispatchStatus.DISPATCH_FAILED,
+                )
+                raise
             try:
                 output = tool.invoke(day=day)
                 # If a blocking read completed late, this raises before Pydantic
@@ -300,9 +315,18 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 raise
             _record_read_item_refs(output, ctx.deps.read_item_refs)
             ctx.deps.tool_trajectory.append("get_current_plan")
-            _emit_pydantic_tool_call(telemetry_context, "get_current_plan", ToolDispatchStatus.HANDLER_SUCCEEDED)
             if not isinstance(output, dict):
+                _emit_pydantic_tool_call(
+                    telemetry_context,
+                    "get_current_plan",
+                    ToolDispatchStatus.HANDLER_FAILED,
+                )
                 raise ModelRetry("The scoped plan read returned an invalid safe projection.")
+            _emit_pydantic_tool_call(
+                telemetry_context,
+                "get_current_plan",
+                ToolDispatchStatus.HANDLER_SUCCEEDED,
+            )
             return output
 
         @agent.output_validator
@@ -431,12 +455,11 @@ def _emit_pydantic_model_call(
             if model.__class__.__name__ == "FunctionModel"
             else InvocationSource.PROVIDER_SDK
         )
-        prompt_tokens = getattr(usage, "request_tokens", None)
-        completion_tokens = getattr(usage, "response_tokens", None)
-        total_tokens = getattr(usage, "total_tokens", None)
-        values = (prompt_tokens, completion_tokens, total_tokens)
-        reported = any(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in values)
-        emit_safely(ModelCallCompleted(
+        # Pydantic AI's wrapper response does not establish that a usage value
+        # was provider-originated (and default zero values are ambiguous).
+        # Preserve the call fact but decline to report usage until that
+        # provenance is explicitly available at this seam.
+        emit_event_safely(lambda: ModelCallCompleted(
             context=context,
             model_invocation_index=invocation_index,
             invocation_source=source,
@@ -445,10 +468,10 @@ def _emit_pydantic_model_call(
             invocation_outcome=outcome,
             failure_category=None if error is None else _pydantic_failure_category(error),
             elapsed_ms=round(max(elapsed_ms, 0), 2),
-            usage_status=UsageStatus.REPORTED if reported else UsageStatus.NOT_REPORTED,
-            prompt_tokens=prompt_tokens if reported and isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens >= 0 else None,
-            completion_tokens=completion_tokens if reported and isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool) and completion_tokens >= 0 else None,
-            total_tokens=total_tokens if reported and isinstance(total_tokens, int) and not isinstance(total_tokens, bool) and total_tokens >= 0 else None,
+            usage_status=UsageStatus.NOT_REPORTED,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
         ))
     except Exception:
         return
@@ -479,11 +502,15 @@ def _emit_pydantic_tool_call(
     if context is None:
         return
     try:
-        emit_safely(ToolCallCompleted(
+        emit_event_safely(lambda: ToolCallCompleted(
             context=context,
             tool_name=ApprovedToolName(name),
             tool_dispatch_status=status,
-            handler_executed=True,
+            handler_executed=status in {
+                ToolDispatchStatus.HANDLER_SUCCEEDED,
+                ToolDispatchStatus.HANDLER_FAILED,
+                ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED,
+            },
             cache_hit=False,
         ))
     except Exception:

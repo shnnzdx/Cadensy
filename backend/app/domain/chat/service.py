@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from uuid import uuid4
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
@@ -29,7 +29,8 @@ from ...observability.telemetry import (
     FallbackReason,
     FallbackSurface,
     TelemetryContext,
-    emit_safely,
+    TerminalCategory,
+    emit_event_safely,
 )
 from ...db.session import SessionLocal
 from ...db.models import Plan, PlanItem, Trip, TripMembership
@@ -120,6 +121,7 @@ class ChatResult:
     reply: str
     proposed_change: ProposedChatChange | None
     candidate_options: tuple[ChatCandidateOption, ...] = ()
+    telemetry_terminal: TerminalCategory = TerminalCategory.SUCCEEDED
 
 
 @dataclass(frozen=True)
@@ -177,20 +179,26 @@ def _respond_with_agent_branch(
         message=message,
         items=items,
         history=history,
+        telemetry_context=telemetry_context,
     )
     if followup is not None:
-        return followup
+        return replace(
+            followup,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
+        )
 
     reference = _resolve_item_reference(message, items, selected, history)
     if reference.status == "ambiguous":
         return ChatResult(
             reply=_ambiguous_item_reference_reply(message),
             proposed_change=None,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
         )
     if reference.status == "missing":
         return ChatResult(
             reply=_missing_item_reference_reply(message),
             proposed_change=None,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
         )
 
     target = reference.item or selected
@@ -200,10 +208,15 @@ def _respond_with_agent_branch(
         return ChatResult(
             reply=_structured_item_explanation(target),
             proposed_change=None,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
         )
     clarification = _plain_text_clarification_reply(message, target)
     if clarification is not None:
-        return ChatResult(reply=clarification, proposed_change=None)
+        return ChatResult(
+            reply=clarification,
+            proposed_change=None,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
+        )
 
     try:
         request = RuntimeRequest(
@@ -733,6 +746,7 @@ def _followup_option_selection_result(
     message: str,
     items: list[PlanItem],
     history: tuple[chat_agent.HistoryTurn, ...],
+    telemetry_context: TelemetryContext | None = None,
 ) -> ChatResult | None:
     candidates = _latest_history_candidate_options(history)
     if not candidates:
@@ -766,7 +780,12 @@ def _followup_option_selection_result(
             candidate_options=candidates,
         )
 
-    verdict = orch.classify_change(db, target, patch, membership.id)
+    try:
+        verdict = orch.classify_change(db, target, patch, membership.id)
+    except Exception:
+        _emit_classification(telemetry_context, succeeded=False)
+        raise
+    _emit_classification(telemetry_context, succeeded=True)
     proposed = ProposedChatChange(
         item_id=target.id,
         item_title=target.title,
@@ -995,7 +1014,11 @@ def _degraded_reply(
             itinerary=tuple(_item_context(item) for item in items),
         )
     )
-    return ChatResult(reply=reply, proposed_change=None)
+    return ChatResult(
+        reply=reply,
+        proposed_change=None,
+        telemetry_terminal=TerminalCategory.DEGRADED_FALLBACK,
+    )
 
 
 def _safe_pending_agent_reply(message: str) -> str:
@@ -1263,7 +1286,7 @@ def _proposed_change_from_runtime_suggestion(
 
 def _emit_service_fallback(context: TelemetryContext | None) -> None:
     if context is not None:
-        emit_safely(AgentFallback(
+        emit_event_safely(lambda: AgentFallback(
             context=context,
             fallback_reason=FallbackReason.RUNTIME_FAILURE,
             fallback_surface=FallbackSurface.SERVICE,
@@ -1272,7 +1295,7 @@ def _emit_service_fallback(context: TelemetryContext | None) -> None:
 
 def _emit_classification(context: TelemetryContext | None, *, succeeded: bool) -> None:
     if context is not None:
-        emit_safely(DomainClassificationCompleted(
+        emit_event_safely(lambda: DomainClassificationCompleted(
             context=context,
             classification_outcome=(ClassificationOutcome.SUCCEEDED if succeeded else ClassificationOutcome.FAILED),
             failure_category=None if succeeded else FailureCategory.DOMAIN_ERROR,

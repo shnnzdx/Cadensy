@@ -13,3 +13,15 @@ retention/access policy. Do not infer physical provider HTTP delivery from a
 
 Rollback is a normal source revert. The sink intentionally has no file, queue, retry,
 or external service dependency, so rollback creates no telemetry data migration.
+
+## Production boundary
+
+**Production AWS Verification Pending Separate Authorization.** This PR performs no
+AWS operation, deployment, production database operation, or paid-provider request.
+The [repository CI workflow](https://github.com/shnnzdx/Cadensy/actions/workflows/build-validation.yml)
+is source-validation evidence only; deployed stdout collection, CloudWatch routing,
+retention, access control, alarms, and delivery health need their own approved runbook
+and authorization.
+
+`record_agent_lifecycle()` is currently a compatibility no-op. **PR-06A must not be
+independently promoted to production while lifecycle telemetry remains disabled.**
