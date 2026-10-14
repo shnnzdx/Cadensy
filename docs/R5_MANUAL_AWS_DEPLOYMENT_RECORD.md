@@ -284,3 +284,103 @@ is not eligible to ship from the old R5 SHA. A separate PR with Hosted CI must
 merge first; its resulting `main` SHA becomes the only candidate release
 source. Until that gate passes, **no RDS snapshot, stamp, migration, ECR push,
 or ECS update may occur**.
+
+## Final controlled R5 release execution — 2026-10-13
+
+This section records the bounded production execution authorized after the
+source-integrity and immutable-image gates passed. It preserves the earlier
+blocked audit history above; it does not reinterpret any previous preflight as
+a completed release.
+
+### Immutable inputs and fresh recovery point
+
+| Item | Verified value |
+| --- | --- |
+| AWS account / region | `448678332746` / `us-east-1` |
+| Application source | `6daf90ed4f1130171ff6e84c11241f374dc5aeeb` |
+| Build tooling source | `fab78418f30dd20e55d4bab38c67eeddc1e4f026` |
+| Runtime image | `tripsync-backend@sha256:c51782b88887c71e640687d14097f93d5111f2dcdf7cfff748053e4247e6ba34` |
+| Migration runner | `tripsync-backend@sha256:5117981f94c71893578ece57489914989058bc3572c6827a924e4060510973b0` |
+| Fresh manual RDS snapshot | `tripsync-postgres-r5-20261014-020428` — `available` |
+
+The snapshot is a manual PostgreSQL snapshot of `tripsync-postgres` in the
+existing VPC. IAM policy simulation confirmed that the release identity is
+allowed to restore it to a separate instance, and the existing private DB
+subnet group has active subnets in `us-east-1a` and `us-east-1b`. The ECS
+service subnets are in the same VPC. No restore drill was performed and no
+restore-over-live action is authorized by this record.
+
+### Alembic migration evidence
+
+A temporary, non-service task definition
+`tripsync-backend-r5-migration:1` ran the immutable migration-runner image in
+the existing ECS-to-private-RDS database network. It reused the existing task and
+execution roles, runtime secret reference, networking, and CloudWatch log
+configuration; its command was explicit rather than the image's safe default.
+
+| Item | Result |
+| --- | --- |
+| ECS task | `arn:aws:ecs:us-east-1:448678332746:task/tripsync-cluster/ed73d6ef9bd7497ebe454a1280dc2e80` |
+| Exit code | `0` |
+| Pre-stamp validator | Passed the strict Option A profile only: `trip.archived_at`, `change_proposal.extended_at`, and `plan.needs_refresh DEFAULT false` |
+| Stamp | `f9ff23b7b84d` |
+| Upgrade chain | `f9ff23b7b84d -> 54e8dd1ca624 -> 6f77e775d201 -> c2a4b6d8e0f1` |
+| Final Alembic head | `c2a4b6d8e0f1` |
+| Post-migration data check | 37 Trips, 37 Plans, zero duplicate Plan Trips, both approved legacy columns preserved |
+| R5 structure check | `guest_session`, `mutation_idempotency`, Plan revision, Trip planning-facts revision, and required check constraints verified |
+
+The task never ran `app.db.init_schema`, did not perform a schema downgrade,
+and did not expose a database URL or any secret value in release evidence.
+
+### ECS promotion and smoke evidence
+
+The previous live revision was `tripsync-backend:18`, using image digest
+`sha256:9ad324866bc7906c54a5e00478a0164591ad8aaff46c3fb648a4262490588057`.
+The existing service alone was updated to `tripsync-backend:19`; its task,
+execution roles, Fargate sizing, `awsvpc` network configuration, SSM secret
+references, container port, and CloudWatch configuration were preserved.
+
+Only the approved runtime image and safety posture changed:
+
+- Runtime image is the immutable R5 digest listed above.
+- `APP_ENV=production` remains set.
+- `DEV_ALLOW_MEMBERSHIP_HEADER=0`.
+- All 15 protected B.2C/B.2D/B.2E writer gates plus
+  `CADENSY_B3_PROTECTED_PREVIEW_APPLY` are explicitly `0`.
+
+The completed service reports desired/running/pending `1/1/0`; its sole
+running task uses revision `:19` and the requested runtime digest. The existing
+deployment circuit breaker and rollback setting were retained. The sole ALB
+target is `healthy`.
+
+Production smoke evidence, with no real Trip mutation:
+
+| Check | Result |
+| --- | --- |
+| `GET /api/health` | `200` with `ok: true` |
+| Read-only nonexistent-invite probe | `404`, proving runtime database access without creating data |
+| Request with forged membership/trip headers and no bearer credential | `401`, confirming the retired header bypass is unavailable |
+| Fixed organizer account login, authenticated account read, and immediate logout | `200` / `200` / `200`; the ephemeral token was not persisted or recorded |
+| CloudWatch scan after promotion | zero `ERROR`, `Traceback`, and `CRITICAL` events in `/ecs/tripsync-backend` |
+
+### Rollback and remaining infrastructure risks
+
+The pre-release manual snapshot is available and a separate-instance restore is
+technically permitted. The previous ECS task definition `:18` remains
+registered, but the database is now forward-migrated: do not revert the
+application task definition unless the older image's compatibility with the
+forward schema has first been assessed. No automated schema downgrade or data
+deletion is an approved rollback action.
+
+Known infrastructure risks remain unchanged: the production RDS instance is
+single-AZ, unencrypted, and has one-day automated-retention; a full restore
+drill has not been performed. Protected R5 behavior remains disabled in
+production pending separate authorization.
+
+## Final verdict
+
+**MANUAL R5 AWS BACKEND RELEASE — PASS**
+
+The bounded RDS snapshot, allowlisted Alembic baseline/upgrade, immutable ECS
+runtime promotion, health checks, authentication smoke, and default-off feature
+gate verification all have live AWS evidence above.
