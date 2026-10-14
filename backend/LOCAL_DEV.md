@@ -456,7 +456,7 @@ cd backend
 For an existing pre-Alembic database, do not replace this with a blind
 `init_schema` run or a blind `stamp`. Follow the reviewed compatibility and
 stamping runbook in
-`AI_enhanced/phase-0-audit-2026-10-03/11_PR05A_ALEMBIC_BASELINE.md`.
+`AI_enhanced/PR-05A_Alembic-Baseline/11_PR05A_ALEMBIC_BASELINE.md`.
 
 4. Start the backend, frontend, and Trip workspace using the commands above.
 5. Create a trip whose destination is `Tokyo, Japan`, submit organizer preferences,

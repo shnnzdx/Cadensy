@@ -353,5 +353,5 @@ cd backend
 Do not run `app.db.init_schema` as a substitute for migration history. For an
 existing database created before Alembic, use the reviewed preflight and
 stamping procedure in
-`AI_enhanced/phase-0-audit-2026-10-03/11_PR05A_ALEMBIC_BASELINE.md`; stamping
+`AI_enhanced/PR-05A_Alembic-Baseline/11_PR05A_ALEMBIC_BASELINE.md`; stamping
 is allowed only after a zero-drift comparison and a backup plan.
