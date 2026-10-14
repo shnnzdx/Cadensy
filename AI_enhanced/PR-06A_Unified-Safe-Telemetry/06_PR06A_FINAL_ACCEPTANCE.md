@@ -7,7 +7,8 @@
   are fail-open for the business path.
 - [x] API terminal categories are structured facts with one start and one terminal
   event per entered handler: success, deterministic clarification, degraded fallback,
-  403, 404, 409, 503, and unhandled error.
+  403, 404, 409, runtime-failure 503, typed feature-unavailable 503, and unhandled
+  error.
 - [x] Pydantic wrapper returns are observed before post-return consumption rejection;
   Pydantic usage is conservatively `not_reported` until provider provenance exists.
 - [x] Legacy in-memory provenance and `AgentRunResult.rounds` remain compatible.
@@ -16,8 +17,22 @@
   text, identifiers beyond opaque correlation ids, or secrets are telemetry fields.
 - [x] No AWS, deployment, migration, merge, or API/domain/transaction/idempotency
   redesign occurred.
-- [ ] Hosted CI for this final-corrections commit — pending push and GitHub execution:
-  [CI workflow](https://github.com/shnnzdx/Cadensy/actions/workflows/build-validation.yml).
+- [x] Hosted CI for `4d7a9236f1a255e88e14831e573a273d3c732648` completed:
+  [CI Regression Gates #76](https://github.com/shnnzdx/Cadensy/actions/runs/38644609017)
+  passed its Legacy full regression, isolated Pydantic compatibility, production
+  Pydantic image proof, migration-runner image proof, and frontend regression/build.
+
+## Correlation and lifecycle limits
+
+- `domain.classification_completed` receives the request context but intentionally
+  has only `request_id` on deterministic service/history and Preview classification
+  paths. It does not fabricate `trace_id` or `execution_id`; agent model/tool events
+  carry those IDs only at their actual runtime boundary.
+- Legacy `record_agent_lifecycle()` is a compatibility trace no-op. New safe lifecycle
+  events are separately wired from real `AgentLifecycleEvent` phases through the
+  no-throw telemetry emitter. These statements are not a claim of legacy trace output.
+- Production CloudWatch/stdout delivery has **not** been verified. No AWS operation,
+  deployment, production-database access, or paid-provider request was performed.
 
 ## Required final review evidence
 
@@ -27,7 +42,7 @@ Do not label any suite successful unless pytest produced its terminal success su
 
 The source is ready for final independent review, not independently approved for
 production deployment. **Production AWS Verification Pending Separate Authorization.**
-Cloud delivery configuration and a full clean CI run remain deployment/review evidence,
-not assertions made by this source change. `record_agent_lifecycle()` remains disabled,
-therefore PR-06A must not be independently promoted to production while lifecycle
-telemetry remains disabled.
+Cloud delivery configuration remains deployment/review evidence, not an assertion made
+by this source change. `record_agent_lifecycle()` remains disabled, therefore PR-06A
+must not be independently promoted to production while lifecycle telemetry remains
+disabled.

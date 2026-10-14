@@ -551,6 +551,13 @@ class _ChatTelemetryResponse(dict):
         self.telemetry_terminal = terminal
 
 
+class ChatFeatureUnavailable(HTTPException):
+    """A typed chat feature-gate 503, distinct from runtime execution failure."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=503, detail=detail)
+
+
 class CommentRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
 
@@ -1182,7 +1189,7 @@ def _chat_with_trip_impl(
     b3_state = _b3_preview_apply_gate_state()
     if b3_state != "off":
         if b3_state != "enabled":
-            raise HTTPException(503, "Protected Preview is not available")
+            raise ChatFeatureUnavailable("Protected Preview is not available")
         # Extract only preliminary primitives while the request Session is
         # live.  Close it before Runtime/provider work so it cannot retain an
         # identity map or transaction through any bounded B.3 read tool.
@@ -1256,7 +1263,7 @@ def _chat_with_trip_impl(
                 "planning_facts_revision": preview.planning_facts_revision,
                 "authoritative": False,
             },
-        }, TerminalCategory.SUCCEEDED)
+        }, preview.telemetry_terminal)
 
     _require_scoped_trip(db, me, trip_id)
     try:
@@ -1343,12 +1350,16 @@ def chat_with_trip(
         terminal = getattr(response, "telemetry_terminal", TerminalCategory.SUCCEEDED)
         return response
     except HTTPException as error:
-        terminal = {
-            403: TerminalCategory.ACCESS_DENIED,
-            404: TerminalCategory.NOT_FOUND,
-            409: TerminalCategory.CONFLICT,
-            503: TerminalCategory.RUNTIME_FAILURE,
-        }.get(error.status_code, TerminalCategory.UNHANDLED_ERROR)
+        terminal = (
+            TerminalCategory.FEATURE_UNAVAILABLE
+            if isinstance(error, ChatFeatureUnavailable)
+            else {
+                403: TerminalCategory.ACCESS_DENIED,
+                404: TerminalCategory.NOT_FOUND,
+                409: TerminalCategory.CONFLICT,
+                503: TerminalCategory.RUNTIME_FAILURE,
+            }.get(error.status_code, TerminalCategory.UNHANDLED_ERROR)
+        )
         raise
     finally:
         if context is not None:

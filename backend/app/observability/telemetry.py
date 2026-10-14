@@ -127,6 +127,7 @@ class TerminalCategory(str, Enum):
     CONFLICT = "conflict"
     DEGRADED_FALLBACK = "degraded_fallback"
     RUNTIME_FAILURE = "runtime_failure"
+    FEATURE_UNAVAILABLE = "feature_unavailable"
     UNHANDLED_ERROR = "unhandled_error"
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from uuid import uuid4
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -182,10 +182,10 @@ def _respond_with_agent_branch(
         telemetry_context=telemetry_context,
     )
     if followup is not None:
-        return replace(
-            followup,
-            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
-        )
+        # The follow-up resolver has already established its structured
+        # semantic branch.  A classified ProposedChatChange is success; only
+        # ambiguous, stale, and no-change branches are clarification.
+        return followup
 
     reference = _resolve_item_reference(message, items, selected, history)
     if reference.status == "ambiguous":
@@ -760,6 +760,7 @@ def _followup_option_selection_result(
             reply=_ambiguous_option_selection_reply(message),
             proposed_change=None,
             candidate_options=candidates,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
         )
 
     option = selection.option
@@ -768,6 +769,7 @@ def _followup_option_selection_result(
             reply=_no_change_option_selection_reply(message),
             proposed_change=None,
             candidate_options=candidates,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
         )
 
     item_by_id = {item.id: item for item in items}
@@ -778,6 +780,7 @@ def _followup_option_selection_result(
             reply=_stale_option_selection_reply(message),
             proposed_change=None,
             candidate_options=candidates,
+            telemetry_terminal=TerminalCategory.DETERMINISTIC_CLARIFICATION,
         )
 
     try:

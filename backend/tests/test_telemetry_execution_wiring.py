@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -185,6 +186,103 @@ def test_chat_route_maps_controlled_http_status_to_one_terminal_event(
     assert [event.event_name.value for event in emitted] == [
         "chat.request_started", "chat.request_completed",
     ]
+    assert emitted[-1].terminal_category.value == expected_terminal
+
+
+def test_chat_route_distinguishes_feature_unavailable_from_runtime_failure(monkeypatch):
+    from app.api import main
+
+    emitted = []
+    monkeypatch.setattr(
+        main, "emit_event_safely", lambda factory: emitted.append(factory()) or True
+    )
+    monkeypatch.setattr(
+        main,
+        "_chat_with_trip_impl",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            main.ChatFeatureUnavailable("Protected Preview is not available")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        main.chat_with_trip(
+            "trip_12345678", main.ChatRequest(message="hello"), db=object(), me=object()
+        )
+
+    assert error.value.status_code == 503
+    assert emitted[-1].terminal_category.value == "feature_unavailable"
+
+
+@pytest.mark.parametrize("terminal", ["succeeded", "degraded_fallback"])
+def test_b3_preview_response_preserves_its_structured_terminal(monkeypatch, terminal):
+    from app.api import main
+    from app.domain.preview_apply import PreviewResult
+    from app.observability.telemetry import TerminalCategory
+
+    monkeypatch.setattr(main, "_b3_preview_apply_gate_state", lambda: "enabled")
+    monkeypatch.setattr(
+        main.chat_service,
+        "preview_trip_chat_revision_bracketed",
+        lambda **_kwargs: PreviewResult(
+            reply="Same safe reply for either terminal.",
+            plan_id="plan_12345678",
+            plan_revision=0,
+            planning_facts_revision=0,
+            candidate=None,
+            candidate_options=(),
+            telemetry_terminal=TerminalCategory(terminal),
+        ),
+    )
+
+    response = main._chat_with_trip_impl(
+        "trip_12345678",
+        main.ChatRequest(message="hello"),
+        db=SimpleNamespace(close=lambda: None),
+        me=SimpleNamespace(trip_id="trip_12345678", id="membership_12345678"),
+        telemetry_context=None,
+    )
+
+    assert response["preview"]["authoritative"] is False
+    assert response.telemetry_terminal.value == terminal
+
+
+@pytest.mark.parametrize(
+    ("preview_error", "expected_terminal"),
+    [
+        ("access", "access_denied"),
+        ("stale", "conflict"),
+    ],
+)
+def test_b3_preview_access_and_stale_errors_keep_http_and_terminal_facts(
+    monkeypatch, preview_error, expected_terminal
+):
+    from app.api import main
+
+    error = (
+        main.PreviewAccessDenied("denied")
+        if preview_error == "access"
+        else main.StalePreview("stale")
+    )
+    monkeypatch.setattr(main, "_b3_preview_apply_gate_state", lambda: "enabled")
+    monkeypatch.setattr(
+        main.chat_service,
+        "preview_trip_chat_revision_bracketed",
+        lambda **_kwargs: (_ for _ in ()).throw(error),
+    )
+    emitted = []
+    monkeypatch.setattr(
+        main, "emit_event_safely", lambda factory: emitted.append(factory()) or True
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        main.chat_with_trip(
+            "trip_12345678",
+            main.ChatRequest(message="hello"),
+            db=SimpleNamespace(close=lambda: None),
+            me=SimpleNamespace(trip_id="trip_12345678", id="membership_12345678"),
+        )
+
+    assert raised.value.status_code == (403 if preview_error == "access" else 409)
     assert emitted[-1].terminal_category.value == expected_terminal
 
 

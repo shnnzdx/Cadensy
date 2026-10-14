@@ -41,7 +41,7 @@ from ..agents.runtime_contract import (
 )
 from ..agents.tools import build_read_only_trip_tools
 from ..db.models import Plan, PlanItem, Trip, TripMembership
-from ..observability.telemetry import TelemetryContext
+from ..observability.telemetry import TelemetryContext, TerminalCategory
 from ..observability.telemetry import (
     ClassificationOutcome,
     DomainClassificationCompleted,
@@ -123,6 +123,8 @@ class PreviewResult:
     candidate: PreviewCandidate | None
     candidate_options: tuple[PreviewOption, ...]
     authoritative: bool = False
+    # Internal request-observability fact.  The HTTP DTO remains unchanged.
+    telemetry_terminal: TerminalCategory = TerminalCategory.SUCCEEDED
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,7 @@ class RevisionBracketedPreview:
             planning_facts_revision=captured.planning_facts_revision,
             candidate=candidate,
             candidate_options=candidate_options,
+            telemetry_terminal=_preview_terminal(runtime_result),
         )
 
     def _capture(self, request: PreviewRequest) -> _CapturedRevisions:
@@ -598,6 +601,13 @@ def _safe_preview_reply(runtime_result: RuntimeResult) -> str:
         "I could not prepare a change preview from the current plan. "
         "No change has been submitted or applied."
     )
+
+
+def _preview_terminal(runtime_result: RuntimeResult) -> TerminalCategory:
+    """Classify only established Preview degradation facts, never reply text."""
+    if runtime_result.observation.failure is not None or not runtime_result.reply.strip():
+        return TerminalCategory.DEGRADED_FALLBACK
+    return TerminalCategory.SUCCEEDED
 
 
 def _replacement_provenance_allows(

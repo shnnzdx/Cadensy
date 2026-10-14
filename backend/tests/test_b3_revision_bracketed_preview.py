@@ -22,7 +22,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.agents.execution import AgentExecutionConfig
 from app.agents.runtime_contract import (
     AgentCandidateOption,
+    AgentReplyOnly,
     AgentSuggestedChange,
+    RuntimeFailure,
     RuntimeObservation,
     RuntimeRequest,
     RuntimeResult,
@@ -53,6 +55,7 @@ from app.domain.preview_apply import (
 from app.domain.transactions.protected_profile import b3_profile_admission
 from app.domain.transactions import CredentialProof, HmacSigningKey, PreliminaryActorScope
 from app.domain.transactions import change_proposal as protected_changes
+from app.observability.telemetry import TerminalCategory
 
 
 _created_records: list[tuple[str, str]] = []
@@ -243,10 +246,49 @@ def test_preview_uses_detached_fresh_reads_and_returns_a_non_authoritative_candi
     assert preview.candidate.item_id == seed.item_id
     assert preview.candidate.patch == {"start_hour": 13.0}
     assert preview.candidate.classification.path.value == "notice"
+    assert preview.telemetry_terminal is TerminalCategory.SUCCEEDED
     assert isinstance(runtime.tool_result, dict)
     with _factory(test_engine)() as db:
         assert db.get(Plan, seed.plan_id).revision == 0
         assert db.scalar(select(PlanItem.start_hour).where(PlanItem.id == seed.item_id)) == 12
+
+
+@pytest.mark.parametrize("reply", ["A safe runtime fallback reply.", ""])
+def test_preview_runtime_degradation_has_a_structured_degraded_terminal(test_engine, reply):
+    seed = _seed(test_engine)
+
+    class FailureRuntime:
+        def run(self, request, capability, *, execution: AgentExecutionConfig) -> RuntimeResult:
+            return RuntimeResult(
+                reply=reply,
+                outcome=AgentReplyOnly(),
+                candidate_options=(),
+                observation=RuntimeObservation(
+                    trace_id="real-runtime-trace",
+                    round_count=1,
+                    total_tokens=None,
+                    total_elapsed_ms=1,
+                    failure=RuntimeFailure(
+                        normalized_kind="provider_timeout", technical_kind="TimeoutError"
+                    ),
+                ),
+            )
+
+    preview = RevisionBracketedPreview(
+        session_factory=_factory(test_engine), runtime=FailureRuntime()
+    ).preview(
+        PreviewRequest(
+            trip_id=seed.trip_id,
+            actor_membership_id=seed.membership_id,
+            message="Move lunch later",
+            selected_item_id=seed.item_id,
+        )
+    )
+
+    assert preview.telemetry_terminal is TerminalCategory.DEGRADED_FALLBACK
+    assert preview.candidate is None
+    assert preview.candidate_options == ()
+    assert preview.authoritative is False
 
 
 def test_preview_closes_template_and_per_tool_sessions_before_runtime_returns(test_engine):
