@@ -13,6 +13,7 @@ import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from dataclasses import replace
 from datetime import date
 from typing import Annotated, Any, Literal, cast
 
@@ -46,6 +47,23 @@ from .runtime_contract import (
     RuntimeReadTool,
     RuntimeRequest,
     RuntimeResult,
+)
+from . import trace
+from ..observability.telemetry import (
+    ApprovedToolName,
+    FailureCategory,
+    InvocationOutcome,
+    InvocationSource,
+    ModelCallCompleted,
+    ModelId,
+    ProviderName,
+    RuntimeName,
+    RuntimeSelected,
+    TelemetryContext,
+    ToolCallCompleted,
+    ToolDispatchStatus,
+    UsageStatus,
+    emit_event_safely,
 )
 
 
@@ -133,10 +151,14 @@ class _PydanticRunDeps:
 class _DeadlineBoundModel(WrapperModel):
     """Apply PR-01C remaining provider budget to every Pydantic request."""
 
-    def __init__(self, wrapped: Model, deadline: AgentExecutionContext) -> None:
+    def __init__(
+        self, wrapped: Model, deadline: AgentExecutionContext,
+        telemetry_context: TelemetryContext | None = None,
+    ) -> None:
         super().__init__(wrapped)
         self._deadline = deadline
         self.request_count = 0
+        self._telemetry_context = telemetry_context
 
     async def request(
         self,
@@ -144,16 +166,31 @@ class _DeadlineBoundModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
+        self.request_count += 1
+        invocation_index = self.request_count
+        started_at = time.perf_counter()
         provider_timeout = self._deadline.before_provider()
         bounded_settings = dict(model_settings or {})
         bounded_settings["timeout"] = provider_timeout
-        response = await self.wrapped.request(
-            cast(list[Any], messages),
-            cast(ModelSettings, bounded_settings),
-            model_request_parameters,
+        try:
+            response = await self.wrapped.request(
+                cast(list[Any], messages), cast(ModelSettings, bounded_settings), model_request_parameters,
+            )
+        except Exception as error:
+            _emit_pydantic_model_call(
+                context=self._telemetry_context, model=self.wrapped,
+                invocation_index=invocation_index, outcome=InvocationOutcome.FAILED,
+                elapsed_ms=(time.perf_counter() - started_at) * 1000, error=error,
+            )
+            raise
+        _emit_pydantic_model_call(
+            context=self._telemetry_context, model=self.wrapped,
+            invocation_index=invocation_index, outcome=InvocationOutcome.RETURNED,
+            elapsed_ms=(time.perf_counter() - started_at) * 1000, error=None,
         )
+        # The wrapper invocation has returned even if the local request budget
+        # subsequently rejects consumption of that response.
         self._deadline.after_provider()
-        self.request_count += 1
         return response
 
 
@@ -171,6 +208,21 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
         *,
         execution: AgentExecutionConfig,
     ) -> RuntimeResult:
+        telemetry_context = execution.telemetry_context
+        trace_id = trace.new_trace_id()
+        if telemetry_context is not None:
+            emit_event_safely(lambda: RuntimeSelected(
+                context=replace(telemetry_context, trace_id=trace_id, execution_id=None),
+                runtime_name=RuntimeName.PYDANTIC,
+            ))
+        execution_id = trace.new_trace_id()
+        try:
+            execution_context = (
+                replace(telemetry_context, trace_id=trace_id, execution_id=execution_id)
+                if telemetry_context is not None else None
+            )
+        except Exception:
+            execution_context = None
         def worker(deadline: AgentExecutionContext) -> RuntimeResult:
             # Keep PR-04A's pre-capability deadline ordering and let the
             # capability own the independent worker Session for the full run.
@@ -178,12 +230,15 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
 
             def run_with_tools(read_tools: tuple[RuntimeReadTool, ...]) -> RuntimeResult:
                 deadline.ensure_request_active()
-                return asyncio.run(self._run_async(request, read_tools, deadline))
+                return asyncio.run(self._run_async(request, read_tools, deadline, execution_context, trace_id))
 
             return capability.run_with_read_only_tools(run_with_tools)
 
         try:
-            return run_agent_with_deadline(worker=worker, config=execution)
+            return run_agent_with_deadline(
+                worker=worker, config=execution, execution_id=execution_id,
+                telemetry_context=execution_context,
+            )
         except Exception as error:
             return _failure_result(error)
 
@@ -192,13 +247,15 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
         request: RuntimeRequest,
         read_tools: tuple[RuntimeReadTool, ...],
         deadline: AgentExecutionContext,
+        telemetry_context: TelemetryContext | None,
+        trace_id: str,
     ) -> RuntimeResult:
         tools_by_name = {tool.name: tool for tool in read_tools}
         if "get_current_plan" not in tools_by_name:
             raise _ToolSurfaceError("get_current_plan is not available in the scoped capability")
 
         deps = _PydanticRunDeps(tools_by_name=tools_by_name, deadline=deadline)
-        deadline_model = _DeadlineBoundModel(self.model, deadline)
+        deadline_model = _DeadlineBoundModel(self.model, deadline, telemetry_context)
         agent = Agent(
             deadline_model,
             deps_type=_PydanticRunDeps,
@@ -229,7 +286,17 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             """Read the Current Plan for a day in the capability-bound trip."""
 
             tool = ctx.deps.tools_by_name["get_current_plan"]
-            tool_started_at = ctx.deps.deadline.before_tool()
+            try:
+                tool_started_at = ctx.deps.deadline.before_tool()
+            except Exception:
+                # The handler has not started.  Do not turn a deadline-gate
+                # rejection into a handler failure.
+                _emit_pydantic_tool_call(
+                    telemetry_context,
+                    "get_current_plan",
+                    ToolDispatchStatus.DISPATCH_FAILED,
+                )
+                raise
             try:
                 output = tool.invoke(day=day)
                 # If a blocking read completed late, this raises before Pydantic
@@ -240,11 +307,25 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 # tool timeout is disabled and this tool has no Pydantic retry
                 # budget, so the adapter re-surfaces this as tool_timeout.
                 ctx.deps.tool_timeout_observed = True
+                _emit_pydantic_tool_call(telemetry_context, "get_current_plan", ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED)
+                raise
+            except Exception:
+                _emit_pydantic_tool_call(telemetry_context, "get_current_plan", ToolDispatchStatus.HANDLER_FAILED)
                 raise
             _record_read_item_refs(output, ctx.deps.read_item_refs)
             ctx.deps.tool_trajectory.append("get_current_plan")
             if not isinstance(output, dict):
+                _emit_pydantic_tool_call(
+                    telemetry_context,
+                    "get_current_plan",
+                    ToolDispatchStatus.HANDLER_FAILED,
+                )
                 raise ModelRetry("The scoped plan read returned an invalid safe projection.")
+            _emit_pydantic_tool_call(
+                telemetry_context,
+                "get_current_plan",
+                ToolDispatchStatus.HANDLER_SUCCEEDED,
+            )
             return output
 
         @agent.output_validator
@@ -275,7 +356,7 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             raise
         output = result.output
         observation = RuntimeObservation(
-            trace_id=deadline.execution_id,
+            trace_id=trace_id,
             round_count=deadline_model.request_count,
             total_tokens=_reported_total_tokens(result.usage),
             total_elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
@@ -351,6 +432,87 @@ def _record_read_item_refs(output: object, destination: set[str]) -> None:
 def _reported_total_tokens(usage: object) -> int | None:
     total_tokens = getattr(usage, "total_tokens", None)
     return total_tokens if isinstance(total_tokens, int) and total_tokens > 0 else None
+
+
+def _emit_pydantic_model_call(
+    *,
+    context: TelemetryContext | None,
+    model: Model,
+    invocation_index: int,
+    outcome: InvocationOutcome,
+    elapsed_ms: float,
+    error: Exception | None,
+) -> None:
+    """Observe one Pydantic model wrapper call without guessing provider I/O."""
+    if context is None:
+        return
+    try:
+        model_name = str(getattr(model, "model_name", ""))
+        source = (
+            InvocationSource.FAKE
+            if model.__class__.__name__ == "FunctionModel"
+            else InvocationSource.PROVIDER_SDK
+        )
+        # Pydantic AI's wrapper response does not establish that a usage value
+        # was provider-originated (and default zero values are ambiguous).
+        # Preserve the call fact but decline to report usage until that
+        # provenance is explicitly available at this seam.
+        emit_event_safely(lambda: ModelCallCompleted(
+            context=context,
+            model_invocation_index=invocation_index,
+            invocation_source=source,
+            provider=ProviderName.DEEPSEEK if "deepseek" in model_name.lower() else ProviderName.UNAPPROVED_PROVIDER,
+            model_id=(ModelId.DEEPSEEK_V4_FLASH if model_name == "deepseek-v4-flash" else ModelId.DEEPSEEK_V4_PRO if model_name == "deepseek-v4-pro" else ModelId.UNAPPROVED_MODEL),
+            invocation_outcome=outcome,
+            failure_category=None if error is None else _pydantic_failure_category(error),
+            elapsed_ms=round(max(elapsed_ms, 0), 2),
+            usage_status=UsageStatus.NOT_REPORTED,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+        ))
+    except Exception:
+        return
+
+
+def _pydantic_failure_category(error: Exception) -> FailureCategory:
+    if isinstance(error, TimeoutError) or error.__class__.__name__ in {"APITimeoutError", "ConnectTimeout", "ReadTimeout"}:
+        return FailureCategory.PROVIDER_TIMEOUT
+    status = getattr(error, "status_code", None)
+    if status == 401:
+        return FailureCategory.PROVIDER_UNAUTHORIZED
+    if status == 429:
+        return FailureCategory.PROVIDER_RATE_LIMITED
+    if isinstance(status, int) and 500 <= status <= 599:
+        return FailureCategory.PROVIDER_SERVER_ERROR
+    if isinstance(status, int) and 400 <= status <= 499:
+        return FailureCategory.PROVIDER_CLIENT_ERROR
+    if error.__class__.__name__ in {"APIConnectionError", "ConnectError", "ConnectionError"}:
+        return FailureCategory.PROVIDER_NETWORK_ERROR
+    return FailureCategory.UNEXPECTED_RUNTIME_ERROR
+
+
+def _emit_pydantic_tool_call(
+    context: TelemetryContext | None,
+    name: str,
+    status: ToolDispatchStatus,
+) -> None:
+    if context is None:
+        return
+    try:
+        emit_event_safely(lambda: ToolCallCompleted(
+            context=context,
+            tool_name=ApprovedToolName(name),
+            tool_dispatch_status=status,
+            handler_executed=status in {
+                ToolDispatchStatus.HANDLER_SUCCEEDED,
+                ToolDispatchStatus.HANDLER_FAILED,
+                ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED,
+            },
+            cache_hit=False,
+        ))
+    except Exception:
+        return
 
 
 def _safe_observation_detail(tool_trajectory: list[str]) -> str:

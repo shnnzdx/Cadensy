@@ -28,8 +28,10 @@ pytest.importorskip(
 
 from pydantic_ai import ModelResponse, ToolCallPart, models
 from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models import ModelRequestParameters
 
 from app.agents import execution
+from app.agents import pydantic_runtime
 from app.agents.execution import AgentExecutionConfig
 from app.agents.legacy_runtime import LegacyReadTripCapability
 from app.agents.pydantic_runtime import PydanticChatAgentRuntime
@@ -44,6 +46,7 @@ from app.agents.runtime_contract import (
     RuntimeRequest,
 )
 from app.db.models import ChangeProposal, PlanItem, Vote
+from app.observability.telemetry import ModelCallCompleted, TelemetryContext, ToolCallCompleted
 
 
 # Prevent an accidental replacement of a fake model with a live model.
@@ -454,6 +457,146 @@ def test_blocking_scoped_tool_maps_to_tool_timeout_without_consuming_late_result
     assert tool.calls == [{"day": "all"}]
     assert result.observation.failure is not None
     assert result.observation.failure.normalized_kind == "tool_timeout"
+
+
+def test_post_return_deadline_keeps_pydantic_wrapper_return_telemetry(monkeypatch):
+    """A local consumption rejection cannot erase the provider wrapper fact."""
+
+    emitted: list[object] = []
+    monkeypatch.setattr(
+        pydantic_runtime,
+        "emit_event_safely",
+        lambda factory: emitted.append(factory()) or True,
+    )
+    monkeypatch.setattr(
+        execution.AgentExecutionContext,
+        "after_provider",
+        lambda _self: (_ for _ in ()).throw(execution.AgentRequestDeadlineExceeded("late")),
+    )
+    runtime = _runtime(
+        FunctionModel(
+            lambda _messages, _info: ModelResponse(
+                parts=[ToolCallPart("runtime_reply", {"output_kind": "reply_only", "reply": "late"})]
+            )
+        )
+    )
+    telemetry_context = TelemetryContext(
+        request_id="request_12345678",
+        trace_id="trace_12345678",
+        execution_id="execution_12345678",
+    )
+
+    result = runtime.run(
+        _request(),
+        _SyntheticCapability(),
+        execution=AgentExecutionConfig(
+            request_timeout_seconds=0.5,
+            provider_timeout_seconds=0.25,
+            tool_timeout_seconds=0.1,
+            telemetry_context=telemetry_context,
+        ),
+    )
+
+    assert result.observation.failure is not None
+    assert result.observation.failure.normalized_kind == "request_timeout"
+    model_events = [event for event in emitted if isinstance(event, ModelCallCompleted)]
+    assert len(model_events) == 1
+    assert model_events[0].invocation_outcome.value == "returned"
+    assert model_events[0].usage_status.value == "not_reported"
+
+
+def test_wrapper_return_does_not_access_response_usage_for_telemetry(monkeypatch):
+    """Telemetry must not touch an otherwise successful provider response."""
+
+    marker = "response usage must stay untouched"
+    emitted: list[object] = []
+
+    class Deadline:
+        after_provider_calls = 0
+
+        def before_provider(self) -> float:
+            return 0.25
+
+        def after_provider(self) -> None:
+            self.after_provider_calls += 1
+
+    response = ModelResponse(parts=[])
+    monkeypatch.setattr(
+        ModelResponse,
+        "usage",
+        property(lambda _self: (_ for _ in ()).throw(RuntimeError(marker))),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pydantic_runtime,
+        "emit_event_safely",
+        lambda factory: emitted.append(factory()) or True,
+    )
+    deadline = Deadline()
+    wrapper = pydantic_runtime._DeadlineBoundModel(
+        FunctionModel(lambda _messages, _info: ModelResponse(parts=[])),
+        deadline,  # type: ignore[arg-type]
+        TelemetryContext(
+            request_id="request_12345678",
+            trace_id="trace_12345678",
+            execution_id="execution_12345678",
+        ),
+    )
+    async def successful_provider_request(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return response
+
+    # Isolate the provider seam. FunctionModel itself validates usage, whereas
+    # this regression is specifically about the wrapper's telemetry behavior
+    # after a provider has successfully returned a response.
+    monkeypatch.setattr(wrapper.wrapped, "request", successful_provider_request)
+
+    returned = asyncio.run(
+        wrapper.request([], None, ModelRequestParameters())
+    )
+
+    assert returned is response
+    assert deadline.after_provider_calls == 1
+    model_events = [event for event in emitted if isinstance(event, ModelCallCompleted)]
+    assert len(model_events) == 1
+    assert model_events[0].invocation_outcome.value == "returned"
+    assert model_events[0].usage_status.value == "not_reported"
+
+
+def test_rejected_pydantic_tool_result_never_claims_handler_success(monkeypatch):
+    emitted: list[object] = []
+    monkeypatch.setattr(
+        pydantic_runtime,
+        "emit_event_safely",
+        lambda factory: emitted.append(factory()) or True,
+    )
+    telemetry_context = TelemetryContext(
+        request_id="request_12345678",
+        trace_id="trace_12345678",
+        execution_id="execution_12345678",
+    )
+    runtime = _runtime(
+        FunctionModel(
+            lambda _messages, _info: ModelResponse(
+                parts=[ToolCallPart("get_current_plan", {"day": "all"})]
+            )
+        )
+    )
+
+    result = runtime.run(
+        _request(max_rounds=2),
+        _SyntheticCapability(tools=(_SyntheticReadTool(plan="not a safe projection"),)),
+        execution=AgentExecutionConfig(
+            request_timeout_seconds=0.5,
+            provider_timeout_seconds=0.25,
+            tool_timeout_seconds=0.1,
+            telemetry_context=telemetry_context,
+        ),
+    )
+
+    assert result.observation.failure is not None
+    tool_events = [event for event in emitted if isinstance(event, ToolCallCompleted)]
+    assert tool_events
+    assert {event.tool_dispatch_status.value for event in tool_events} == {"handler_failed"}
 
 
 def test_request_timeout_discards_late_pydantic_result(monkeypatch):

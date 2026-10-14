@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import fields
 from threading import BoundedSemaphore
 
 import pytest
@@ -182,7 +180,9 @@ def test_queued_worker_cancellation_is_distinct_from_running_late_completion(mon
     assert first_result == ["first completed"]
 
 
-def test_lifecycle_trace_redacts_synthetic_private_fields(monkeypatch, tmp_path):
+def test_lifecycle_trace_is_safely_neutralized_without_file_or_stdout_output(
+    monkeypatch, tmp_path, capsys
+):
     private_phrase = "medication timing and membership id secret"
     monkeypatch.setattr(execution.trace, "LOG_DIR", tmp_path)
 
@@ -194,20 +194,12 @@ def test_lifecycle_trace_redacts_synthetic_private_fields(monkeypatch, tmp_path)
         worker_cancel_requested=False,
     )
 
-    payload = json.loads(next(tmp_path.glob("agent-lifecycle-*.jsonl")).read_text(encoding="utf-8"))
-    assert private_phrase not in json.dumps(payload)
-    assert set(payload) == {
-        "timestamp",
-        "phase",
-        "execution_id",
-        "elapsed_ms",
-        "result_consumed",
-        "worker_cancel_requested",
-    }
-    assert {field.name for field in fields(AgentLifecycleEvent)} == {
-        "phase",
-        "execution_id",
-        "elapsed_ms",
-        "result_consumed",
-        "worker_cancel_requested",
-    }
+    captured = capsys.readouterr()
+    assert private_phrase not in captured.out
+    assert private_phrase not in captured.err
+    assert list(tmp_path.iterdir()) == []
+    assert AgentLifecycleEvent(
+        phase="late_completion",
+        execution_id="opaque-execution-id",
+        elapsed_ms=12.5,
+    ).result_consumed is False

@@ -59,6 +59,14 @@ from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
 from ..domain.trips import service as trip_service
 from ..domain.trips import cover_service as trip_cover_service
+from ..observability.telemetry import (
+    ChatRequestCompleted,
+    ChatRequestStarted,
+    RouteCategory,
+    TelemetryContext,
+    TerminalCategory,
+    emit_event_safely,
+)
 from ..domain.transactions import (
     CredentialProof,
     DuplicatePlans,
@@ -533,6 +541,21 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     item_id: str | None = None
     history: list[ChatTurnRequest] = Field(default_factory=list, max_length=10)
+
+
+class _ChatTelemetryResponse(dict):
+    """Preserve the public JSON mapping while carrying a typed internal outcome."""
+
+    def __init__(self, payload: dict, terminal: TerminalCategory) -> None:
+        super().__init__(payload)
+        self.telemetry_terminal = terminal
+
+
+class ChatFeatureUnavailable(HTTPException):
+    """A typed chat feature-gate 503, distinct from runtime execution failure."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=503, detail=detail)
 
 
 class CommentRequest(BaseModel):
@@ -1150,12 +1173,12 @@ def get_invite(token: str, db: Session = Depends(get_session)) -> dict:
         raise HTTPException(404, "Invite not found") from exc
 
 
-@app.post("/api/trips/{trip_id}/chat")
-def chat_with_trip(
+def _chat_with_trip_impl(
     trip_id: str,
     body: ChatRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    telemetry_context: TelemetryContext | None = None,
 ) -> dict:
     """Natural-language trip chat.
 
@@ -1166,7 +1189,7 @@ def chat_with_trip(
     b3_state = _b3_preview_apply_gate_state()
     if b3_state != "off":
         if b3_state != "enabled":
-            raise HTTPException(503, "Protected Preview is not available")
+            raise ChatFeatureUnavailable("Protected Preview is not available")
         # Extract only preliminary primitives while the request Session is
         # live.  Close it before Runtime/provider work so it cannot retain an
         # identity map or transaction through any bounded B.3 read tool.
@@ -1200,6 +1223,7 @@ def chat_with_trip(
                     )
                     for turn in body.history
                 ),
+                telemetry_context=telemetry_context,
             )
         except PreviewAccessDenied as exc:
             raise HTTPException(403, "Protected Preview authorization failed") from exc
@@ -1218,7 +1242,7 @@ def chat_with_trip(
                 "patch": preview.candidate.patch,
                 "verdict": _classification_out(preview.candidate.classification),
             }
-        return {
+        return _ChatTelemetryResponse({
             "reply": preview.reply,
             "proposed_change": candidate,
             "candidate_options": [
@@ -1239,7 +1263,7 @@ def chat_with_trip(
                 "planning_facts_revision": preview.planning_facts_revision,
                 "authoritative": False,
             },
-        }
+        }, preview.telemetry_terminal)
 
     _require_scoped_trip(db, me, trip_id)
     try:
@@ -1268,6 +1292,7 @@ def chat_with_trip(
                 )
                 for turn in body.history
             ),
+            telemetry_context=telemetry_context,
         )
     except chat_service.ChatAccessDenied as exc:
         raise HTTPException(403, str(exc)) from exc
@@ -1294,11 +1319,53 @@ def chat_with_trip(
         }
         for option in result.candidate_options
     ]
-    return {
+    return _ChatTelemetryResponse({
         "reply": result.reply,
         "proposed_change": proposed,
         "candidate_options": candidate_options,
-    }
+    }, result.telemetry_terminal)
+
+
+@app.post("/api/trips/{trip_id}/chat")
+def chat_with_trip(
+    trip_id: str,
+    body: ChatRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Own exactly one request start and terminal telemetry event."""
+    try:
+        context = TelemetryContext.new()
+    except Exception:
+        context = None
+    if context is not None:
+        emit_event_safely(
+            lambda: ChatRequestStarted(context=context, request_path=RouteCategory.TRIP_CHAT)
+        )
+    terminal = TerminalCategory.UNHANDLED_ERROR
+    try:
+        response = _chat_with_trip_impl(
+            trip_id, body, db=db, me=me, telemetry_context=context,
+        )
+        terminal = getattr(response, "telemetry_terminal", TerminalCategory.SUCCEEDED)
+        return response
+    except HTTPException as error:
+        terminal = (
+            TerminalCategory.FEATURE_UNAVAILABLE
+            if isinstance(error, ChatFeatureUnavailable)
+            else {
+                403: TerminalCategory.ACCESS_DENIED,
+                404: TerminalCategory.NOT_FOUND,
+                409: TerminalCategory.CONFLICT,
+                503: TerminalCategory.RUNTIME_FAILURE,
+            }.get(error.status_code, TerminalCategory.UNHANDLED_ERROR)
+        )
+        raise
+    finally:
+        if context is not None:
+            emit_event_safely(
+                lambda: ChatRequestCompleted(context=context, terminal_category=terminal)
+            )
 
 
 def _require_scoped_plan(

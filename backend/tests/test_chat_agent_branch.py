@@ -11,6 +11,7 @@ from app.agents import base, legacy_runtime
 from app.db.models import ChangeProposal, DecisionRound, PlanChange, PlanItem, Vote
 from app.domain.chat import service as chat_service
 from app.domain.constraints.types import Path, Settledness
+from app.observability.telemetry import TelemetryContext
 
 
 @pytest.fixture(autouse=True)
@@ -1023,6 +1024,7 @@ def test_followup_option_number_resolves_previous_candidate_without_calling_agen
     assert result.proposed_change.verdict.path is Path.NOTICE
     assert result.candidate_options == ()
     assert "click Apply" in result.reply
+    assert result.telemetry_terminal.value == "succeeded"
 
 
 def test_followup_bare_number_resolves_previous_candidate_without_calling_agent(
@@ -1230,6 +1232,79 @@ def test_followup_ambiguous_acceptance_does_not_silently_choose(
     assert result.proposed_change is None
     assert [option.id for option in result.candidate_options] == ["move-later", "move-to-thursday"]
     assert "choose the option number" in result.reply.lower()
+    assert result.telemetry_terminal.value == "deterministic_clarification"
+
+
+def test_followup_stale_and_no_change_options_are_deterministic_clarifications(
+    monkeypatch, db: Session, full_trip: dict
+):
+    monkeypatch.setattr(base, "call_agent", _unexpected_call_agent)
+    stale = chat_service.respond_to_trip_chat(
+        db,
+        trip_id=full_trip["trip"].id,
+        membership=full_trip["me"],
+        message="Option 1.",
+        history=_history_with_options(
+            _history_option(
+                id="stale", label="Stale", title="Stale", body="", tradeoff="",
+                item_id="removed-option-target", patch={"start_hour": 15.0},
+            ),
+        ),
+    )
+    no_change = chat_service.respond_to_trip_chat(
+        db,
+        trip_id=full_trip["trip"].id,
+        membership=full_trip["me"],
+        message="Option 1.",
+        history=_history_with_options(
+            _history_option(
+                id="keep", label="Keep", title="Keep", body="", tradeoff="",
+                item_id=full_trip["art"].id, patch={},
+            ),
+        ),
+    )
+
+    assert stale.proposed_change is None
+    assert no_change.proposed_change is None
+    assert stale.telemetry_terminal.value == "deterministic_clarification"
+    assert no_change.telemetry_terminal.value == "deterministic_clarification"
+
+
+def test_followup_classification_failure_keeps_request_only_correlation_and_reraises(
+    monkeypatch, db: Session, full_trip: dict
+):
+    monkeypatch.setattr(base, "call_agent", _unexpected_call_agent)
+    monkeypatch.setattr(
+        chat_service.orch,
+        "classify_change",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("classification failed")),
+    )
+    emitted = []
+    monkeypatch.setattr(
+        chat_service, "emit_event_safely", lambda factory: emitted.append(factory()) or True
+    )
+    context = TelemetryContext(request_id="request_12345678")
+
+    with pytest.raises(RuntimeError, match="classification failed"):
+        chat_service.respond_to_trip_chat(
+            db,
+            trip_id=full_trip["trip"].id,
+            membership=full_trip["me"],
+            message="Option 1.",
+            history=_history_with_options(
+                _history_option(
+                    id="move", label="Move", title="Move", body="", tradeoff="",
+                    item_id=full_trip["art"].id, patch={"start_hour": 15.0},
+                ),
+            ),
+            telemetry_context=context,
+        )
+
+    event = emitted[-1]
+    assert event.classification_outcome.value == "failed"
+    assert event.context.request_id == context.request_id
+    assert event.context.trace_id is None
+    assert event.context.execution_id is None
 
 
 def test_followup_selected_candidate_reclassifies_overlap_to_round(
