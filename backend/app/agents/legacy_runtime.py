@@ -39,6 +39,8 @@ from .runtime_contract import (
 )
 from .tools import build_read_only_trip_tools
 from ..db.session import SessionLocal
+from ..observability.telemetry import RuntimeName, RuntimeSelected, TelemetryContext, emit_safely
+from . import trace
 
 
 _SAFE_PATCH_FIELDS = frozenset(
@@ -186,6 +188,21 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
         *,
         execution: AgentExecutionConfig,
     ) -> RuntimeResult:
+        telemetry_context = execution.telemetry_context
+        trace_id = trace.new_trace_id()
+        if telemetry_context is not None:
+            # Selection is before bounded-worker admission, so it has no
+            # execution id. The execution id below is passed into the actual
+            # worker boundary rather than being fabricated by a telemetry hook.
+            emit_safely(RuntimeSelected(
+                context=replace(telemetry_context, trace_id=trace_id, execution_id=None),
+                runtime_name=RuntimeName.LEGACY,
+            ))
+        execution_id = trace.new_trace_id()
+        execution_context = (
+            replace(telemetry_context, trace_id=trace_id, execution_id=execution_id)
+            if telemetry_context is not None else None
+        )
         def worker(deadline):
             def call_with_tools(read_tools: tuple[RuntimeReadTool, ...]) -> base.AgentRunResult:
                 # The capability keeps the worker Session open around the
@@ -208,6 +225,8 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
                     provider=self.provider,
                     guard_reject_limit=request.limits.guard_reject_limit,
                     deadline=deadline,
+                    trace_id=trace_id,
+                    telemetry_context=execution_context,
                 )
 
             # Preserve the Legacy deferred-tool ordering: reject an inactive
@@ -217,7 +236,12 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
             return capability.run_with_read_only_tools(call_with_tools)
 
         try:
-            legacy_result = run_agent_with_deadline(worker=worker, config=execution)
+            legacy_result = run_agent_with_deadline(
+                worker=worker,
+                config=execution,
+                execution_id=execution_id,
+                telemetry_context=execution_context,
+            )
         except Exception as error:
             return _failure_result(error)
         # B.3's revision-bracketed capability intentionally has a different

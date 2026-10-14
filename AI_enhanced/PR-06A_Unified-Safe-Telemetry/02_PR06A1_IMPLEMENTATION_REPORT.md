@@ -149,3 +149,10 @@ Result: **45 passed in 0.34s**. `compileall` and `git diff --check` also succeed
 lifecycle-event wiring. **PR-06A.1 must not be independently promoted to production
 while lifecycle telemetry remains disabled.** The Draft PR is a contract/privacy
 remediation review artifact, not a production observability release.
+
+### Superseded follow-up
+
+PR-06A.2 subsequently restores lifecycle observation through the typed, no-throw
+emitter; see `03_PR06A2_EXECUTION_WIRING_REPORT.md`. The PR-06A.1 release gate above
+remains historically accurate for the standalone PR-06A.1 state and must not be used
+to claim production readiness for the combined PR without the final review evidence.

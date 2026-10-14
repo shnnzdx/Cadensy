@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 import json
 import math
@@ -41,6 +41,7 @@ from ..agents.runtime_contract import (
 )
 from ..agents.tools import build_read_only_trip_tools
 from ..db.models import Plan, PlanItem, Trip, TripMembership
+from ..observability.telemetry import TelemetryContext
 from . import auth as auth_service
 from .constraints.types import Classification
 from .decisions import orchestrator as orch
@@ -83,6 +84,7 @@ class PreviewRequest:
     message: str
     selected_item_id: str | None = None
     history: tuple[RuntimeHistoryTurn, ...] = ()
+    telemetry_context: TelemetryContext | None = None
 
 
 @dataclass(frozen=True)
@@ -299,13 +301,13 @@ class RevisionBracketedPreview:
                 message=request.message,
                 history=request.history,
                 selected_item_ref=request.selected_item_id,
-                request_id=uuid4().hex,
+                request_id=(request.telemetry_context.request_id if request.telemetry_context is not None else uuid4().hex),
                 # Keep the established Runtime limits; B.3 changes Session
                 # lifetime, not PR-04's Runtime contract or timeout policy.
                 limits=_runtime_limits(),
             ),
             capability,
-            execution=self._execution,
+            execution=replace(self._execution, telemetry_context=request.telemetry_context),
         )
         if capability.stale:
             raise StalePreview("A scoped tool observed newer planning facts")

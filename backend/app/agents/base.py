@@ -22,8 +22,23 @@ from typing import Any
 from dotenv import load_dotenv
 
 from . import trace
-from .execution import AgentProviderDeadlineExceeded
+from .execution import AgentProviderDeadlineExceeded, AgentToolDeadlineExceeded
 from ..domain.constraints.types import Classification
+from ..observability.telemetry import (
+    ApprovedToolName,
+    FailureCategory,
+    InvocationOutcome,
+    InvocationSource,
+    ModelCallCompleted,
+    ModelId,
+    ProviderName,
+    SafeTelemetryEmitter,
+    TelemetryContext,
+    ToolCallCompleted,
+    ToolDispatchStatus,
+    UsageStatus,
+    emit_safely,
+)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(BACKEND_ROOT / ".env", override=False)
@@ -469,6 +484,9 @@ def _agent_reply_with_fallback(
     tools: tuple[AgentTool, ...],
     max_tokens: int | None,
     provider_timeout_seconds: float = 90.0,
+    telemetry_context: TelemetryContext | None = None,
+    telemetry_emitter: SafeTelemetryEmitter | None = None,
+    next_invocation_index: Callable[[], int] | None = None,
 ) -> tuple[AgentProviderReply, ProviderConfig]:
     failures: list[str] = []
     for provider_name in _provider_chain(provider):
@@ -477,13 +495,21 @@ def _agent_reply_with_fallback(
             failures.append(f"{provider_name}: provider is unknown")
             continue
         try:
+            started_at = time.perf_counter()
             return (
-                _invoke_agent_provider(
+                _emit_provider_result(
+                    context=telemetry_context,
+                    emitter=telemetry_emitter,
+                    config=config,
+                    invocation_index=(next_invocation_index() if next_invocation_index else 1),
+                    started_at=started_at,
+                    invoke=lambda: _invoke_agent_provider(
                     config=config,
                     messages=messages,
                     tools=tools,
                     max_tokens=max_tokens,
                     timeout_seconds=provider_timeout_seconds,
+                    ),
                 ),
                 config,
             )
@@ -508,6 +534,121 @@ def _is_provider_timeout(exc: Exception) -> bool:
     }
 
 
+def _emit_provider_result(
+    *,
+    context: TelemetryContext | None,
+    emitter: SafeTelemetryEmitter | None,
+    config: ProviderConfig,
+    invocation_index: int,
+    started_at: float,
+    invoke: Callable[[], AgentProviderReply],
+) -> AgentProviderReply:
+    """Observe the known Legacy SDK wrapper crossing, not physical HTTP."""
+    try:
+        reply = invoke()
+    except Exception as error:
+        _emit_model_call(
+            context=context, emitter=emitter, config=config,
+            invocation_index=invocation_index, source=InvocationSource.PROVIDER_SDK,
+            outcome=InvocationOutcome.FAILED, error=error,
+            elapsed_ms=(time.perf_counter() - started_at) * 1000, tokens=None,
+        )
+        raise
+    _emit_model_call(
+        context=context, emitter=emitter, config=config,
+        invocation_index=invocation_index, source=InvocationSource.PROVIDER_SDK,
+        outcome=InvocationOutcome.RETURNED, error=None,
+        elapsed_ms=(time.perf_counter() - started_at) * 1000, tokens=reply.tokens,
+    )
+    return reply
+
+
+def _emit_model_call(
+    *,
+    context: TelemetryContext | None,
+    emitter: SafeTelemetryEmitter | None,
+    config: ProviderConfig,
+    invocation_index: int,
+    source: InvocationSource,
+    outcome: InvocationOutcome,
+    error: Exception | None,
+    elapsed_ms: float,
+    tokens: trace.TokenUsage | None,
+) -> None:
+    if context is None:
+        return
+    try:
+        reported = tokens is not None and any(
+            value is not None
+            for value in (tokens.prompt_tokens, tokens.completion_tokens, tokens.total_tokens)
+        )
+        emit_safely(ModelCallCompleted(
+            context=context,
+            model_invocation_index=invocation_index,
+            invocation_source=source,
+            provider=_approved_provider(config.name),
+            model_id=_approved_model(config.model),
+            invocation_outcome=outcome,
+            failure_category=(None if error is None else _provider_failure_category(error)),
+            elapsed_ms=round(max(elapsed_ms, 0), 2),
+            usage_status=UsageStatus.REPORTED if reported else UsageStatus.NOT_REPORTED,
+            prompt_tokens=(tokens.prompt_tokens if reported and tokens else None),
+            completion_tokens=(tokens.completion_tokens if reported and tokens else None),
+            total_tokens=(tokens.total_tokens if reported and tokens else None),
+        ), emitter=emitter)
+    except Exception:
+        return
+
+
+def _approved_provider(value: str | None) -> ProviderName:
+    return ProviderName.DEEPSEEK if value == DEEPSEEK_PROVIDER else ProviderName.UNAPPROVED_PROVIDER
+
+
+def _approved_model(value: str | None) -> ModelId:
+    if value == "deepseek-v4-flash":
+        return ModelId.DEEPSEEK_V4_FLASH
+    if value == "deepseek-v4-pro":
+        return ModelId.DEEPSEEK_V4_PRO
+    return ModelId.UNAPPROVED_MODEL
+
+
+def _provider_failure_category(error: Exception) -> FailureCategory:
+    if _is_provider_timeout(error):
+        return FailureCategory.PROVIDER_TIMEOUT
+    status = getattr(error, "status_code", None)
+    if status == 401:
+        return FailureCategory.PROVIDER_UNAUTHORIZED
+    if status == 429:
+        return FailureCategory.PROVIDER_RATE_LIMITED
+    if isinstance(status, int) and 500 <= status <= 599:
+        return FailureCategory.PROVIDER_SERVER_ERROR
+    if isinstance(status, int) and 400 <= status <= 499:
+        return FailureCategory.PROVIDER_CLIENT_ERROR
+    if error.__class__.__name__ in {"APIConnectionError", "ConnectError", "ConnectionError"}:
+        return FailureCategory.PROVIDER_NETWORK_ERROR
+    if isinstance(error, AgentUnavailable):
+        return FailureCategory.PROVIDER_UNAVAILABLE
+    return FailureCategory.UNEXPECTED_RUNTIME_ERROR
+
+
+def _emit_tool_call(
+    *, context: TelemetryContext | None, emitter: SafeTelemetryEmitter | None,
+    tool_name: str | None, status: str,
+) -> None:
+    if context is None:
+        return
+    try:
+        resolved = ToolDispatchStatus(status)
+        approved = ApprovedToolName(tool_name) if tool_name in {item.value for item in ApprovedToolName} else None
+        emit_safely(ToolCallCompleted(
+            context=context, tool_name=approved, tool_dispatch_status=resolved,
+            handler_executed=resolved in {ToolDispatchStatus.HANDLER_SUCCEEDED, ToolDispatchStatus.HANDLER_FAILED, ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED},
+            cache_hit=resolved is ToolDispatchStatus.CACHE_HIT,
+        ), emitter=emitter)
+    except Exception:
+        return
+
+
 def call_agent(
     *,
     system: str,
@@ -522,6 +663,9 @@ def call_agent(
     provider: str | None = AGENT_ROUTE,
     guard_reject_limit: int = 2,
     deadline: Any | None = None,
+    telemetry_context: TelemetryContext | None = None,
+    telemetry_emitter: SafeTelemetryEmitter | None = None,
+    trace_id: str | None = None,
 ) -> AgentRunResult:
     """Run a read-only tool-calling agent loop."""
     if tools and tool_factory is not None:
@@ -533,7 +677,7 @@ def call_agent(
         if deadline is not None:
             deadline.ensure_request_active()
 
-    trace_id = trace.new_trace_id()
+    trace_id = trace_id or trace.new_trace_id()
     route = _route_name(provider)
     catalog = provider_catalog()
     provider_name = _resolve_provider_name(provider)
@@ -561,6 +705,12 @@ def call_agent(
     total_tokens = 0
     started = time.perf_counter()
     mock_list = list(mock_rounds)
+    invocation_index = 0
+
+    def next_invocation_index() -> int:
+        nonlocal invocation_index
+        invocation_index += 1
+        return invocation_index
 
     for round_index in range(1, max_rounds + 1):
         round_started = time.perf_counter()
@@ -568,7 +718,16 @@ def call_agent(
             deadline.before_provider() if deadline is not None else 90.0
         )
         if is_mocked():
+            invocation = next_invocation_index()
+            model_started_at = time.perf_counter()
             reply = _next_mock_agent_reply(mock_list, round_index - 1)
+            _emit_model_call(
+                context=telemetry_context, emitter=telemetry_emitter, config=config,
+                invocation_index=invocation, source=InvocationSource.MOCK,
+                outcome=InvocationOutcome.RETURNED, error=None,
+                elapsed_ms=(time.perf_counter() - model_started_at) * 1000,
+                tokens=reply.tokens,
+            )
         else:
             reply, config = _agent_reply_with_fallback(
                 catalog=catalog,
@@ -577,6 +736,9 @@ def call_agent(
                 tools=tools,
                 max_tokens=max_tokens,
                 provider_timeout_seconds=provider_timeout_seconds,
+                telemetry_context=telemetry_context,
+                telemetry_emitter=telemetry_emitter,
+                next_invocation_index=next_invocation_index,
             )
         if deadline is not None:
             # A local request may have timed out while a synchronous provider
@@ -643,7 +805,11 @@ def call_agent(
                 dispatch_status = "unknown_tool"
             else:
                 state = _agent_state(called_tools)
-                guard_reason = tool.guard(state, call.arguments) if tool.guard else None
+                try:
+                    guard_reason = tool.guard(state, call.arguments) if tool.guard else None
+                except Exception:
+                    _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="dispatch_failed")
+                    raise
                 guard_rejected = bool(guard_reason)
                 guard_limit_exceeded = False
                 cached = False
@@ -662,18 +828,27 @@ def call_agent(
                         cached = True
                         dispatch_status = "cache_hit"
                     else:
-                        output = tool.handler(**call.arguments)
-                        dispatch_status = "handler_succeeded"
-                        if deadline is not None:
-                            # A blocking read-only tool cannot be forcibly
-                            # killed. Its late result is never appended to the
-                            # conversation or cache.
-                            deadline.after_tool(tool_started)
+                        try:
+                            output = tool.handler(**call.arguments)
+                            if deadline is not None:
+                                # A blocking read-only tool cannot be forcibly
+                                # killed. Its late result is never appended to
+                                # the conversation or cache.
+                                deadline.after_tool(tool_started)
+                            dispatch_status = "handler_succeeded"
+                        except AgentToolDeadlineExceeded:
+                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="tool_deadline_exceeded")
+                            raise
+                        except Exception:
+                            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status="handler_failed")
+                            raise
                         if tool.cache:
                             cache[key] = output
                     if deadline is not None and cached:
                         deadline.after_tool(tool_started)
                     called_tools.append({"name": call.name, "arguments": call.arguments})
+
+            _emit_tool_call(context=telemetry_context, emitter=telemetry_emitter, tool_name=call.name, status=dispatch_status)
 
             output_text = _stringify_tool_result(output)
             messages.append(

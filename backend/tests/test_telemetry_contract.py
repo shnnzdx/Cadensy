@@ -266,10 +266,10 @@ def test_capacity_rejection_is_not_a_deadline_event():
         )
 
 
-def test_runtime_model_and_tool_events_require_agent_correlation_ids():
+def test_runtime_selection_requires_trace_while_worker_events_require_execution():
     missing_correlation = TelemetryContext(request_id="request_12345678")
 
-    with pytest.raises(ValueError, match="requires trace_id and execution_id"):
+    with pytest.raises(ValueError, match="requires trace_id"):
         RuntimeSelected(context=missing_correlation, runtime_name=RuntimeName.LEGACY)
     with pytest.raises(ValueError, match="requires trace_id and execution_id"):
         ModelCallCompleted(

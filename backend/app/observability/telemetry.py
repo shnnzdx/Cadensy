@@ -265,7 +265,11 @@ class RuntimeSelected(TelemetryEvent):
     def __post_init__(self) -> None:
         super().__post_init__()
         _require_enum(self.runtime_name, RuntimeName, "runtime_name")
-        _require_agent_correlation(self.context, self.event_name.value)
+        # Runtime selection happens before admission to the bounded worker.
+        # It has an invocation trace, but a capacity-rejected invocation never
+        # owns a worker execution id.
+        if self.context.trace_id is None:
+            raise ValueError("agent.runtime_selected requires trace_id")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -533,3 +537,17 @@ class SafeTelemetryEmitter:
         except Exception:
             return False
         return True
+
+
+# The process default deliberately remains a tiny, direct stdout writer.  The
+# helper below is the only execution-facing entry point: telemetry must never
+# alter a request's control flow, even when a test injects a broken emitter.
+DEFAULT_TELEMETRY_EMITTER = SafeTelemetryEmitter()
+
+
+def emit_safely(event: TelemetryEvent, *, emitter: SafeTelemetryEmitter | None = None) -> bool:
+    """Best-effort emission for runtime hooks; never raise into product code."""
+    try:
+        return (emitter or DEFAULT_TELEMETRY_EMITTER).emit(event)
+    except Exception:
+        return False

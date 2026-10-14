@@ -21,6 +21,16 @@ from ...agents.runtime_contract import (
     RuntimeResult,
 )
 from ...agents.runtime_factory import build_chat_runtime
+from ...observability.telemetry import (
+    AgentFallback,
+    ClassificationOutcome,
+    DomainClassificationCompleted,
+    FailureCategory,
+    FallbackReason,
+    FallbackSurface,
+    TelemetryContext,
+    emit_safely,
+)
 from ...db.session import SessionLocal
 from ...db.models import Plan, PlanItem, Trip, TripMembership
 from ..constraints.types import Classification
@@ -58,6 +68,7 @@ def preview_trip_chat_revision_bracketed(
     message: str,
     item_id: str | None = None,
     history: tuple[chat_agent.HistoryTurn, ...] = (),
+    telemetry_context: TelemetryContext | None = None,
 ) -> PreviewResult:
     """Build the B.3 Preview through fresh bounded Sessions only.
 
@@ -80,6 +91,7 @@ def preview_trip_chat_revision_bracketed(
             history=tuple(
                 RuntimeHistoryTurn(role=turn.role, text=turn.text) for turn in history
             ),
+            telemetry_context=telemetry_context,
         )
     )
 
@@ -124,6 +136,7 @@ def respond_to_trip_chat(
     message: str,
     item_id: str | None = None,
     history: tuple[chat_agent.HistoryTurn, ...] = (),
+    telemetry_context: TelemetryContext | None = None,
 ) -> ChatResult:
     if membership.trip_id != trip_id:
         raise ChatAccessDenied("This membership does not belong to this trip")
@@ -143,6 +156,7 @@ def respond_to_trip_chat(
         items=items,
         selected=selected,
         history=history,
+        telemetry_context=telemetry_context,
     )
 
 
@@ -155,6 +169,7 @@ def _respond_with_agent_branch(
     items: list[PlanItem],
     selected: PlanItem | None = None,
     history: tuple[chat_agent.HistoryTurn, ...] = (),
+    telemetry_context: TelemetryContext | None = None,
 ) -> ChatResult:
     followup = _followup_option_selection_result(
         db=db,
@@ -201,7 +216,7 @@ def _respond_with_agent_branch(
                 RuntimeHistoryTurn(role=turn.role, text=turn.text) for turn in history
             ),
             selected_item_ref=target.id if target is not None else None,
-            request_id=uuid4().hex,
+            request_id=(telemetry_context.request_id if telemetry_context is not None else uuid4().hex),
             limits=RuntimeLimits(
                 max_rounds=CHAT_AGENT_MAX_ROUNDS,
                 max_total_tokens=CHAT_AGENT_MAX_TOTAL_TOKENS,
@@ -219,15 +234,18 @@ def _respond_with_agent_branch(
         result = runtime.run(
             request,
             capability,
-            execution=_chat_agent_execution_config(),
+            execution=_chat_agent_execution_config(telemetry_context=telemetry_context),
         )
     except Exception:
+        _emit_service_fallback(telemetry_context)
         return _degraded_reply(message, items, target)
 
     if result.observation.failure is not None:
+        _emit_service_fallback(telemetry_context)
         return _degraded_reply(message, items, target)
     reply = result.reply.strip()
     if not reply:
+        _emit_service_fallback(telemetry_context)
         return _degraded_reply(message, items, target)
     reply = _strip_internal_reasoning(reply)
     if chat_agent._claims_change_completed(reply):
@@ -243,6 +261,7 @@ def _respond_with_agent_branch(
             membership=membership,
             tool_results=capability._application_legacy_tool_results,
             expected_item_id=expected_item_id,
+            telemetry_context=telemetry_context,
         )
     else:
         explicit = _proposed_change_from_runtime_suggestion(
@@ -251,6 +270,7 @@ def _respond_with_agent_branch(
             membership=membership,
             outcome=result.outcome,
             expected_item_id=expected_item_id,
+            telemetry_context=telemetry_context,
         )
     if explicit is not None:
         return ChatResult(
@@ -1001,13 +1021,16 @@ def _contains_chinese(value: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in value)
 
 
-def _chat_agent_execution_config() -> AgentExecutionConfig:
+def _chat_agent_execution_config(
+    *, telemetry_context: TelemetryContext | None = None
+) -> AgentExecutionConfig:
     """Retain the PR-01C request/provider/tool deadline partition."""
 
     return AgentExecutionConfig(
         request_timeout_seconds=CHAT_AGENT_TIMEOUT_SECONDS,
         provider_timeout_seconds=CHAT_AGENT_PROVIDER_TIMEOUT_SECONDS,
         tool_timeout_seconds=CHAT_AGENT_TOOL_TIMEOUT_SECONDS,
+        telemetry_context=telemetry_context,
     )
 
 
@@ -1162,6 +1185,7 @@ def _proposed_change_from_agent_classification(
     membership: TripMembership,
     tool_results: tuple[dict[str, Any], ...],
     expected_item_id: str | None = None,
+    telemetry_context: TelemetryContext | None = None,
 ) -> ProposedChatChange | None:
     item_by_id = {item.id: item for item in items}
     for result in reversed(tool_results):
@@ -1182,7 +1206,12 @@ def _proposed_change_from_agent_classification(
             continue
         if not _replacement_patch_is_supported(patch, tool_results):
             continue
-        verdict = orch.classify_change(db, target, patch, membership.id)
+        try:
+            verdict = orch.classify_change(db, target, patch, membership.id)
+        except Exception:
+            _emit_classification(telemetry_context, succeeded=False)
+            raise
+        _emit_classification(telemetry_context, succeeded=True)
         return ProposedChatChange(
             item_id=target.id,
             item_title=target.title,
@@ -1199,6 +1228,7 @@ def _proposed_change_from_runtime_suggestion(
     membership: TripMembership,
     outcome: object,
     expected_item_id: str | None = None,
+    telemetry_context: TelemetryContext | None = None,
 ) -> ProposedChatChange | None:
     """Validate common Runtime syntax before deterministic Domain preview.
 
@@ -1217,13 +1247,36 @@ def _proposed_change_from_runtime_suggestion(
         return None
     if not _replacement_patch_is_supported(patch, ()):
         return None
-    verdict = orch.classify_change(db, target, patch, membership.id)
+    try:
+        verdict = orch.classify_change(db, target, patch, membership.id)
+    except Exception:
+        _emit_classification(telemetry_context, succeeded=False)
+        raise
+    _emit_classification(telemetry_context, succeeded=True)
     return ProposedChatChange(
         item_id=target.id,
         item_title=target.title,
         patch=patch,
         verdict=verdict,
     )
+
+
+def _emit_service_fallback(context: TelemetryContext | None) -> None:
+    if context is not None:
+        emit_safely(AgentFallback(
+            context=context,
+            fallback_reason=FallbackReason.RUNTIME_FAILURE,
+            fallback_surface=FallbackSurface.SERVICE,
+        ))
+
+
+def _emit_classification(context: TelemetryContext | None, *, succeeded: bool) -> None:
+    if context is not None:
+        emit_safely(DomainClassificationCompleted(
+            context=context,
+            classification_outcome=(ClassificationOutcome.SUCCEEDED if succeeded else ClassificationOutcome.FAILED),
+            failure_category=None if succeeded else FailureCategory.DOMAIN_ERROR,
+        ))
 
 
 def _trip_items(db: Session, trip_id: str) -> list[PlanItem]:

@@ -15,10 +15,22 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
+from dataclasses import replace
 from threading import BoundedSemaphore, Event
 from typing import Any, TypeVar
 
 from . import trace
+from ..observability.telemetry import (
+    AgentCapacityRejected,
+    AgentDeadlineExceeded,
+    AgentLateCompletion,
+    DeadlineScope,
+    FailureCategory,
+    LateCompletionKind,
+    SafeTelemetryEmitter,
+    TelemetryContext,
+    emit_safely,
+)
 
 
 T = TypeVar("T")
@@ -74,6 +86,7 @@ class AgentExecutionConfig:
     request_timeout_seconds: float
     provider_timeout_seconds: float
     tool_timeout_seconds: float
+    telemetry_context: TelemetryContext | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -83,6 +96,8 @@ class AgentExecutionConfig:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be greater than zero")
+        if self.telemetry_context is not None and not isinstance(self.telemetry_context, TelemetryContext):
+            raise ValueError("telemetry_context must be a TelemetryContext")
 
 
 @dataclass(frozen=True)
@@ -152,6 +167,9 @@ def run_agent_with_deadline(
     worker: Callable[[AgentExecutionContext], T | Awaitable[T]],
     config: AgentExecutionConfig,
     lifecycle_recorder: Callable[[AgentLifecycleEvent], None] | None = None,
+    execution_id: str | None = None,
+    telemetry_context: TelemetryContext | None = None,
+    telemetry_emitter: SafeTelemetryEmitter | None = None,
 ) -> T:
     """Run one isolated worker without accepting a result after request expiry.
 
@@ -159,11 +177,23 @@ def run_agent_with_deadline(
     may continue until its own provider/tool call returns; its completion is
     recorded asynchronously, while its result is deliberately discarded.
     """
-    execution_id = trace.new_trace_id()
+    execution_id = execution_id or trace.new_trace_id()
     context = AgentExecutionContext(execution_id=execution_id, config=config)
     recorder = lifecycle_recorder or _record_lifecycle
+    def record(event: AgentLifecycleEvent) -> None:
+        # Lifecycle callbacks can run in a Future completion callback.  Both
+        # the compatibility recorder and telemetry must be isolated from work.
+        try:
+            recorder(event)
+        except Exception:
+            pass
+        _emit_lifecycle_event(
+            event,
+            telemetry_context=telemetry_context,
+            telemetry_emitter=telemetry_emitter,
+        )
     if not _agent_worker_slots.acquire(blocking=False):
-        recorder(
+        record(
             AgentLifecycleEvent(
                 phase=AgentExecutionCapacityExceeded.kind,
                 execution_id=execution_id,
@@ -183,7 +213,7 @@ def run_agent_with_deadline(
     try:
         result = future.result(timeout=config.request_timeout_seconds)
         context.ensure_request_active()
-        recorder(
+        record(
             AgentLifecycleEvent(
                 phase="completed",
                 execution_id=execution_id,
@@ -193,7 +223,7 @@ def run_agent_with_deadline(
         return result
     except AgentExecutionDeadlineExceeded as exc:
         context.request_cancellation()
-        recorder(
+        record(
             AgentLifecycleEvent(
                 phase=exc.kind,
                 execution_id=execution_id,
@@ -204,7 +234,7 @@ def run_agent_with_deadline(
     except TimeoutError as exc:
         context.request_cancellation()
         cancelled = future.cancel()
-        recorder(
+        record(
             AgentLifecycleEvent(
                 phase="request_timeout",
                 execution_id=execution_id,
@@ -213,7 +243,7 @@ def run_agent_with_deadline(
             )
         )
         future.add_done_callback(
-            lambda _completed: recorder(
+            lambda _completed: record(
                 AgentLifecycleEvent(
                     # A cancelled queued Future never began a worker. Keep it
                     # distinct from a running synchronous worker that later
@@ -272,3 +302,62 @@ def _record_lifecycle(event: AgentLifecycleEvent) -> None:
         result_consumed=event.result_consumed,
         worker_cancel_requested=event.worker_cancel_requested,
     )
+
+
+def _emit_lifecycle_event(
+    event: AgentLifecycleEvent,
+    *,
+    telemetry_context: TelemetryContext | None,
+    telemetry_emitter: SafeTelemetryEmitter | None,
+) -> None:
+    """Map real deadline-worker facts to closed telemetry values only."""
+    if telemetry_context is None:
+        return
+    try:
+        context = replace(telemetry_context, execution_id=event.execution_id)
+        if event.phase == AgentExecutionCapacityExceeded.kind:
+            emit_safely(
+                AgentCapacityRejected(context=context, elapsed_ms=event.elapsed_ms),
+                emitter=telemetry_emitter,
+            )
+        elif event.phase in {
+            "request_timeout",
+            AgentRequestDeadlineExceeded.kind,
+            AgentProviderDeadlineExceeded.kind,
+            AgentToolDeadlineExceeded.kind,
+        }:
+            scope, category = {
+                "request_timeout": (DeadlineScope.REQUEST, FailureCategory.REQUEST_TIMEOUT),
+                AgentRequestDeadlineExceeded.kind: (DeadlineScope.REQUEST, FailureCategory.REQUEST_TIMEOUT),
+                AgentProviderDeadlineExceeded.kind: (DeadlineScope.PROVIDER, FailureCategory.PROVIDER_TIMEOUT),
+                AgentToolDeadlineExceeded.kind: (DeadlineScope.TOOL, FailureCategory.TOOL_TIMEOUT),
+            }[event.phase]
+            emit_safely(
+                AgentDeadlineExceeded(
+                    context=context,
+                    deadline_scope=scope,
+                    failure_category=category,
+                    elapsed_ms=event.elapsed_ms,
+                    result_consumed=event.result_consumed,
+                    cancellation_requested=event.worker_cancel_requested,
+                ),
+                emitter=telemetry_emitter,
+            )
+        elif event.phase in {"queued_cancellation", "late_completion"}:
+            emit_safely(
+                AgentLateCompletion(
+                    context=context,
+                    late_completion_kind=(
+                        LateCompletionKind.QUEUED_CANCELLED
+                        if event.phase == "queued_cancellation"
+                        else LateCompletionKind.RUNNING_LATE_COMPLETION
+                    ),
+                    elapsed_ms=event.elapsed_ms,
+                    result_consumed=False,
+                    cancellation_requested=event.worker_cancel_requested,
+                ),
+                emitter=telemetry_emitter,
+            )
+    except Exception:
+        # Construction validation is intentionally as non-invasive as emission.
+        return

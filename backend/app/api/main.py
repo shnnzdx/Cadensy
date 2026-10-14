@@ -59,6 +59,14 @@ from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
 from ..domain.trips import service as trip_service
 from ..domain.trips import cover_service as trip_cover_service
+from ..observability.telemetry import (
+    ChatRequestCompleted,
+    ChatRequestStarted,
+    RouteCategory,
+    TelemetryContext,
+    TerminalCategory,
+    emit_safely,
+)
 from ..domain.transactions import (
     CredentialProof,
     DuplicatePlans,
@@ -1150,12 +1158,12 @@ def get_invite(token: str, db: Session = Depends(get_session)) -> dict:
         raise HTTPException(404, "Invite not found") from exc
 
 
-@app.post("/api/trips/{trip_id}/chat")
-def chat_with_trip(
+def _chat_with_trip_impl(
     trip_id: str,
     body: ChatRequest,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
+    telemetry_context: TelemetryContext | None = None,
 ) -> dict:
     """Natural-language trip chat.
 
@@ -1200,6 +1208,7 @@ def chat_with_trip(
                     )
                     for turn in body.history
                 ),
+                telemetry_context=telemetry_context,
             )
         except PreviewAccessDenied as exc:
             raise HTTPException(403, "Protected Preview authorization failed") from exc
@@ -1268,6 +1277,7 @@ def chat_with_trip(
                 )
                 for turn in body.history
             ),
+            telemetry_context=telemetry_context,
         )
     except chat_service.ChatAccessDenied as exc:
         raise HTTPException(403, str(exc)) from exc
@@ -1299,6 +1309,34 @@ def chat_with_trip(
         "proposed_change": proposed,
         "candidate_options": candidate_options,
     }
+
+
+@app.post("/api/trips/{trip_id}/chat")
+def chat_with_trip(
+    trip_id: str,
+    body: ChatRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Own exactly one request start and terminal telemetry event."""
+    context = TelemetryContext.new()
+    emit_safely(ChatRequestStarted(context=context, request_path=RouteCategory.TRIP_CHAT))
+    terminal = TerminalCategory.UNHANDLED_ERROR
+    try:
+        response = _chat_with_trip_impl(
+            trip_id, body, db=db, me=me, telemetry_context=context,
+        )
+        terminal = TerminalCategory.SUCCEEDED
+        return response
+    except HTTPException as error:
+        terminal = {
+            403: TerminalCategory.ACCESS_DENIED,
+            404: TerminalCategory.NOT_FOUND,
+            409: TerminalCategory.CONFLICT,
+        }.get(error.status_code, TerminalCategory.UNHANDLED_ERROR)
+        raise
+    finally:
+        emit_safely(ChatRequestCompleted(context=context, terminal_category=terminal))
 
 
 def _require_scoped_plan(

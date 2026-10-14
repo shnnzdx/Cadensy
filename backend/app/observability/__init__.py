@@ -1,5 +1,5 @@
 """Small, dependency-free observability contracts for Cadensy."""
 
-from .telemetry import SafeTelemetryEmitter, TelemetryContext
+from .telemetry import SafeTelemetryEmitter, TelemetryContext, emit_safely
 
-__all__ = ["SafeTelemetryEmitter", "TelemetryContext"]
+__all__ = ["SafeTelemetryEmitter", "TelemetryContext", "emit_safely"]
