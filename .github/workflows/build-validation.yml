@@ -352,7 +352,7 @@ jobs:
       - name: Build one-off Alembic runner image
         run: >-
           docker build
-          --file backend/Dockerfile.migration-runner
+          --file backend/Dockerfile.r5-migration-runner
           --tag cadensy-backend-migration-runner-proof
           backend
 

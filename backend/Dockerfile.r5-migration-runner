@@ -1,0 +1,26 @@
+# Build-only migration runner for the R5 manual ECR release workflow.
+# It packages a pinned backend source tree, but deliberately performs no
+# migration or database access unless an operator supplies an explicit command.
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN useradd --create-home --shell /usr/sbin/nologin appuser
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY alembic.ini .
+COPY alembic ./alembic
+COPY app ./app
+COPY data ./data
+
+USER appuser
+
+# A safe default proves the image starts without invoking Alembic or opening a
+# database connection. A reviewed release command must be supplied explicitly.
+CMD ["python", "-c", "print('R5 migration runner ready; provide an explicit reviewed command.')"]
