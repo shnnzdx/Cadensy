@@ -1,0 +1,215 @@
+name: CD-01 — Manually Approved Production Backend Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Main commit SHA whose immutable images will be promoted
+        required: true
+        type: string
+      runtime_image_digest:
+        description: Runtime sha256 digest produced by CD-01 build/publish
+        required: true
+        type: string
+      migration_runner_digest:
+        description: Migration-runner sha256 digest produced by the same build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cd01-production-release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-backend
+  ECS_CLUSTER: tripsync-cluster
+  ECS_SERVICE: tripsync-backend-service
+  CONTAINER_NAME: tripsync-backend
+  APPROVED_ALEMBIC_HEAD: c2a4b6d8e0f1
+  PRODUCTION_API_BASE_URL: https://app.cadensy.top
+
+jobs:
+  assert-approval-gate:
+    name: Require a protected Main approval environment
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Fail closed unless Main has required reviewers
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/Main" \
+            > /tmp/main-environment.json
+          jq -e 'any(.protection_rules[]?; .type == "required_reviewers")' /tmp/main-environment.json >/dev/null
+
+  promote:
+    name: Promote one immutable image after production approval
+    needs: assert-approval-gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # GitHub Environment protection is the mandatory human approval boundary.
+    # Repository administrators must retain a required reviewer on Main.
+    environment: Main
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out release tooling from main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate immutable release inputs
+        id: inputs
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RUNTIME_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "migration_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure AWS credentials from the approved Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify account, immutable ECR provenance, and current service
+        id: current
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
+          for kind in runtime migration; do
+            digest_var="${kind^^}_DIGEST"
+            digest="${!digest_var}"
+            aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${digest}" --output json > "/tmp/${kind}-image.json"
+          done
+          jq -e --arg tag "${SOURCE_SHA}" '.imageDetails[0].imageTags | index($tag)' /tmp/runtime-image.json >/dev/null
+          jq -e --arg prefix "${SOURCE_SHA}-migration" '.imageDetails[0].imageTags[] | startswith($prefix)' /tmp/migration-image.json >/dev/null
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/service.json
+          jq -e '.services | length == 1 and .[0].status == "ACTIVE"' /tmp/service.json >/dev/null
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/service.json)"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/current-task-definition.json
+          previous_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
+          test -n "${previous_image}" && test "${previous_image}" != "null"
+          jq -e '.services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .services[0].deploymentConfiguration.minimumHealthyPercent == 100 and .services[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
+          echo "previous_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
+          echo "previous_image=${previous_image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run read-only schema-head preflight in the dedicated runner
+        id: schema
+        shell: bash
+        env:
+          MIGRATION_IMAGE: ${{ steps.inputs.outputs.migration_image }}
+        run: |
+          set -euo pipefail
+          python scripts/cd01/prepare_ecs_task_definition.py \
+            --input /tmp/current-task-definition.json \
+            --output /tmp/migration-preflight-task-definition.json \
+            --image "${MIGRATION_IMAGE}"
+          migration_task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/migration-preflight-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          network_configuration="$(jq -c '{awsvpcConfiguration: .services[0].networkConfiguration.awsvpcConfiguration}' /tmp/service.json)"
+          command="current=\$(python -m alembic -c alembic.ini current | awk 'NR==1 {print \$1}'); head=\$(python -m alembic -c alembic.ini heads | awk 'NR==1 {print \$1}'); test -n \"\$current\"; test \"\$current\" = \"\$head\"; test \"\$head\" = \"${APPROVED_ALEMBIC_HEAD}\""
+          overrides="$(jq -nc --arg name "${CONTAINER_NAME}" --arg command "${command}" '{containerOverrides: [{name: $name, command: ["sh", "-eu", "-c", $command]}]}')"
+          task_arn="$(aws ecs run-task --cluster "${ECS_CLUSTER}" --launch-type FARGATE --platform-version LATEST --task-definition "${migration_task_definition}" --network-configuration "${network_configuration}" --overrides "${overrides}" --query 'tasks[0].taskArn' --output text)"
+          test -n "${task_arn}" && test "${task_arn}" != "None"
+          aws ecs wait tasks-stopped --cluster "${ECS_CLUSTER}" --tasks "${task_arn}"
+          exit_code="$(aws ecs describe-tasks --cluster "${ECS_CLUSTER}" --tasks "${task_arn}" --query "tasks[0].containers[?name=='${CONTAINER_NAME}'].exitCode | [0]" --output text)"
+          test "${exit_code}" = "0"
+          echo "preflight_task=${task_arn}" >> "${GITHUB_OUTPUT}"
+          echo "status=at-approved-head" >> "${GITHUB_OUTPUT}"
+
+      - name: Create digest-pinned application task definition
+        id: taskdef
+        shell: bash
+        env:
+          RUNTIME_IMAGE: ${{ steps.inputs.outputs.runtime_image }}
+        run: |
+          set -euo pipefail
+          python scripts/cd01/prepare_ecs_task_definition.py \
+            --input /tmp/current-task-definition.json \
+            --output /tmp/runtime-task-definition.json \
+            --image "${RUNTIME_IMAGE}"
+          task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/runtime-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          test -n "${task_definition}" && test "${task_definition}" != "None"
+          echo "arn=${task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Promote task definition with circuit-breaker rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${{ steps.taskdef.outputs.arn }}" \
+            --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null
+          aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
+
+      - name: Verify ECS deployment, ALB health, and read-only API smoke check
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
+          test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${{ steps.taskdef.outputs.arn }}"
+          jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/target-groups.txt
+          test -s /tmp/target-groups.txt
+          while read -r target_group; do
+            aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/target-health.json
+            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/target-health.json >/dev/null
+          done < /tmp/target-groups.txt
+          curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/health.json
+          jq -e '.ok == true' /tmp/health.json >/dev/null
+          echo "alb_health=healthy" >> "${GITHUB_OUTPUT}"
+          echo "api_smoke=passed" >> "${GITHUB_OUTPUT}"
+
+      - name: Write release summary and rollback reference
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## CD-01 production release result'
+            echo
+            echo "- Git commit: ${SOURCE_SHA}"
+            echo "- Runtime image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
+            echo "- Migration runner: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}"
+            echo "- Migration status: ${{ steps.schema.outputs.status }} (read-only preflight task ${{ steps.schema.outputs.preflight_task }})"
+            echo "- Previous task definition: ${{ steps.current.outputs.previous_task_definition }}"
+            echo "- Previous image: ${{ steps.current.outputs.previous_image }}"
+            echo "- New task definition: ${{ steps.taskdef.outputs.arn }}"
+            echo "- ECS deployment: stable with circuit-breaker rollback enabled"
+            echo "- ALB health: ${{ steps.verify.outputs.alb_health }}"
+            echo "- API smoke test: ${{ steps.verify.outputs.api_smoke }}"
+            echo '- Feature-gate posture: APP_ENV=production; DEV_ALLOW_MEMBERSHIP_HEADER=0; all R5 protected gates explicitly 0.'
+            echo '- Rollback reference: the previous task definition above. Do not roll back application code until forward-schema compatibility is reviewed; never run an automatic database downgrade.'
+          } >> "${GITHUB_STEP_SUMMARY}"
