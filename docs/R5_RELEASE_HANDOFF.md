@@ -12,7 +12,7 @@ R5 completes the approved B.1–B.3 engineering scope:
 - B.2E membership, Scheduler and writer-profile coverage; and
 - B.3 revision-bracketed Preview/Apply.
 
-The final code acceptance is recorded in [Report 65](../AI_enhanced/phase-0-audit-2026-10-03/65_PR05B_R5_REVIEW3_FINAL_SYSTEM_ACCEPTANCE.md). R5 is accepted only for its default-off, protected, non-production engineering scope.
+The final code acceptance is recorded in [Report 65](../AI_enhanced/PR-05B_Revision-and-Idempotency/65_PR05B_R5_REVIEW3_FINAL_SYSTEM_ACCEPTANCE.md). R5 is accepted only for its default-off, protected, non-production engineering scope.
 
 **Production activation is not authorized.**
 

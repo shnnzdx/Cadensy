@@ -22,13 +22,13 @@
 
 理由：当前是 Python/FastAPI/Pydantic/DeepSeek/OpenAI-compatible 环境；Pydantic AI 原生强调 typed dependencies、function tools、structured outputs/validators 和 code-first evals。它可替代模型侧手写 adapter，同时保持现有 deterministic domain 的业务裁决权与 legacy runtime control group。
 
-不能跳过 compatibility PoC：DeepSeek V4 的 thinking/tool-choice/structured-output 和 stateless Responses caveat 都需在专用 DB、成本上限下测试。[官方 DeepSeek 文档](https://pydantic.dev/docs/ai/models/deepseek/) 是选择依据，不是已有集成的证明。具体设计见 [integration design](04_PYDANTIC_AI_INTEGRATION_DESIGN.md)。
+不能跳过 compatibility PoC：DeepSeek V4 的 thinking/tool-choice/structured-output 和 stateless Responses caveat 都需在专用 DB、成本上限下测试。[官方 DeepSeek 文档](https://pydantic.dev/docs/ai/models/deepseek/) 是选择依据，不是已有集成的证明。具体设计见 [integration design](../PR-03_Pydantic-DeepSeek-Compatibility/04_PYDANTIC_AI_INTEGRATION_DESIGN.md)。
 
 ## 4. 是否需要 LangGraph？什么条件下需要？
 
 **当前不需要。** 它的价值出现在可恢复的 whole-trip replanning：snapshot、候选检索、draft、validation、bounded repair、checkpoint/resume、human review、revalidate-before-commit。
 
-只有能够证明这些是用户价值、并已经定义单一 state owner、checkpoint privacy、idempotency/compensation 与 eval 计划时，才采用 LangGraph。即时 Chat preview 没有该复杂度需求。详见 [framework evaluation](03_FRAMEWORK_EVALUATION.md)。
+只有能够证明这些是用户价值、并已经定义单一 state owner、checkpoint privacy、idempotency/compensation 与 eval 计划时，才采用 LangGraph。即时 Chat preview 没有该复杂度需求。详见 [framework evaluation](../PR-03_Pydantic-DeepSeek-Compatibility/03_FRAMEWORK_EVALUATION.md)。
 
 ## 5. 最值得深入开发的核心业务链路是什么？
 
