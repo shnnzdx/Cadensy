@@ -1,0 +1,181 @@
+name: CD-01 — Build and Publish Immutable Backend Images
+
+on:
+  workflow_run:
+    workflows:
+      - CI Regression Gates
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Existing main commit SHA to build (required for a controlled rebuild)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd01-build-publish-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-backend
+
+jobs:
+  build-and-push:
+    name: Build and publish immutable backend artifacts
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    # This environment is the existing AWS credential boundary.  It may require
+    # approval according to the repository Environment configuration; this job
+    # can publish artifacts but contains no ECS, RDS, or migration operation.
+    environment: Main
+    timeout-minutes: 35
+
+    steps:
+      - name: Select the CI-approved main source
+        id: source
+        shell: bash
+        env:
+          EVENT_SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            source_sha="${EVENT_SOURCE_SHA}"
+          else
+            test "${GITHUB_REF}" = "refs/heads/main"
+            source_sha="${REQUESTED_SOURCE_SHA}"
+          fi
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the selected immutable source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Verify selected source belongs to main
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          test "${actual_sha}" = "${SOURCE_SHA}"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          test -f backend/Dockerfile
+          test -f backend/Dockerfile.r5-migration-runner
+          test -f backend/alembic.ini
+          test -f backend/alembic/versions/c2a4b6d8e0f1_pr05b_phase1_trip_ledger_schema.py
+
+      - name: Configure AWS credentials from the Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify approved AWS account and existing ECR repository
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          test "${account_id}" = "${APPROVED_AWS_ACCOUNT_ID}"
+          repository_uri="$(aws ecr describe-repositories \
+            --repository-names "${ECR_REPOSITORY}" \
+            --query 'repositories[0].repositoryUri' --output text)"
+          test "${repository_uri}" = "${account_id}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+          echo "repository_uri=${repository_uri}" >> "${GITHUB_OUTPUT}"
+
+      - name: Refuse mutable or previously used release tags
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for tag in "${SOURCE_SHA}" "${SOURCE_SHA}-migration"; do
+            error_file="$(mktemp)"
+            if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${tag}" >/dev/null 2>"${error_file}"; then
+              echo "::error::Refusing to overwrite existing immutable ECR tag ${tag}."
+              exit 1
+            fi
+            grep -q 'ImageNotFoundException' "${error_file}" || {
+              echo "::error::Unable to prove that ECR tag ${tag} is unused."
+              exit 1
+            }
+          done
+
+      - name: Authenticate Docker to the existing ECR repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "${APPROVED_AWS_REGION}" | \
+            docker login --username AWS --password-stdin \
+              "${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com"
+
+      - name: Build runtime and dedicated migration-runner images
+        shell: bash
+        env:
+          ECR_URI: ${{ steps.target.outputs.repository_uri }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker build --file backend/Dockerfile --tag "${ECR_URI}:${SOURCE_SHA}" backend
+          docker build --file backend/Dockerfile.r5-migration-runner --tag "${ECR_URI}:${SOURCE_SHA}-migration" backend
+
+      - name: Verify migration runner offline without a database
+        shell: bash
+        env:
+          ECR_URI: ${{ steps.target.outputs.repository_uri }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          migration_image="${ECR_URI}:${SOURCE_SHA}-migration"
+          docker run --rm --network none "${migration_image}" sh -eu -c '
+            test ! -f /app/.env
+            python -m pip check
+            test -f alembic.ini
+            test "$(python -m alembic -c alembic.ini heads | awk "{print \$1}")" = "c2a4b6d8e0f1"
+            python -c "import app.db.legacy_schema_compat"
+          '
+
+      - name: Push immutable artifacts and resolve digests
+        id: artifacts
+        shell: bash
+        env:
+          ECR_URI: ${{ steps.target.outputs.repository_uri }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker push "${ECR_URI}:${SOURCE_SHA}"
+          docker push "${ECR_URI}:${SOURCE_SHA}-migration"
+          runtime_digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}" --query 'imageDetails[0].imageDigest' --output text)"
+          migration_digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}-migration" --query 'imageDetails[0].imageDigest' --output text)"
+          [[ "${runtime_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${migration_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "runtime_digest=${runtime_digest}" >> "${GITHUB_OUTPUT}"
+          echo "migration_digest=${migration_digest}" >> "${GITHUB_OUTPUT}"
+          {
+            echo '## CD-01 immutable build result'
+            echo
+            echo "- Git commit: ${SOURCE_SHA}"
+            echo "- Runtime image: ${ECR_URI}@${runtime_digest}"
+            echo "- Migration runner image: ${ECR_URI}@${migration_digest}"
+            echo '- Deployment: not requested; this workflow cannot call ECS, RDS, or Alembic migration commands.'
+            echo '- Next step: use the separately dispatched CD-01 production release workflow after Main Environment approval.'
+          } >> "${GITHUB_STEP_SUMMARY}"
