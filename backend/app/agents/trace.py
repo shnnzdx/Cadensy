@@ -1,21 +1,34 @@
-"""Structured tracing for real AI provider calls.
+"""Legacy trace compatibility helpers with no persistent trace output.
 
-This module deliberately records only routing and runtime metadata. Prompts,
-model responses, member identifiers, and raw preference wording do not belong
-in trace logs.
+The old implementation wrote agent rounds, tool arguments/results, and failure
+details to stdout and local JSONL files. PR-06A.1 retains only the small
+in-memory round summary consumed by the legacy agent result. Typed telemetry
+is defined separately in :mod:`app.observability.telemetry` and is not wired
+to execution in this slice.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+
+# Kept temporarily for test/third-party monkeypatch compatibility. No trace
+# function in this module reads or writes this directory anymore.
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = BACKEND_ROOT / "logs"
+
+_APPROVED_TOOL_NAMES = frozenset(
+    {
+        "get_current_plan",
+        "get_trip_facts",
+        "classify_change",
+        "find_replacement_place",
+        "propose_options",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -66,56 +79,23 @@ def record_model_call(
     fallback_to: str | None = None,
     failures: list[dict[str, str]] | None = None,
 ) -> None:
-    """Record one model-call outcome.
+    """Compatibility no-op for an unused legacy output path.
 
-    `provider_elapsed_ms` is the time spent in the provider that succeeded.
-    It is null on failed events because no provider produced an answer.
-    `total_elapsed_ms` is the full call_model wall time, including any earlier
-    failed providers in the fallback chain.
+    Keep the callable signature while intentionally refusing to serialize
+    provider failures or arbitrary data supplied to it.
     """
-    timestamp = datetime.now(timezone.utc)
-    event = {
-        "timestamp": timestamp.isoformat(),
-        "trace_id": trace_id,
-        "route": route,
-        "provider": provider,
-        "model": model,
-        "provider_elapsed_ms": (
-            round(provider_elapsed_ms, 2) if provider_elapsed_ms is not None else None
-        ),
-        "total_elapsed_ms": round(total_elapsed_ms, 2),
-        "tokens": (tokens or TokenUsage()).as_dict(),
-        "ok": ok,
-        "fallback_to": fallback_to,
-        "failures": failures or [],
-    }
-
-    status = "ok" if ok else "failed"
-    token_count = event["tokens"]["total_tokens"]
-    token_text = "tokens=unknown" if token_count is None else f"tokens={token_count}"
-    fallback_text = f" fallback_to={fallback_to}" if fallback_to else ""
-    print(
-        "[ai-trace] "
-        f"{status} trace_id={trace_id} route={route} provider={provider} "
-        f"model={model or 'unset'} provider_elapsed_ms={event['provider_elapsed_ms']} "
-        f"total_elapsed_ms={event['total_elapsed_ms']} "
-        f"{token_text}{fallback_text}"
+    del (
+        trace_id,
+        route,
+        provider,
+        model,
+        provider_elapsed_ms,
+        total_elapsed_ms,
+        tokens,
+        ok,
+        fallback_to,
+        failures,
     )
-    if not ok:
-        for failure in event["failures"]:
-            print(
-                "[ai-trace] "
-                f"failure trace_id={trace_id} provider={failure['provider']} "
-                f"reason={failure['reason']}"
-            )
-
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = LOG_DIR / f"trace-{timestamp:%Y%m%d}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        print(f"[ai-trace] log_write_failed trace_id={trace_id} reason={exc!r}")
 
 
 def record_agent_round(
@@ -132,52 +112,25 @@ def record_agent_round(
     elapsed_ms: float,
     tokens: TokenUsage | None,
 ) -> dict[str, Any]:
-    """Record one experimental tool-agent round.
+    """Build the safe in-memory legacy round summary without I/O.
 
-    Tool arguments and results are allowed here only for the agent-server demo:
-    they must stay limited to itinerary titles, times, and conflict summaries,
-    never member identities, membership ids, or raw private preference wording.
+    The broad parameters are retained so existing callers need no behavioral
+    migration. Only the fixed fields below can reach ``AgentRunResult.rounds``.
     """
-    timestamp = datetime.now(timezone.utc)
-    guard_info = _agent_round_guard_info(tool_result)
-    event = {
-        "timestamp": timestamp.isoformat(),
-        "trace_id": trace_id,
-        "route": route,
-        "provider": provider,
-        "model": model,
+    del trace_id, route, provider, model, tool_arguments, elapsed_ms, tokens
+    guard_rejected, guard_limit_exceeded, statuses = _agent_round_status(tool_result)
+    safe_name = _safe_tool_name(tool_name)
+    return {
         "round_index": round_index,
         "requested_tool": requested_tool,
-        "tool_name": tool_name,
-        "tool_arguments": tool_arguments or {},
-        "tool_result": tool_result,
-        "elapsed_ms": round(elapsed_ms, 2),
-        "tokens": (tokens or TokenUsage()).as_dict(),
-        "guard_rejected": guard_info["guard_rejected"],
-        "guard_reasons": guard_info["guard_reasons"],
-        "guard_limit_exceeded": guard_info["guard_limit_exceeded"],
+        "tool_name": safe_name,
+        "guard_rejected": guard_rejected,
+        "guard_limit_exceeded": guard_limit_exceeded,
+        "tool_dispatch_status": _summary_dispatch_status(
+            requested_tool=requested_tool,
+            statuses=statuses,
+        ),
     }
-
-    tool_text = tool_name or "none"
-    token_count = event["tokens"]["total_tokens"]
-    token_text = "tokens=unknown" if token_count is None else f"tokens={token_count}"
-    print(
-        "[agent-trace] "
-        f"trace_id={trace_id} round={round_index} route={route} "
-        f"provider={provider} model={model or 'unset'} requested_tool={requested_tool} "
-        f"tool={tool_text} elapsed_ms={event['elapsed_ms']} {token_text} "
-        f"guard_rejected={event['guard_rejected']}"
-    )
-
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = LOG_DIR / f"agent-trace-{timestamp:%Y%m%d}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        print(f"[agent-trace] log_write_failed trace_id={trace_id} reason={exc!r}")
-
-    return event
 
 
 def record_agent_lifecycle(
@@ -188,49 +141,45 @@ def record_agent_lifecycle(
     result_consumed: bool,
     worker_cancel_requested: bool,
 ) -> None:
-    """Record deadline lifecycle metadata without prompts, tool data, or output.
-
-    A late completion proves only that a local worker reached a terminal state
-    after the HTTP/request response had already been abandoned. The result is
-    intentionally not serialized or inspected here.
-    """
-    timestamp = datetime.now(timezone.utc)
-    event = {
-        "timestamp": timestamp.isoformat(),
-        "phase": phase,
-        "execution_id": execution_id,
-        "elapsed_ms": round(elapsed_ms, 2),
-        "result_consumed": result_consumed,
-        "worker_cancel_requested": worker_cancel_requested,
-    }
-    print(
-        "[agent-lifecycle] "
-        f"phase={phase} execution_id={execution_id} elapsed_ms={event['elapsed_ms']} "
-        f"result_consumed={result_consumed} worker_cancel_requested={worker_cancel_requested}"
-    )
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = LOG_DIR / f"agent-lifecycle-{timestamp:%Y%m%d}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        print(f"[agent-lifecycle] log_write_failed execution_id={execution_id} reason={exc!r}")
+    """Compatibility no-op preserving lifecycle ordering and worker behavior."""
+    del phase, execution_id, elapsed_ms, result_consumed, worker_cancel_requested
 
 
-def _agent_round_guard_info(tool_result: Any) -> dict[str, Any]:
+def _safe_tool_name(value: str | None) -> str | None:
+    """Never copy model-supplied/combined tool labels into a safe summary."""
+    return value if value in _APPROVED_TOOL_NAMES else None
+
+
+def _agent_round_status(tool_result: Any) -> tuple[bool, bool, set[str]]:
     calls = tool_result.get("calls", []) if isinstance(tool_result, dict) else []
-    reasons = []
-    limit_exceeded = False
+    guard_rejected = False
+    guard_limit_exceeded = False
+    statuses: set[str] = set()
     for call in calls:
         if not isinstance(call, dict):
             continue
-        if call.get("guard_rejected"):
-            reason = call.get("guard_reason")
-            if reason:
-                reasons.append(reason)
-        limit_exceeded = limit_exceeded or bool(call.get("guard_limit_exceeded"))
-    return {
-        "guard_rejected": bool(reasons),
-        "guard_reasons": reasons,
-        "guard_limit_exceeded": limit_exceeded,
-    }
+        if bool(call.get("guard_rejected")):
+            guard_rejected = True
+            statuses.add("guard_rejected")
+        elif bool(call.get("cached")):
+            statuses.add("cache_hit")
+        else:
+            # This compatibility function only sees completed dispatches. A
+            # pre-handler/handler failure retains existing propagation and is
+            # represented by the typed future telemetry contract, not raw
+            # trace output.
+            statuses.add("handler_succeeded")
+        guard_limit_exceeded = guard_limit_exceeded or bool(
+            call.get("guard_limit_exceeded")
+        )
+    return guard_rejected, guard_limit_exceeded, statuses
+
+
+def _summary_dispatch_status(*, requested_tool: bool, statuses: set[str]) -> str | None:
+    if not requested_tool:
+        return None
+    if len(statuses) == 1:
+        return next(iter(statuses))
+    if len(statuses) > 1:
+        return "multiple_dispatches"
+    return "dispatch_unavailable"

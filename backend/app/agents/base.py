@@ -792,11 +792,9 @@ def call_model(
         except AgentUnavailable as exc:
             failures.append(f"{provider_name}: {exc}")
         except Exception as exc:
-            print()
-            print(f"========== TRIPSYNC AI ERROR [{provider_name}] ==========")
-            print(repr(exc))
-            print("===============================================")
-            print()
+            # Provider details can contain request content, endpoint details,
+            # or credentials. Preserve the existing exception aggregation for
+            # callers, but never emit its representation to stdout.
             failures.append(f"{provider_name}: {exc}")
 
     raise AgentUnavailable(" | ".join(failures) or "No AI provider succeeded")
