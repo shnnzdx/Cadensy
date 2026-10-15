@@ -44,14 +44,27 @@ def _case(scenario: str) -> dict:
         f"arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/cadensy-isolated-{scenario}:1"
     )
     target_revision = f"arn:aws:ecs:{REGION}:{ACCOUNT}:service-revision/isolated/{scenario}-candidate"
-    candidate_transition = _task_observation(
-        CANDIDATE_IMAGE,
-        candidate_task_definition,
-        ["PENDING", "STOPPED"] if is_stage_one else ["PENDING", "RUNNING", "STOPPED"],
-        f"{scenario}-candidate",
-    )
-    if is_stage_one:
-        candidate_transition["stopped_reason"] = "Essential container in task exited"
+    failed_attempts = []
+    for attempt_number in range(1, 4):
+        attempt = _task_observation(
+            CANDIDATE_IMAGE,
+            candidate_task_definition,
+            ["PENDING", "STOPPED"] if is_stage_one else ["PENDING", "RUNNING", "STOPPED"],
+            f"{scenario}-candidate-{attempt_number}",
+        )
+        attempt.update(
+            {
+                "attempt_number": attempt_number,
+                "attempt_id": f"{scenario}-attempt-{attempt_number}",
+                "failure_reason": "essential container exited" if is_stage_one else "ALB target unhealthy",
+                "audit_evidence_refs": [
+                    f"s3://cadensy-isolated-audit/{scenario}/attempt-{attempt_number}.json?versionId=1"
+                ],
+            }
+        )
+        if is_stage_one:
+            attempt["stopped_reason"] = "Essential container in task exited"
+        failed_attempts.append(attempt)
     return {
         "scenario": scenario,
         "experiment_run_id": RUN_ID,
@@ -78,7 +91,8 @@ def _case(scenario: str) -> dict:
             "service_deployment_events_complete": True,
             "service_deployment_failure_reason": "deployment circuit breaker triggered",
             "health_checks_evaluated": not is_stage_one,
-            "candidate_task_transitions": [candidate_transition],
+            "actual_failed_task_count": 3,
+            "failed_task_attempts": failed_attempts,
             "audit_evidence_refs": [f"s3://cadensy-isolated-audit/{scenario}/stage.json?versionId=1"],
         },
         "old_runtime_observation": {
@@ -87,7 +101,7 @@ def _case(scenario: str) -> dict:
             "window_ended_at_utc": "2026-10-15T12:20:00Z",
             "ecs_task_state_events_complete": True,
             "service_deployment_events_complete": True,
-            "task_observations": [candidate_transition],
+            "task_observations": [failed_attempts[0]],
             "service_deployment_events": [
                 {"event_id": f"{scenario}-rollback-complete", "observed_at_utc": "2026-10-15T12:20:00Z"}
             ],
@@ -177,6 +191,31 @@ def test_completed_isolated_evidence_accepts_bound_two_stage_failure_paths_witho
     assert experiment.validate_completed_isolated_experiment(evidence) == evidence
 
 
+def test_completed_evidence_rejects_expected_failure_threshold_without_matching_observed_attempts():
+    evidence = _completed_safe_evidence()
+    evidence["test_cases"][0]["stage_evidence"]["actual_failed_task_count"] = 2
+    evidence["test_cases"][0]["stage_evidence"]["failed_task_attempts"] = []
+
+    with pytest.raises(experiment.IsolatedExperimentContractError):
+        experiment.validate_completed_isolated_experiment(evidence)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda evidence: evidence["test_cases"][0]["stage_evidence"]["failed_task_attempts"].pop(),
+        lambda evidence: evidence["test_cases"][0]["stage_evidence"]["failed_task_attempts"][1].__setitem__(
+            "task_arn", evidence["test_cases"][0]["stage_evidence"]["failed_task_attempts"][0]["task_arn"]
+        ),
+        lambda evidence: evidence["test_cases"][1]["stage_evidence"]["failed_task_attempts"][2].__setitem__(
+            "audit_evidence_refs", []
+        ),
+    ],
+)
+def test_completed_evidence_rejects_unlinked_or_duplicate_actual_failed_task_attempts(mutate):
+    _rejects(mutate)
+
+
 @pytest.mark.parametrize("budget_cap", [0, 26, 100, True, "25"])
 def test_completed_evidence_rejects_out_of_contract_or_non_integer_budget_caps(budget_cap):
     _rejects(lambda evidence: evidence["cost_and_cleanup"].__setitem__("budget_cap_usd", budget_cap))
@@ -243,10 +282,10 @@ def test_completed_evidence_rejects_cross_case_identity_splicing(mutate):
     "mutate",
     [
         lambda evidence: evidence["test_cases"][0].__setitem__("circuit_breaker_stage", "STAGE_2"),
-        lambda evidence: evidence["test_cases"][0]["stage_evidence"]["candidate_task_transitions"][0].__setitem__(
+        lambda evidence: evidence["test_cases"][0]["stage_evidence"]["failed_task_attempts"][0].__setitem__(
             "last_status_sequence", ["PENDING", "RUNNING", "STOPPED"]
         ),
-        lambda evidence: evidence["test_cases"][1]["stage_evidence"]["candidate_task_transitions"][0].__setitem__(
+        lambda evidence: evidence["test_cases"][1]["stage_evidence"]["failed_task_attempts"][0].__setitem__(
             "last_status_sequence", ["PENDING", "STOPPED"]
         ),
         lambda evidence: evidence["production_equivalence"]["failure_threshold"].__setitem__("expected_failure_count", 2),

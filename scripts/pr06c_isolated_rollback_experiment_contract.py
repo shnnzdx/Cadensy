@@ -189,7 +189,7 @@ def _validate_forward_schema(evidence: dict[str, Any]) -> str:
     return image
 
 
-def _validate_production_equivalence(evidence: dict[str, Any]) -> None:
+def _validate_production_equivalence(evidence: dict[str, Any]) -> int:
     equivalence = _mapping(evidence.get("production_equivalence"), "production equivalence")
     if equivalence.get("match_status") != "MATCHED_TO_READ_ONLY_PRODUCTION_SNAPSHOT":
         raise IsolatedExperimentContractError("sandbox deployment settings were not matched to the reviewed production snapshot")
@@ -211,6 +211,7 @@ def _validate_production_equivalence(evidence: dict[str, Any]) -> None:
     if failures < 3:
         raise IsolatedExperimentContractError("desired-count-one experiment must budget for at least three failures")
     _audit_refs(equivalence.get("audit_evidence_refs"), "production-equivalence audit evidence")
+    return failures
 
 
 def _validate_candidate_binding(evidence: dict[str, Any], expected_scenario: str) -> None:
@@ -266,17 +267,37 @@ def _validate_old_runtime_observation(evidence: dict[str, Any], account_id: str,
     _audit_refs(observation.get("audit_evidence_refs"), "old runtime observation audit evidence")
 
 
-def _validate_stage_evidence(evidence: dict[str, Any], expected_scenario: str, account_id: str) -> None:
+def _validate_stage_evidence(
+    evidence: dict[str, Any],
+    expected_scenario: str,
+    account_id: str,
+    expected_failure_count: int,
+) -> None:
     stage = _mapping(evidence.get("stage_evidence"), "stage evidence")
     if stage.get("ecs_task_state_events_complete") is not True:
         raise IsolatedExperimentContractError("candidate task-state evidence is incomplete")
     if stage.get("service_deployment_events_complete") is not True:
         raise IsolatedExperimentContractError("candidate service-deployment evidence is incomplete")
     _nonempty_string(stage.get("service_deployment_failure_reason"), "service deployment failure reason")
-    transitions = stage.get("candidate_task_transitions")
-    if not isinstance(transitions, list) or not transitions:
-        raise IsolatedExperimentContractError("candidate task transitions are missing")
-    observed = [_validate_task_observation(item, account_id, f"candidate transition[{index}]") for index, item in enumerate(transitions)]
+    actual_failure_count = _positive_int(stage.get("actual_failed_task_count"), "actual failed task count")
+    attempts = stage.get("failed_task_attempts")
+    if actual_failure_count != expected_failure_count:
+        raise IsolatedExperimentContractError("actual failed task count does not match the approved failure threshold")
+    if not isinstance(attempts, list) or len(attempts) != actual_failure_count:
+        raise IsolatedExperimentContractError("every actual failed task requires one evidence-bearing attempt")
+    observed = []
+    task_arns: set[str] = set()
+    for index, attempt in enumerate(attempts, start=1):
+        item = _mapping(attempt, f"failed task attempt[{index}]")
+        _exact_int(item.get("attempt_number"), index, f"failed task attempt[{index}] number")
+        _nonempty_string(item.get("attempt_id"), f"failed task attempt[{index}] ID")
+        observed_task = _validate_task_observation(item, account_id, f"failed task attempt[{index}]")
+        if observed_task["task_arn"] in task_arns:
+            raise IsolatedExperimentContractError("each failed attempt must have a unique ECS task ARN")
+        task_arns.add(observed_task["task_arn"])
+        _nonempty_string(item.get("failure_reason"), f"failed task attempt[{index}] failure reason")
+        _audit_refs(item.get("audit_evidence_refs"), f"failed task attempt[{index}] audit evidence")
+        observed.append(observed_task)
     candidate_image = evidence.get("candidate_image_digest")
     candidate_task_definition = evidence.get("candidate_task_definition_arn")
     if any(item["image_digest"] != candidate_image or item["task_definition_arn"] != candidate_task_definition for item in observed):
@@ -299,8 +320,8 @@ def _validate_stage_evidence(evidence: dict[str, Any], expected_scenario: str, a
             raise IsolatedExperimentContractError("ALB-failure candidate did not reach RUNNING")
         if stage.get("health_checks_evaluated") is not True:
             raise IsolatedExperimentContractError("Stage 2 requires health-check evaluation evidence")
-        if not any("RUNNING" in item["last_status_sequence"] for item in observed):
-            raise IsolatedExperimentContractError("Stage 2 lacks a RUNNING candidate task transition")
+        if not all("RUNNING" in item["last_status_sequence"] for item in observed):
+            raise IsolatedExperimentContractError("Stage 2 lacks a RUNNING transition for an observed failed task")
     _audit_refs(stage.get("audit_evidence_refs"), "stage-evidence audit evidence")
 
 
@@ -310,6 +331,7 @@ def _validate_case(
     account_id: str,
     experiment_run_id: str,
     legacy_image: str,
+    expected_failure_count: int,
 ) -> None:
     evidence = _mapping(case, "test case")
     if evidence.get("scenario") != expected_scenario:
@@ -344,7 +366,7 @@ def _validate_case(
             raise IsolatedExperimentContractError("ALB health failure was not observed")
         if "unhealthy" not in target_states:
             raise IsolatedExperimentContractError("ALB health-failure evidence lacks an unhealthy target")
-    _validate_stage_evidence(evidence, expected_scenario, account_id)
+    _validate_stage_evidence(evidence, expected_scenario, account_id, expected_failure_count)
     _validate_old_runtime_observation(evidence, account_id, old_image)
     _final_counts(evidence.get("final_counts"), "final counts")
     if evidence.get("deployment_terminal_status") != "ROLLBACK_SUCCESSFUL":
@@ -376,7 +398,7 @@ def validate_completed_isolated_experiment(evidence_payload: dict[str, Any]) -> 
     account_id = _validate_environment(evidence)
     _validate_cost_and_cleanup(evidence)
     legacy_image = _validate_forward_schema(evidence)
-    _validate_production_equivalence(evidence)
+    expected_failure_count = _validate_production_equivalence(evidence)
     cases = evidence.get("test_cases")
     if not isinstance(cases, list) or len(cases) != 2:
         raise IsolatedExperimentContractError("exactly two rollback failure cases are required")
@@ -384,6 +406,13 @@ def validate_completed_isolated_experiment(evidence_payload: dict[str, Any]) -> 
     if set(scenarios) != {"startup_failure", "alb_health_failure"}:
         raise IsolatedExperimentContractError("required rollback failure scenarios are incomplete")
     for scenario in ("startup_failure", "alb_health_failure"):
-        _validate_case(next(case for case in cases if case["scenario"] == scenario), scenario, account_id, experiment_run_id, legacy_image)
+        _validate_case(
+            next(case for case in cases if case["scenario"] == scenario),
+            scenario,
+            account_id,
+            experiment_run_id,
+            legacy_image,
+            expected_failure_count,
+        )
     _validate_approvals(evidence)
     return evidence
