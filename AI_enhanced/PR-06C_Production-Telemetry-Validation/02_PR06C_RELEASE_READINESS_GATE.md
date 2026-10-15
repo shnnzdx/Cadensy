@@ -60,3 +60,18 @@ The legacy lifecycle trace function is intentionally a no-op; the new safe
 lifecycle events are separately wired. Neither fact proves production
 observability until the new runtime image is deployed and its bounded,
 privacy-safe stdout-to-CloudWatch delivery is verified.
+
+## PR-06C.1B design evidence
+
+The zero-capacity recovery design, rollback threat model, offline test record,
+and future approval plan are recorded in:
+
+- [04 — ECS Zero-to-One Release Design](04_PR06C_ECS_ZERO_TO_ONE_RELEASE_DESIGN.md)
+- [05 — Rollback Threat Model](05_PR06C_ROLLBACK_THREAT_MODEL.md)
+- [06 — Offline Proof and Tests](06_PR06C_OFFLINE_PROOF_AND_TESTS.md)
+- [07 — Production Change Approval Plan](07_PR06C_PRODUCTION_CHANGE_APPROVAL_PLAN.md)
+
+They add a reviewed, fail-closed CD-01 design only. They do not satisfy the
+capacity, rollback-semantics, database-compatibility, release-approval, or
+CloudWatch-delivery gates above. The release readiness decision remains
+**BLOCKED — PRODUCTION GATE NOT SATISFIED**.

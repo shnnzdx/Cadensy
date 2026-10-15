@@ -15,6 +15,36 @@ on:
         description: Migration-runner sha256 digest produced by the same build
         required: true
         type: string
+      release_mode:
+        description: Standard promotion, or the separately reviewed zero-to-one recovery mode
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - zero_capacity_recovery
+      expected_current_task_definition:
+        description: Exact live task-definition ARN approved as the baseline
+        required: true
+        type: string
+      expected_current_image_digest:
+        description: Exact sha256 digest expected in the live application container
+        required: true
+        type: string
+      expected_current_desired_count:
+        description: Exact non-negative live desired count approved as the baseline
+        required: true
+        type: string
+      recovery_desired_count:
+        description: Required only for zero_capacity_recovery; must be the reviewed value 1
+        required: false
+        default: ""
+        type: string
+      rollback_evidence_sha:
+        description: Approved Main commit containing reviewed zero-capacity rollback evidence
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -78,6 +108,12 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
         run: |
           set -euo pipefail
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
@@ -85,8 +121,20 @@ jobs:
           [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}")"
+          if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
+            git merge-base --is-ancestor "${ROLLBACK_EVIDENCE_SHA}" origin/main
+            git cat-file -e "${ROLLBACK_EVIDENCE_SHA}:AI_enhanced/PR-06C_Production-Telemetry-Validation/05_PR06C_ROLLBACK_THREAT_MODEL.md"
+          fi
           echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "migration_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
 
       - name: Configure AWS credentials from the approved Main environment
         uses: aws-actions/configure-aws-credentials@v6
@@ -102,6 +150,12 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
         run: |
           set -euo pipefail
           test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
@@ -119,8 +173,18 @@ jobs:
           previous_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
           test -n "${previous_image}" && test "${previous_image}" != "null"
           jq -e '.services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .services[0].deploymentConfiguration.minimumHealthyPercent == 100 and .services[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
+          release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            --service-json /tmp/service.json \
+            --task-definition-json /tmp/current-task-definition.json)"
           echo "previous_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
           echo "previous_image=${previous_image}" >> "${GITHUB_OUTPUT}"
+          echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
 
       - name: Run read-only schema-head preflight in the dedicated runner
         id: schema
@@ -160,6 +224,32 @@ jobs:
           test -n "${task_definition}" && test "${task_definition}" != "None"
           echo "arn=${task_definition}" >> "${GITHUB_OUTPUT}"
 
+      - name: Re-check live baseline immediately before service mutation
+        id: pre_promote
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/pre-promote-service.json
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/pre-promote-service.json)"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/pre-promote-task-definition.json
+          release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            --service-json /tmp/pre-promote-service.json \
+            --task-definition-json /tmp/pre-promote-task-definition.json)"
+          echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
+
       - name: Promote task definition with circuit-breaker rollback
         shell: bash
         run: |
@@ -168,6 +258,7 @@ jobs:
             --cluster "${ECS_CLUSTER}" \
             --service "${ECS_SERVICE}" \
             --task-definition "${{ steps.taskdef.outputs.arn }}" \
+            --desired-count "${{ steps.pre_promote.outputs.release_desired_count }}" \
             --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null
           aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
 
@@ -178,6 +269,9 @@ jobs:
           set -euo pipefail
           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
           test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${{ steps.taskdef.outputs.arn }}"
+          test "$(jq -r '.services[0].desiredCount' /tmp/final-service.json)" = "${{ steps.pre_promote.outputs.release_desired_count }}"
+          test "$(jq -r '.services[0].runningCount' /tmp/final-service.json)" = "${{ steps.pre_promote.outputs.release_desired_count }}"
+          test "$(jq -r '.services[0].pendingCount' /tmp/final-service.json)" = "0"
           jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/target-groups.txt
           test -s /tmp/target-groups.txt
           while read -r target_group; do
@@ -195,6 +289,8 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
         run: |
           set -euo pipefail
           {
@@ -207,6 +303,8 @@ jobs:
             echo "- Previous task definition: ${{ steps.current.outputs.previous_task_definition }}"
             echo "- Previous image: ${{ steps.current.outputs.previous_image }}"
             echo "- New task definition: ${{ steps.taskdef.outputs.arn }}"
+            echo "- Release mode: ${RELEASE_MODE}; desired count: ${{ steps.pre_promote.outputs.release_desired_count }}"
+            echo "- Zero-capacity rollback evidence: ${ROLLBACK_EVIDENCE_SHA:-not-applicable}"
             echo "- ECS deployment: stable with circuit-breaker rollback enabled"
             echo "- ALB health: ${{ steps.verify.outputs.alb_health }}"
             echo "- API smoke test: ${{ steps.verify.outputs.api_smoke }}"

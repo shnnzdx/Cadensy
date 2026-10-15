@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+import copy
 import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 import yaml
@@ -13,11 +16,24 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_ecs_task_definition.py"
 BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-build-publish.yml"
 RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-production-release.yml"
+CAPACITY_CONTRACT_PATH = REPOSITORY_ROOT / "scripts" / "cd01" / "capacity_recovery_contract.py"
+ROLLBACK_THREAT_MODEL = (
+    REPOSITORY_ROOT
+    / "AI_enhanced"
+    / "PR-06C_Production-Telemetry-Validation"
+    / "05_PR06C_ROLLBACK_THREAT_MODEL.md"
+)
 
 spec = importlib.util.spec_from_file_location("cd01_prepare_task_definition", HELPER_PATH)
 assert spec and spec.loader
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
+
+capacity_spec = importlib.util.spec_from_file_location("cd01_capacity_recovery", CAPACITY_CONTRACT_PATH)
+assert capacity_spec and capacity_spec.loader
+capacity = importlib.util.module_from_spec(capacity_spec)
+sys.modules[capacity_spec.name] = capacity
+capacity_spec.loader.exec_module(capacity)
 
 
 def _task_definition() -> dict:
@@ -86,6 +102,194 @@ def test_task_definition_helper_preserves_live_configuration_and_forces_safe_pos
     assert all(environment[gate] == "0" for gate in helper.DEFAULT_OFF_GATES)
     assert "taskDefinitionArn" not in prepared
     assert "revision" not in prepared
+
+
+def _recovery_inputs(**overrides: str) -> dict[str, str]:
+    values = {
+        "release_mode": "zero_capacity_recovery",
+        "expected_current_task_definition": (
+            "arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:19"
+        ),
+        "expected_current_image_digest": "sha256:" + "a" * 64,
+        "expected_current_desired_count": "0",
+        "recovery_desired_count": "1",
+        "rollback_evidence_sha": "d" * 40,
+    }
+    values.update(overrides)
+    return values
+
+
+def _service_baseline(**overrides: object) -> dict:
+    service = {
+        "services": [
+            {
+                "status": "ACTIVE",
+                "taskDefinition": _recovery_inputs()["expected_current_task_definition"],
+                "desiredCount": 0,
+                "runningCount": 0,
+                "pendingCount": 0,
+                "deployments": [
+                    {
+                        "status": "PRIMARY",
+                        "rolloutState": "COMPLETED",
+                        "taskDefinition": _recovery_inputs()["expected_current_task_definition"],
+                    }
+                ],
+                "deploymentConfiguration": {
+                    "minimumHealthyPercent": 100,
+                    "maximumPercent": 200,
+                    "deploymentCircuitBreaker": {"enable": True, "rollback": True},
+                },
+            }
+        ]
+    }
+    service["services"][0].update(overrides)
+    return service
+
+
+def _safe_live_task_definition() -> dict:
+    payload = _task_definition()
+    environment = payload["taskDefinition"]["containerDefinitions"][0]["environment"]
+    for entry in environment:
+        if entry["name"] == "CADENSY_B3_PROTECTED_PREVIEW_APPLY":
+            entry["value"] = "0"
+    existing_names = {entry["name"] for entry in environment}
+    for gate in helper.DEFAULT_OFF_GATES:
+        if gate not in existing_names:
+            environment.append({"name": gate, "value": "0"})
+    environment.append({"name": "DEV_ALLOW_MEMBERSHIP_HEADER", "value": "0"})
+    return payload
+
+
+def test_zero_capacity_recovery_requires_explicit_mode_and_exactly_one_task():
+    request = capacity.validate_recovery_inputs(_recovery_inputs())
+
+    assert request.release_desired_count == 1
+
+    for overrides in (
+        {"release_mode": "standard"},
+        {"recovery_desired_count": "2"},
+        {"recovery_desired_count": "0"},
+        {"rollback_evidence_sha": ""},
+    ):
+        with pytest.raises(capacity.CapacityRecoveryContractError):
+            capacity.validate_recovery_inputs(_recovery_inputs(**overrides))
+
+
+def test_capacity_contract_cli_outputs_only_the_derived_recovery_count(capsys):
+    result = capacity.main(
+        [
+            "--release-mode",
+            "zero_capacity_recovery",
+            "--expected-current-task-definition",
+            _recovery_inputs()["expected_current_task_definition"],
+            "--expected-current-image-digest",
+            _recovery_inputs()["expected_current_image_digest"],
+            "--expected-current-desired-count",
+            "0",
+            "--recovery-desired-count",
+            "1",
+            "--rollback-evidence-sha",
+            _recovery_inputs()["rollback_evidence_sha"],
+        ]
+    )
+
+    assert result == 0
+    assert capsys.readouterr().out == "1\n"
+
+
+def test_zero_capacity_recovery_rejects_nonzero_or_drifting_live_baseline():
+    request = capacity.validate_recovery_inputs(_recovery_inputs())
+    task = _safe_live_task_definition()
+
+    capacity.validate_live_baseline(_service_baseline(), task, request)
+
+    for service_overrides in (
+        {"desiredCount": 1, "runningCount": 1},
+        {"taskDefinition": "arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:20"},
+        {"pendingCount": 1},
+    ):
+        with pytest.raises(capacity.CapacityRecoveryContractError):
+            capacity.validate_live_baseline(_service_baseline(**service_overrides), task, request)
+
+
+def test_zero_capacity_recovery_rejects_running_image_and_gate_drift():
+    request = capacity.validate_recovery_inputs(_recovery_inputs())
+
+    bad_image = _safe_live_task_definition()
+    bad_image["taskDefinition"]["containerDefinitions"][0]["image"] = (
+        "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "e" * 64
+    )
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_live_baseline(_service_baseline(), bad_image, request)
+
+    bad_gate = copy.deepcopy(_safe_live_task_definition())
+    bad_gate["taskDefinition"]["containerDefinitions"][0]["environment"].append(
+        {"name": "CADENSY_B3_PROTECTED_PREVIEW_APPLY", "value": "1"}
+    )
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_live_baseline(_service_baseline(), bad_gate, request)
+
+
+def test_capacity_contract_is_offline_and_standard_mode_cannot_restore_zero_capacity():
+    tree = ast.parse(CAPACITY_CONTRACT_PATH.read_text(encoding="utf-8"))
+    imports = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+
+    assert imports.isdisjoint({"boto3", "botocore", "subprocess", "socket", "urllib", "requests"})
+
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_inputs(
+            _recovery_inputs(
+                release_mode="standard",
+                recovery_desired_count="",
+                rollback_evidence_sha="",
+            )
+        )
+
+
+def test_cd01_zero_capacity_recovery_is_explicit_and_rechecks_before_service_update():
+    release = _workflow(RELEASE_WORKFLOW)
+    release_text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    release_script = _workflow_script(release)
+    inputs = release["on"]["workflow_dispatch"]["inputs"]
+
+    assert set(inputs).issuperset(
+        {
+            "release_mode",
+            "expected_current_task_definition",
+            "expected_current_image_digest",
+            "expected_current_desired_count",
+            "recovery_desired_count",
+            "rollback_evidence_sha",
+        }
+    )
+    assert inputs["release_mode"]["default"] == "standard"
+    assert "capacity_recovery_contract.py" in release_script
+    assert "--desired-count" in release_script
+    assert "expected_current_image_digest" in release_script
+    assert "rollback evidence" in release_script
+    assert "required_reviewers" in release_script
+    assert "jq -e 'any(.protection_rules[]?; .type == \"required_reviewers\")'" in release_text
+    assert release_text.index("Run read-only schema-head preflight") < release_text.index(
+        "register-task-definition"
+    ) < release_text.index("Re-check live baseline immediately before service mutation") < release_text.index(
+        "aws ecs update-service"
+    )
+    assert "set -euo pipefail" in release_text
+
+
+def test_rollback_threat_model_keeps_zero_capacity_rollback_semantics_blocked():
+    threat_model = ROLLBACK_THREAT_MODEL.read_text(encoding="utf-8").casefold()
+
+    assert "old image can run" in threat_model
+    assert "unknown / blocking" in threat_model
+    assert "isolated environment experiment" in threat_model
+    assert "database downgrade is never an automatic option" in threat_model
 
 
 @pytest.mark.parametrize(
