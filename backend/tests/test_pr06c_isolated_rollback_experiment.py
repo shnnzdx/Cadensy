@@ -288,6 +288,12 @@ def test_completed_evidence_rejects_cross_case_identity_splicing(mutate):
         lambda evidence: evidence["test_cases"][1]["stage_evidence"]["failed_task_attempts"][0].__setitem__(
             "last_status_sequence", ["PENDING", "STOPPED"]
         ),
+        lambda evidence: evidence["test_cases"][0]["stage_evidence"]["failed_task_attempts"][0].__setitem__(
+            "last_status_sequence", ["PENDING"]
+        ),
+        lambda evidence: evidence["test_cases"][1]["stage_evidence"]["failed_task_attempts"][0].__setitem__(
+            "last_status_sequence", ["PENDING", "RUNNING"]
+        ),
         lambda evidence: evidence["production_equivalence"]["failure_threshold"].__setitem__("expected_failure_count", 2),
     ],
 )

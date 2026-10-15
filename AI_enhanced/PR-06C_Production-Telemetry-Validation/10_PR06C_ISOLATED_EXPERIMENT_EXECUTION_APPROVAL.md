@@ -4,7 +4,7 @@
 
 **Repository / branch:** `shnnzdx/Cadensy` /
 `codex/pr06c-production-telemetry-validation`  
-**Reviewed code baseline:** `592ba5467aab7251bb9152b2aedd4e30bb0e2c2d`
+**Reviewed code baseline:** `c5fd744333db2791cd94d43f6681234488f836f0`
 
 This is approval material and an offline validation update only. It does not
 create, inspect, modify, or delete an AWS resource; dispatch CD-01; change a
@@ -36,23 +36,55 @@ Any unresolved entry is a blocker. A completed approval records actual values
 in a versioned evidence object; it must not substitute an example, inferred
 production value, or mutable tag.
 
-## 2. Mandatory go / no-go checklist
+## 2. Two-stage approval and go / no-go checklist
 
-All answers must be **YES**, with a versioned evidence reference, before the
-first resource is created.
+Provisioning Approval and Experiment Execution Approval are separate signed
+decisions. **Provisioning Approval authorizes only the bounded resource
+creation in §3 and collection of pre-fault evidence. It never authorizes an
+ECS `UpdateService`, a desired-count increase, a fault-image deployment, or
+either failure scenario.** A new, explicit Experiment Execution Approval is
+required after provisioning and before any fault injection.
+
+### 2.1 Provisioning Approval — before the first resource is created
+
+All answers must be **YES**, with a versioned approval/evidence reference,
+before resource creation. The approval names the isolated account, run and
+change IDs, expiry, owners, USD 25 authorization cap, and the only permitted
+resource manifest.
 
 | Gate | Required evidence | No-go condition |
 | --- | --- | --- |
 | Isolation | Account, `us-east-1`, SCP/boundary, no production routes/peering/Secrets | Any production account, VPC, database, Secret, user data, or provider path. |
-| Equivalence | Redacted production snapshot hash and independent comparison | Controller not `ECS`, circuit breaker change, or changed deployment/ALB health setting. |
+| Equivalence plan | Redacted production snapshot hash and independent comparison plan | Controller not `ECS`, circuit breaker change, or changed deployment/ALB health setting. |
 | Resources | Filled manifest in §3 | Resource outside manifest, public ALB/database, NAT/Internet path. |
 | Cost | §5 official snapshot and deterministic calculation | Planned amount >USD 5.00, cap >USD 25, missing continuing meter. |
 | IAM | §4 placeholders instantiated and validated by Access Analyzer/Policy Simulator | Wildcard `iam:PassRole`, `Action:*`, FullAccess, non-isolated ARN. |
-| Images | §7 immutable digest/scan/fault proof | Provider credential, tag-only image URI, or candidate/legacy overlap. |
-| Database | §8 isolated initialization and read-only approval | Production source, schema write by legacy task, or unknown command hash. |
-| Watchdog | §6 independent invocation identity and paging route | Cleanup depends on operator session or no escalation target. |
-| Evidence | Versioned bucket/prefix and reader access | Missing task/deployment event coverage or no redaction plan. |
-| People/time | One approved 180-minute interval | Automatic retry, second update, or absent owner coverage. |
+| Fault-image plan | §7 build specifications and no-provider design review | Provider credential, tag-only deployment plan, or unapproved build input. |
+| Database plan | §8 isolated initialization and read-only command review | Production source, schema write by legacy task, or unknown command hash. |
+| Watchdog | §6 independent invocation identity, finalizer identity, and paging route | Cleanup depends on operator session or no escalation target. |
+| Evidence | Versioned bucket/prefix, retention, redaction, and reader design | Missing task/deployment event coverage or no redaction plan. |
+| People/time | One proposed 180-minute interval and owner coverage | Automatic retry, second update, or absent owner coverage. |
+
+### 2.2 Experiment Execution Approval — after provisioning, before fault injection
+
+This fresh approval binds the exact, provisioned resources to the approved run.
+It is not implied by the earlier signature and expires at the approved run end.
+No fault image may be selected and no ECS service may be raised from zero until
+every row below is **YES** with a versioned, post-provisioning evidence
+reference.
+
+| Gate | Required post-provisioning evidence | No-go condition |
+| --- | --- | --- |
+| Resource identity | Tagged inventory with actual account/Region/ARNs; isolated VPC, private ALB and DB, service/task-definition baseline | Any unapproved resource, ARN/account/Region mismatch, public path, or baseline drift. |
+| Release equivalence | Frozen controller, circuit-breaker, deployment/network and ALB-health snapshot compared to the approved snapshot | Any material drift or a snapshot that cannot be independently reviewed. |
+| Exact images | ECR immutable legacy/Stage 1/Stage 2 digests, basic scans, build-input hashes, and task-definition digest bindings | Tag-only URI, digest mismatch, overlapping legacy/candidate digest, or provider material. |
+| Database gate | Isolated schema revision, restricted legacy principal, read-only transaction proof, approved command hash and one-off result | Any write, unknown command, schema mismatch, or missing database-owner evidence. |
+| Evidence / cleanup readiness | Collector coverage, EventBridge schedule, watchdog/finalizer role tests, versioned-bucket write/read proof, escalation recipient | Missing event coverage, unverified audit write, or cleanup identity unavailable. |
+| Cost / people / window | Dated price artifact, current tagged inventory, named on-call owners, exact start/stop/expiry UTC | Forecast exceeds the signed bound, a continuing meter is unpriced, or coverage is absent. |
+
+The experiment reviewer, database owner, cost owner, and security owner must
+sign both stages. The GitHub Main Environment reviewer remains mandatory for a
+future production workflow only; neither approval authorizes production.
 
 ## 3. Resource creation manifest
 
@@ -70,7 +102,7 @@ to a versioned manifest before dependent creation.
 | RDS PostgreSQL | 1 Single-AZ `db.t4g.micro`, 20 GiB gp3 max, 1 DB subnet group | Dedicated synthetic-only DB; delete without final snapshot unless separately approved | Instance, storage, backup/snapshot and transfer can persist. No replica, Multi-AZ, or production snapshot. |
 | ECR | 1 immutable repository, 3 images maximum, each ≤500 MiB | Delete images/repository during cleanup | Basic scan only; enhanced scanning needs separate cost approval. |
 | Logs | 1 log group, approved retention, 100 MiB operational cap | Export/redact evidence before delete | Ingestion/storage/query costs; prohibit Secret, token, user, provider data. |
-| EventBridge / Lambda | 1 rule and 1 audit-collector Lambda, invoked in cleanup mode | Collector assumes a distinct watchdog role to clean | Event/Lambda charges apply; cleanup does not use human session credentials. |
+| EventBridge / Lambda | 1 rule and 1 audit-collector Lambda, plus a non-compute control-plane finalizer role | Collector assumes a distinct watchdog role; finalizer closes its control plane after audit | Event/Lambda charges apply; cleanup does not use human session credentials. IAM roles do not add a continuing compute meter. |
 | S3 / KMS | 1 versioned evidence bucket/prefix and 1 approved key | Evidence retained only for approved period | Public access block required. KMS key/API and S3 version charges are priced. |
 | IAM / Budget / notification | Roles in §4, 1 USD budget, 1 approved alert route | Path `/pr06c1c/<RUN_ID>/` | Budget detects spend, not a kill switch. Alert recipient remains `<UNKNOWN>` until approval. |
 
@@ -91,7 +123,8 @@ requires the same existing resource tags wherever AWS supports that condition.
 | `PR06CExperimentProvisioner` | EC2 VPC/subnet/route/SG/endpoint create; ECS cluster/task-definition/service create; ELBv2 ALB/target/listener create; RDS DB/subnet-group create; ECR repo create; Logs group/retention; EventBridge rule/target; Lambda function/permission; S3 bucket/versioning/encryption/public-block/policy; IAM role/policy creation | Only `arn:aws:*:us-east-1:<EXPERIMENT_ACCOUNT_ID>:*` and global IAM roles under `/pr06c1c/<RUN_ID>/`; approved name prefix and request tags required. Read-only Describe/Get remains same account/Region. |
 | `PR06CExperimentOperator` | ECS `UpdateService/RunTask/StopTask/DescribeServices/ListTasks/DescribeTasks/ListServiceDeployments/DescribeServiceDeployments`; ELBv2 `DescribeTargetHealth`; RDS `DescribeDBInstances`; ECR `DescribeImages/BatchGetImage`; Logs `FilterLogEvents`; S3 evidence-prefix read/write | No infrastructure create/delete. Exactly one combined task-definition + desired-count update per case is evidenced from CloudTrail/service records. |
 | `PR06CAuditCollectorRuntime` | ECS/ELBv2 read-only collection; logs stream/write; S3 `PutObject/AbortMultipartUpload` only under `evidence/<RUN_ID>/`; `sts:AssumeRole` only to watchdog | Lambda function is the only trust principal. Standard collector execution has no delete action. |
-| `PR06CCleanupWatchdog` | Tagged inventory and only delete/zero actions for manifest resources: ECS service/task/TD, ELBv2 listener/ALB/TG, RDS DB/subnet group, EC2 endpoints/SG/subnet/route/VPC, ECR repo, log group, EventBridge target/rule, Lambda permission/function, S3 objects/versions under run prefix | Trusted only by collector runtime role; account/Region/name/run-tag match required. Cannot delete retained evidence bucket/key. |
+| `PR06CCleanupWatchdog` | Tagged inventory and only delete/zero actions for runtime manifest resources: ECS service/task/TD, ELBv2 listener/ALB/TG, RDS DB/subnet group, EC2 endpoints/SG/subnet/route/VPC, ECR repo, log group, temporary Secret, S3 objects/versions under run prefix | Trusted only by collector runtime role; account/Region/name/run-tag match required. Cannot delete retained evidence bucket/key or its own Lambda/EventBridge control plane. |
+| `PR06CControlPlaneFinalizer` | Read tagged inventory; S3 versioned audit write; EventBridge target/rule delete; Lambda permission/function delete | Separate pre-provisioned identity, not the operator or Lambda runtime. Account/Region/name/run-tag match required; it retains evidence bucket/key and records its own result after Lambda deletion. |
 | `PR06CEcsExecution` | `ecr:GetAuthorizationToken` (`Resource:"*"` required registry action); ECR image pull only sandbox repository; Logs stream/write only run group; isolated Secret read and KMS decrypt only one DB secret/key | `ecs-tasks.amazonaws.com` trust; never production ECR, Secret, or KMS. |
 | `PR06CEcsTask` | No AWS actions | Empty application role; no provider credentials, Secret read, IAM, ECS, or DB administration. |
 | `PR06CEvidenceReader` | Evidence-bucket list and object/version read; approved key decrypt only | `evidence/<RUN_ID>/` only; no overwrite/delete, unmask, or Secret access. |
@@ -157,12 +190,33 @@ Secret or credential.
 2. prevent further experiment updates; set only the tagged ECS service to zero;
    wait for no running/pending tasks and collect evidence;
 3. export/redact evidence, then delete service, listener/ALB/TG, endpoints,
-   temporary Secret, RDS DB/subnet group, ECR repository, log group, event
-   target/rule, Lambda permission/function, security groups, subnets, routes,
-   and VPC in dependency order;
-4. write a versioned post-cleanup inventory proving no tagged runtime resource
+   temporary Secret, RDS DB/subnet group, ECR repository, log group, security
+   groups, subnets, routes, and VPC in dependency order;
+4. re-list the runtime tags and write/verify a versioned
+   `cleanup-runtime-complete` inventory proving no tagged **runtime** resource
    remains; and
-5. retain evidence bucket/key only for approved retention.
+5. retain the evidence bucket/key and the Lambda/EventBridge control plane for
+   the separate finalization step below.
+
+The watchdog must not delete the Lambda, its invoke permission, or its
+EventBridge target/rule while it is the executing audit writer. That would make
+the final cleanup record dependent on a resource it has already removed.
+Instead, after step 4 a separately provisioned `PR06CControlPlaneFinalizer`
+performs this ordered closeout:
+
+1. read the runtime-complete inventory and write/verify a versioned
+   `control-plane-finalization-started` record;
+2. remove the EventBridge target and rule, then the Lambda invoke permission,
+   so no new watchdog invocation can begin;
+3. delete the audit-collector Lambda last; and
+4. as the independent finalizer remains active, write/verify a versioned
+   `control-plane-finalization-completed` (or `CLEANUP_FAILED`) record with the
+   post-delete tagged inventory and every deletion result.
+
+The finalizer role and retained evidence bucket/key are not deleted by this
+flow; they are closed only after approved evidence-retention expiry. Thus no
+billable runtime remains before the audit writer is removed, while the final
+audit is still written by an identity that survives the Lambda deletion.
 
 `NotFound` is an idempotent delete result but is recorded. Access denial,
 timeout, leftover tag, missing audit write, or schedule failure pages the named
@@ -181,16 +235,18 @@ task-definition image URI.
 | Image | Build specification | Required observed evidence | Approval condition |
 | --- | --- | --- | --- |
 | Legacy | Exact sandbox copy of `tripsync-backend:19` by immutable digest; no production Secret/provider config | Source revision and forward-schema one-off only; never `RUNNING` during rollback windows | Digest equals `old_runtime_forward_schema.legacy_runtime_image_digest`. |
-| Stage 1 | Same platform/base; essential container exits during startup before port bind; `MOCK_AI=1`; no provider key | Every actual failed task has unique ARN, no `RUNNING`, stopped/failure reason, status sequence and versioned attempt artifact | Exit-on-start is an injection design, not proof. Any `RUNNING` makes result `INCONCLUSIVE`. |
-| Stage 2 | Same platform/base; binds exact snapshot port but fails unchanged snapshot ALB health path; `MOCK_AI=1`; no provider key | Every actual failed task includes `RUNNING`, target health `unhealthy`, reason, status sequence and versioned attempt artifact | No altered health threshold, grace period, port, controller or circuit breaker. |
+| Stage 1 | Same platform/base; essential container exits during startup before port bind; `MOCK_AI=1`; no provider key | Every actual failed task has unique ARN, no `RUNNING`, and a status sequence whose final state is `STOPPED`, with stopped/failure reason and versioned attempt artifact | Exit-on-start is an injection design, not proof. Any `RUNNING` or non-`STOPPED` terminal state makes result `INCONCLUSIVE`. |
+| Stage 2 | Same platform/base; binds exact snapshot port but fails unchanged snapshot ALB health path; `MOCK_AI=1`; no provider key | Every actual failed task includes `RUNNING` and a status sequence whose final state is `STOPPED`, target health `unhealthy`, reason, and versioned attempt artifact | No altered health threshold, grace period, port, controller or circuit breaker. A non-`STOPPED` terminal state is `INCONCLUSIVE`. |
 
 The approved snapshot supplies the expected failure threshold. The offline
 contract now rejects a case unless `actual_failed_task_count` is an integer
 exactly equal to `expected_failure_count`, and `failed_task_attempts` has that
 same length. Each attempt must contain sequential attempt number, unique ECS
 Task ARN, task-definition ARN, candidate image digest, status transition,
-failure reason, timestamp and versioned audit reference. Expected count alone,
-missing attempts, duplicate task ARNs or unrelated task identity cannot pass.
+failure reason, timestamp and versioned audit reference. Every attempt must
+finally reach `STOPPED`; Stage 1 must never include `RUNNING`, while Stage 2
+must include `RUNNING` before `STOPPED`. Expected count alone, missing attempts,
+duplicate task ARNs, unrelated task identity, or an unfinished task cannot pass.
 
 ## 8. Isolated PostgreSQL initialization and forward-schema gate
 
@@ -238,10 +294,12 @@ health response alone is insufficient.
 
 ## 9. Final approval record and stop conditions
 
-The signed approval records all actual §1 values and authorizes exactly one §3
-manifest run. Required approval records: experiment reviewer, database owner,
-cost owner, security owner, and—only for any future production workflow—the
-existing GitHub Main Environment reviewer path. This experiment does not
+Each approval record names the phase, exact run/change ID, approvers, evidence
+version IDs and expiry. The Provisioning Approval authorizes exactly one §3
+manifest creation. The later Experiment Execution Approval authorizes at most
+the two specified fault scenarios in that same manifest run. A Provisioning
+Approval, a completed provisioning inventory, or a cleanup approval is never a
+substitute for Experiment Execution Approval. This experiment does not
 authorize a production release.
 
 Stop and invoke cleanup for any production ARN/account/Region, public exposure,

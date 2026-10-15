@@ -302,6 +302,8 @@ def _validate_stage_evidence(
     candidate_task_definition = evidence.get("candidate_task_definition_arn")
     if any(item["image_digest"] != candidate_image or item["task_definition_arn"] != candidate_task_definition for item in observed):
         raise IsolatedExperimentContractError("candidate task transition does not match the bound candidate identity")
+    if any(item["last_status_sequence"][-1] != "STOPPED" for item in observed):
+        raise IsolatedExperimentContractError("every observed failed task must end in STOPPED")
     if expected_scenario == "startup_failure":
         if evidence.get("circuit_breaker_stage") != "STAGE_1":
             raise IsolatedExperimentContractError("startup failure must prove circuit-breaker Stage 1")
