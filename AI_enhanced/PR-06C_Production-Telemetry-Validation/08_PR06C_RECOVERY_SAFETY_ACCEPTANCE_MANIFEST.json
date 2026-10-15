@@ -1,0 +1,20 @@
+{
+  "schema_version": "pr06c-recovery-safety/v1",
+  "status": "PENDING",
+  "isolated_experiment": {
+    "status": "PENDING",
+    "environment": null,
+    "evidence_ref": null,
+    "evidence_commit_sha": null,
+    "rollback_outcome_observed": false
+  },
+  "old_runtime_forward_schema": {
+    "status": "PENDING",
+    "evidence_ref": null
+  },
+  "approval": {
+    "status": "PENDING",
+    "evidence_ref": null
+  },
+  "approved_service_baseline": null
+}

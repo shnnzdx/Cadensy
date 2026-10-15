@@ -22,7 +22,7 @@ Executed locally with test-only scheduler/mock settings:
 
 ```text
 backend\\.venv\\Scripts\\python.exe -m pytest backend\\tests\\test_cd01_delivery_safety.py -q
-12 passed in 0.12s
+21 passed in 0.15s
 ```
 
 `python -m py_compile` also completed for both CD-01 Python helpers.
@@ -38,6 +38,11 @@ backend\\.venv\\Scripts\\python.exe -m pytest backend\\tests\\test_cd01_delivery
 | Offline-only seam | AST check rejects AWS/network/process client imports. |
 | Workflow approval and ordering | static test requires protected Main environment, explicit recovery inputs, schema preflight before registration, final baseline recheck before `UpdateService`, and explicit `--desired-count`. |
 | Existing CD-01 safeguards | digest pinning, circuit breaker, ALB health, API health, and no implicit migration remain asserted. |
+| Recovery acceptance gate | the committed `PENDING` Manifest, incomplete evidence, pending experiment, unknown schema compatibility, and pending approval all reject zero recovery. A Threat Model-only commit cannot substitute. |
+| Approved recovery schema | a synthetic offline fixture proves that only complete accepted experiment, compatibility, approval, and snapshot evidence can pass the parser. It is not a claim that such evidence exists. |
+| Baseline configuration drift | task-definition payload ARN, `awsvpc` network configuration, ALB target-group binding, deployment controller, and launch type drift are rejected for zero recovery. |
+| Actual runtime identity | old task definition, mixed/incorrect image digest, incorrect running-task count, incomplete primary deployment, and unhealthy targets are rejected from offline `DescribeTasks`-shape evidence. |
+| Standard mode compatibility | a non-zero standard baseline remains valid without a recovery Manifest. |
 
 ## What this does not prove
 

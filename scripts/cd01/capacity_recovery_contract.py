@@ -28,10 +28,78 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _TASK_DEFINITION_ARN = re.compile(
     r"^arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:[1-9][0-9]*$"
 )
+_MANIFEST_SCHEMA_VERSION = "pr06c-recovery-safety/v1"
 
 
 class CapacityRecoveryContractError(ValueError):
     """Raised when a recovery release cannot prove its offline preconditions."""
+
+
+def _require_mapping(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CapacityRecoveryContractError(f"{name} must be an object")
+    return value
+
+
+def _require_evidence_ref(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.startswith("https://github.com/shnnzdx/Cadensy/"):
+        raise CapacityRecoveryContractError(f"{name} must be a Cadensy GitHub evidence reference")
+    return value
+
+
+def _require_nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise CapacityRecoveryContractError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _normalized_awsvpc_configuration(value: object, name: str) -> dict[str, Any]:
+    configuration = _require_mapping(value, name)
+    awsvpc = _require_mapping(configuration.get("awsvpcConfiguration"), f"{name}.awsvpcConfiguration")
+    assign_public_ip = awsvpc.get("assignPublicIp")
+    if assign_public_ip not in {"ENABLED", "DISABLED"}:
+        raise CapacityRecoveryContractError(f"{name}.assignPublicIp is invalid")
+
+    normalized: dict[str, Any] = {"assignPublicIp": assign_public_ip}
+    for field in ("securityGroups", "subnets"):
+        values = awsvpc.get(field)
+        if not isinstance(values, list) or not values or any(not isinstance(item, str) or not item for item in values):
+            raise CapacityRecoveryContractError(f"{name}.{field} must be a non-empty string list")
+        if len(set(values)) != len(values):
+            raise CapacityRecoveryContractError(f"{name}.{field} contains duplicates")
+        normalized[field] = sorted(values)
+    return {"awsvpcConfiguration": normalized}
+
+
+def _normalized_load_balancers(value: object, name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise CapacityRecoveryContractError(f"{name} must contain at least one target group")
+    normalized: list[dict[str, Any]] = []
+    for load_balancer in value:
+        item = _require_mapping(load_balancer, name)
+        container_name = item.get("containerName")
+        target_group_arn = item.get("targetGroupArn")
+        container_port = item.get("containerPort")
+        if (
+            not isinstance(container_name, str)
+            or not container_name
+            or not isinstance(target_group_arn, str)
+            or not target_group_arn.startswith("arn:aws:elasticloadbalancing:")
+            or isinstance(container_port, bool)
+            or not isinstance(container_port, int)
+            or not 1 <= container_port <= 65535
+        ):
+            raise CapacityRecoveryContractError(f"{name} contains an invalid target-group binding")
+        normalized.append(
+            {
+                "containerName": container_name,
+                "containerPort": container_port,
+                "targetGroupArn": target_group_arn,
+            }
+        )
+    if len({item["targetGroupArn"] for item in normalized}) != len(normalized):
+        raise CapacityRecoveryContractError(f"{name} contains duplicate target groups")
+    return sorted(normalized, key=lambda item: item["targetGroupArn"])
 
 
 @dataclass(frozen=True)
@@ -116,10 +184,107 @@ def validate_recovery_inputs(inputs: dict[str, str]) -> RecoveryRequest:
     )
 
 
+def validate_recovery_safety_manifest(
+    manifest_payload: dict[str, Any], rollback_evidence_sha: str
+) -> dict[str, Any]:
+    """Fail closed unless reviewed recovery evidence has positive, complete state."""
+
+    manifest = _require_mapping(manifest_payload, "recovery safety manifest")
+    if manifest.get("schema_version") != _MANIFEST_SCHEMA_VERSION:
+        raise CapacityRecoveryContractError("recovery safety manifest schema version is not approved")
+    if manifest.get("status") != "ACCEPTED":
+        raise CapacityRecoveryContractError("recovery safety manifest is not accepted")
+
+    experiment = _require_mapping(manifest.get("isolated_experiment"), "isolated_experiment")
+    if experiment.get("status") != "PASSED":
+        raise CapacityRecoveryContractError("isolated experiment has not passed")
+    if experiment.get("environment") != "isolated-non-production":
+        raise CapacityRecoveryContractError("isolated experiment environment is not approved")
+    _require_evidence_ref(experiment.get("evidence_ref"), "isolated experiment evidence")
+    if experiment.get("evidence_commit_sha") != rollback_evidence_sha:
+        raise CapacityRecoveryContractError("isolated experiment evidence is not bound to rollback_evidence_sha")
+    if experiment.get("rollback_outcome_observed") is not True:
+        raise CapacityRecoveryContractError("isolated experiment did not record rollback outcome")
+
+    compatibility = _require_mapping(
+        manifest.get("old_runtime_forward_schema"), "old_runtime_forward_schema"
+    )
+    if compatibility.get("status") != "COMPATIBLE":
+        raise CapacityRecoveryContractError("old runtime forward-schema compatibility is not accepted")
+    _require_evidence_ref(compatibility.get("evidence_ref"), "old runtime schema evidence")
+
+    approval = _require_mapping(manifest.get("approval"), "approval")
+    if approval.get("status") != "APPROVED":
+        raise CapacityRecoveryContractError("recovery safety approval is not approved")
+    _require_evidence_ref(approval.get("evidence_ref"), "recovery safety approval evidence")
+
+    baseline = _require_mapping(manifest.get("approved_service_baseline"), "approved_service_baseline")
+    task_definition_arn = baseline.get("task_definition_arn")
+    if not isinstance(task_definition_arn, str) or not _TASK_DEFINITION_ARN.fullmatch(task_definition_arn):
+        raise CapacityRecoveryContractError("approved service baseline task definition is invalid")
+    _normalized_awsvpc_configuration(
+        baseline.get("network_configuration"), "approved_service_baseline.network_configuration"
+    )
+    _normalized_load_balancers(baseline.get("load_balancers"), "approved_service_baseline.load_balancers")
+    if baseline.get("deployment_controller_type") != "ECS":
+        raise CapacityRecoveryContractError("approved service baseline deployment controller is not ECS")
+    if baseline.get("launch_type") != "FARGATE":
+        raise CapacityRecoveryContractError("approved service baseline launch type is not FARGATE")
+    if baseline.get("scheduling_strategy") != "REPLICA":
+        raise CapacityRecoveryContractError("approved service baseline scheduling strategy is not REPLICA")
+    _require_nonnegative_int(
+        baseline.get("health_check_grace_period_seconds"),
+        "approved_service_baseline.health_check_grace_period_seconds",
+    )
+    return manifest
+
+
+def _validate_service_safety_shape(service: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    network_configuration = _normalized_awsvpc_configuration(
+        service.get("networkConfiguration"), "service.networkConfiguration"
+    )
+    load_balancers = _normalized_load_balancers(service.get("loadBalancers"), "service.loadBalancers")
+    deployment_controller = _require_mapping(service.get("deploymentController"), "service.deploymentController")
+    if deployment_controller.get("type") != "ECS":
+        raise CapacityRecoveryContractError("service deployment controller must be ECS")
+    if service.get("launchType") != "FARGATE":
+        raise CapacityRecoveryContractError("service launch type must be FARGATE")
+    if service.get("schedulingStrategy") != "REPLICA":
+        raise CapacityRecoveryContractError("service scheduling strategy must be REPLICA")
+    _require_nonnegative_int(service.get("healthCheckGracePeriodSeconds"), "service health check grace period")
+    return network_configuration, load_balancers
+
+
+def _validate_approved_service_baseline(
+    service: dict[str, Any], manifest: dict[str, Any], request: RecoveryRequest
+) -> None:
+    baseline = _require_mapping(manifest.get("approved_service_baseline"), "approved_service_baseline")
+    if baseline.get("task_definition_arn") != request.expected_current_task_definition:
+        raise CapacityRecoveryContractError("approved service baseline task definition does not match request")
+    network_configuration, load_balancers = _validate_service_safety_shape(service)
+    if network_configuration != _normalized_awsvpc_configuration(
+        baseline.get("network_configuration"), "approved_service_baseline.network_configuration"
+    ):
+        raise CapacityRecoveryContractError("service network configuration drifted from approved baseline")
+    if load_balancers != _normalized_load_balancers(
+        baseline.get("load_balancers"), "approved_service_baseline.load_balancers"
+    ):
+        raise CapacityRecoveryContractError("service load-balancer configuration drifted from approved baseline")
+    if service["deploymentController"]["type"] != baseline.get("deployment_controller_type"):
+        raise CapacityRecoveryContractError("service deployment controller drifted from approved baseline")
+    if service.get("launchType") != baseline.get("launch_type"):
+        raise CapacityRecoveryContractError("service launch type drifted from approved baseline")
+    if service.get("schedulingStrategy") != baseline.get("scheduling_strategy"):
+        raise CapacityRecoveryContractError("service scheduling strategy drifted from approved baseline")
+    if service.get("healthCheckGracePeriodSeconds") != baseline.get("health_check_grace_period_seconds"):
+        raise CapacityRecoveryContractError("service health-check grace period drifted from approved baseline")
+
+
 def validate_live_baseline(
     service_payload: dict[str, Any],
     task_definition_payload: dict[str, Any],
     request: RecoveryRequest,
+    recovery_safety_manifest: dict[str, Any] | None = None,
 ) -> None:
     """Fail closed if a read-only ECS baseline differs from approved inputs."""
 
@@ -129,6 +294,7 @@ def validate_live_baseline(
     service = services[0]
     if service.get("status") != "ACTIVE":
         raise CapacityRecoveryContractError("service must be active")
+    _validate_service_safety_shape(service)
     if service.get("taskDefinition") != request.expected_current_task_definition:
         raise CapacityRecoveryContractError("current task definition drifted")
     for name in ("desiredCount", "runningCount", "pendingCount"):
@@ -139,6 +305,9 @@ def validate_live_baseline(
     if service["pendingCount"] != 0:
         raise CapacityRecoveryContractError("pending tasks prevent promotion")
     if request.release_mode == "zero_capacity_recovery":
+        if recovery_safety_manifest is None:
+            raise CapacityRecoveryContractError("zero-capacity recovery requires an accepted safety manifest")
+        _validate_approved_service_baseline(service, recovery_safety_manifest, request)
         if service["runningCount"] != 0:
             raise CapacityRecoveryContractError("zero-capacity baseline has running tasks")
     elif service["runningCount"] != request.expected_current_desired_count:
@@ -170,6 +339,8 @@ def validate_live_baseline(
     task_definition = task_definition_payload.get("taskDefinition", task_definition_payload)
     if not isinstance(task_definition, dict):
         raise CapacityRecoveryContractError("task definition payload is malformed")
+    if task_definition.get("taskDefinitionArn") != request.expected_current_task_definition:
+        raise CapacityRecoveryContractError("task definition payload ARN drifted")
     containers = task_definition.get("containerDefinitions")
     matches = [
         container for container in containers if isinstance(container, dict) and container.get("name") == CONTAINER_NAME
@@ -205,6 +376,93 @@ def validate_live_baseline(
         raise CapacityRecoveryContractError("database secret reference is missing")
 
 
+def validate_deployed_runtime(
+    service_payload: dict[str, Any],
+    running_tasks_payload: dict[str, Any],
+    target_health_payloads: list[dict[str, Any]],
+    expected_task_definition_arn: str,
+    expected_runtime_image_digest: str,
+    expected_running_count: int,
+) -> None:
+    """Verify the actual deployed ECS task identity from read-only API evidence."""
+
+    if not _TASK_DEFINITION_ARN.fullmatch(expected_task_definition_arn):
+        raise CapacityRecoveryContractError("expected deployed task definition is invalid")
+    if not _SHA256.fullmatch(expected_runtime_image_digest):
+        raise CapacityRecoveryContractError("expected deployed runtime digest is invalid")
+    _require_nonnegative_int(expected_running_count, "expected deployed running count")
+    if expected_running_count < 1:
+        raise CapacityRecoveryContractError("expected deployed running count must be non-zero")
+
+    services = service_payload.get("services")
+    if not isinstance(services, list) or len(services) != 1:
+        raise CapacityRecoveryContractError("expected exactly one deployed service")
+    service = services[0]
+    if not isinstance(service, dict) or service.get("status") != "ACTIVE":
+        raise CapacityRecoveryContractError("deployed service is not active")
+    _validate_service_safety_shape(service)
+    if service.get("taskDefinition") != expected_task_definition_arn:
+        raise CapacityRecoveryContractError("deployed service task definition does not match")
+    for name in ("desiredCount", "runningCount", "pendingCount"):
+        _require_nonnegative_int(service.get(name), f"deployed service {name}")
+    if service["desiredCount"] != expected_running_count or service["runningCount"] != expected_running_count:
+        raise CapacityRecoveryContractError("deployed service count does not match")
+    if service["pendingCount"] != 0:
+        raise CapacityRecoveryContractError("deployed service still has pending tasks")
+
+    deployments = service.get("deployments")
+    if not isinstance(deployments, list):
+        raise CapacityRecoveryContractError("deployed service deployments are malformed")
+    primary = [deployment for deployment in deployments if isinstance(deployment, dict) and deployment.get("status") == "PRIMARY"]
+    if len(primary) != 1:
+        raise CapacityRecoveryContractError("deployed service must have exactly one primary deployment")
+    deployment = primary[0]
+    if (
+        deployment.get("rolloutState") != "COMPLETED"
+        or deployment.get("taskDefinition") != expected_task_definition_arn
+        or deployment.get("desiredCount") != expected_running_count
+        or deployment.get("runningCount") != expected_running_count
+        or deployment.get("pendingCount") != 0
+    ):
+        raise CapacityRecoveryContractError("primary deployment does not prove the expected completed state")
+
+    if running_tasks_payload.get("failures") not in (None, []):
+        raise CapacityRecoveryContractError("running task lookup reported failures")
+    tasks = running_tasks_payload.get("tasks")
+    if not isinstance(tasks, list) or len(tasks) != expected_running_count:
+        raise CapacityRecoveryContractError("running task count does not match deployed service")
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("lastStatus") != "RUNNING":
+            raise CapacityRecoveryContractError("reported task is not running")
+        if task.get("taskDefinitionArn") != expected_task_definition_arn:
+            raise CapacityRecoveryContractError("running task uses an unexpected task definition")
+        containers = task.get("containers")
+        matches = [
+            container
+            for container in containers
+            if isinstance(container, dict) and container.get("name") == CONTAINER_NAME
+        ] if isinstance(containers, list) else []
+        if len(matches) != 1:
+            raise CapacityRecoveryContractError("running task has an invalid application container set")
+        container = matches[0]
+        if container.get("lastStatus") != "RUNNING":
+            raise CapacityRecoveryContractError("application container is not running")
+        if container.get("imageDigest") != expected_runtime_image_digest:
+            raise CapacityRecoveryContractError("running application image digest does not match")
+
+    expected_target_groups = _normalized_load_balancers(service.get("loadBalancers"), "service.loadBalancers")
+    if len(target_health_payloads) != len(expected_target_groups):
+        raise CapacityRecoveryContractError("target-health evidence does not cover every configured target group")
+    for payload in target_health_payloads:
+        descriptions = payload.get("TargetHealthDescriptions")
+        if not isinstance(descriptions, list) or len(descriptions) < expected_running_count:
+            raise CapacityRecoveryContractError("target group does not have enough registered targets")
+        for description in descriptions:
+            target_health = description.get("TargetHealth") if isinstance(description, dict) else None
+            if not isinstance(target_health, dict) or target_health.get("State") != "healthy":
+                raise CapacityRecoveryContractError("target group has a non-healthy target")
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -225,8 +483,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-current-desired-count", required=True)
     parser.add_argument("--recovery-desired-count", default="")
     parser.add_argument("--rollback-evidence-sha", default="")
+    parser.add_argument("--recovery-safety-manifest-json", type=Path)
     parser.add_argument("--service-json", type=Path)
     parser.add_argument("--task-definition-json", type=Path)
+    parser.add_argument("--verify-deployed-runtime", action="store_true")
+    parser.add_argument("--deployed-service-json", type=Path)
+    parser.add_argument("--running-tasks-json", type=Path)
+    parser.add_argument("--target-health-json", type=Path, action="append", default=[])
+    parser.add_argument("--expected-deployed-task-definition")
+    parser.add_argument("--expected-deployed-runtime-image-digest")
+    parser.add_argument("--expected-deployed-running-count")
     args = parser.parse_args(argv)
 
     try:
@@ -240,14 +506,48 @@ def main(argv: list[str] | None = None) -> int:
                 "rollback_evidence_sha": args.rollback_evidence_sha,
             }
         )
+        recovery_safety_manifest = None
+        if request.release_mode == "zero_capacity_recovery":
+            if args.recovery_safety_manifest_json is None:
+                raise CapacityRecoveryContractError("zero-capacity recovery requires recovery-safety-manifest-json")
+            recovery_safety_manifest = validate_recovery_safety_manifest(
+                _read_json(args.recovery_safety_manifest_json), request.rollback_evidence_sha or ""
+            )
+        elif args.recovery_safety_manifest_json is not None:
+            raise CapacityRecoveryContractError("standard release cannot carry a recovery safety manifest")
         if bool(args.service_json) != bool(args.task_definition_json):
             raise CapacityRecoveryContractError(
                 "service-json and task-definition-json must be supplied together"
             )
         if args.service_json and args.task_definition_json:
             validate_live_baseline(
-                _read_json(args.service_json), _read_json(args.task_definition_json), request
+                _read_json(args.service_json),
+                _read_json(args.task_definition_json),
+                request,
+                recovery_safety_manifest,
             )
+        deployed_arguments = (
+            args.deployed_service_json,
+            args.running_tasks_json,
+            args.expected_deployed_task_definition,
+            args.expected_deployed_runtime_image_digest,
+            args.expected_deployed_running_count,
+        )
+        if args.verify_deployed_runtime:
+            if any(argument is None for argument in deployed_arguments) or not args.target_health_json:
+                raise CapacityRecoveryContractError("deployed runtime verification evidence is incomplete")
+            if not isinstance(args.expected_deployed_running_count, str) or not args.expected_deployed_running_count.isdecimal():
+                raise CapacityRecoveryContractError("expected deployed running count must be a non-negative integer")
+            validate_deployed_runtime(
+                _read_json(args.deployed_service_json),
+                _read_json(args.running_tasks_json),
+                [_read_json(path) for path in args.target_health_json],
+                args.expected_deployed_task_definition,
+                args.expected_deployed_runtime_image_digest,
+                int(args.expected_deployed_running_count),
+            )
+        elif any(argument is not None for argument in deployed_arguments) or args.target_health_json:
+            raise CapacityRecoveryContractError("deployed runtime evidence requires verify-deployed-runtime")
     except CapacityRecoveryContractError as error:
         parser.error(str(error))
 

@@ -17,11 +17,13 @@
 | Intended migration digest | `sha256:7bf23c5afd772b85228fe0c3a592eeef8469095a7e4e78ccdab9f394bb30f4af` |
 | Source evidence | `b589fc7786c097d4bfe0eafe430afd90b00ca2b7` and its recorded CI/build evidence |
 | Rollback evidence SHA | Must be the exact reviewed commit on `main` containing `05_PR06C_ROLLBACK_THREAT_MODEL.md`; it cannot be invented or pre-filled before review. |
+| Recovery Safety Acceptance Manifest | `08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json` is currently `PENDING`; zero-capacity recovery is therefore unavailable. |
 
 ## Required approvals, in order
 
 1. An independent reviewer must approve this design, threat model, contract,
-   tests, and the isolated-environment rollback experiment.
+   tests, and the isolated-environment rollback experiment. The reviewer must
+   approve a completed Acceptance Manifest rather than only the Threat Model.
 2. The database owner must attest that both the intended runtime and any
    possible old `:19` runtime are compatible with the current forward schema;
    no automatic downgrade is allowed.
@@ -36,6 +38,12 @@
    manually dispatched CD-01 run using the exact reviewed inputs above.
 6. Any synthetic telemetry or CloudWatch validation has separate explicit
    authorization; it is not granted by capacity recovery approval.
+
+No experiment is authorized by this plan. Before one is proposed, its separate
+plan must state non-production account/environment, least-privilege roles,
+fixed cost ceiling, teardown/stop conditions, no production database/secrets,
+and no paid provider calls. Only an approved experiment may replace the
+Manifest's PENDING fields with real evidence.
 
 ## Change boundaries and stop conditions
 

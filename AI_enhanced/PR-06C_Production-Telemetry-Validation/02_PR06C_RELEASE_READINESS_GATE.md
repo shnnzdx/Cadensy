@@ -70,6 +70,7 @@ and future approval plan are recorded in:
 - [05 — Rollback Threat Model](05_PR06C_ROLLBACK_THREAT_MODEL.md)
 - [06 — Offline Proof and Tests](06_PR06C_OFFLINE_PROOF_AND_TESTS.md)
 - [07 — Production Change Approval Plan](07_PR06C_PRODUCTION_CHANGE_APPROVAL_PLAN.md)
+- [08 — Recovery Safety Acceptance Manifest](08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json)
 
 They add a reviewed, fail-closed CD-01 design only. They do not satisfy the
 capacity, rollback-semantics, database-compatibility, release-approval, or

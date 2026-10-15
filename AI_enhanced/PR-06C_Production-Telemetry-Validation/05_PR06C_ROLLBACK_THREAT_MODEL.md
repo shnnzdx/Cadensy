@@ -41,6 +41,16 @@ Only an experiment that answers E and F can change their status from UNKNOWN.
 Passing source tests, GitHub approval, or an image build cannot substitute for
 that evidence.
 
+## Machine acceptance gate
+
+The P1-A correction adds a committed, machine-checked
+`08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json`. Its current state is
+`PENDING`, so it is negative evidence and must reject recovery. An accepted
+future Manifest must bind experiment evidence to `rollback_evidence_sha`, prove
+old-runtime forward-schema compatibility, record explicit approval evidence,
+and snapshot the service configuration used for recovery. A Threat Model file
+alone is never sufficient evidence.
+
 ## Post-completion failure policy
 
 After the deployment has completed, telemetry, privacy, domain, provider, or

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -22,6 +23,12 @@ ROLLBACK_THREAT_MODEL = (
     / "AI_enhanced"
     / "PR-06C_Production-Telemetry-Validation"
     / "05_PR06C_ROLLBACK_THREAT_MODEL.md"
+)
+RECOVERY_ACCEPTANCE_MANIFEST = (
+    REPOSITORY_ROOT
+    / "AI_enhanced"
+    / "PR-06C_Production-Telemetry-Validation"
+    / "08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json"
 )
 
 spec = importlib.util.spec_from_file_location("cd01_prepare_task_definition", HELPER_PATH)
@@ -140,6 +147,24 @@ def _service_baseline(**overrides: object) -> dict:
                     "maximumPercent": 200,
                     "deploymentCircuitBreaker": {"enable": True, "rollback": True},
                 },
+                "networkConfiguration": {
+                    "awsvpcConfiguration": {
+                        "assignPublicIp": "DISABLED",
+                        "securityGroups": ["sg-approved"],
+                        "subnets": ["subnet-a", "subnet-b"],
+                    }
+                },
+                "loadBalancers": [
+                    {
+                        "containerName": "tripsync-backend",
+                        "containerPort": 8000,
+                        "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:448678332746:targetgroup/backend/approved",
+                    }
+                ],
+                "deploymentController": {"type": "ECS"},
+                "launchType": "FARGATE",
+                "schedulingStrategy": "REPLICA",
+                "healthCheckGracePeriodSeconds": 30,
             }
         ]
     }
@@ -161,6 +186,84 @@ def _safe_live_task_definition() -> dict:
     return payload
 
 
+def _accepted_recovery_manifest() -> dict:
+    service = _service_baseline()["services"][0]
+    return {
+        "schema_version": "pr06c-recovery-safety/v1",
+        "status": "ACCEPTED",
+        "isolated_experiment": {
+            "status": "PASSED",
+            "environment": "isolated-non-production",
+            "evidence_ref": "https://github.com/shnnzdx/Cadensy/actions/runs/1",
+            "evidence_commit_sha": "d" * 40,
+            "rollback_outcome_observed": True,
+        },
+        "old_runtime_forward_schema": {
+            "status": "COMPATIBLE",
+            "evidence_ref": "https://github.com/shnnzdx/Cadensy/pull/1#issuecomment-1",
+        },
+        "approval": {
+            "status": "APPROVED",
+            "evidence_ref": "https://github.com/shnnzdx/Cadensy/pull/1#pullrequestreview-1",
+        },
+        "approved_service_baseline": {
+            "task_definition_arn": service["taskDefinition"],
+            "network_configuration": service["networkConfiguration"],
+            "load_balancers": service["loadBalancers"],
+            "deployment_controller_type": "ECS",
+            "launch_type": "FARGATE",
+            "scheduling_strategy": "REPLICA",
+            "health_check_grace_period_seconds": 30,
+        },
+    }
+
+
+def _deployed_service(task_definition: str, count: int = 1, rollout_state: str = "COMPLETED") -> dict:
+    service = _service_baseline()["services"][0]
+    service.update(
+        {
+            "taskDefinition": task_definition,
+            "desiredCount": count,
+            "runningCount": count,
+            "pendingCount": 0,
+            "deployments": [
+                {
+                    "status": "PRIMARY",
+                    "rolloutState": rollout_state,
+                    "taskDefinition": task_definition,
+                    "desiredCount": count,
+                    "runningCount": count,
+                    "pendingCount": 0,
+                }
+            ],
+        }
+    )
+    return {"services": [service]}
+
+
+def _running_tasks(task_definition: str, image_digest: str) -> dict:
+    return {
+        "failures": [],
+        "tasks": [
+            {
+                "lastStatus": "RUNNING",
+                "taskDefinitionArn": task_definition,
+                "containers": [
+                    {
+                        "name": "tripsync-backend",
+                        "lastStatus": "RUNNING",
+                        "imageDigest": image_digest,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _healthy_target_groups() -> list[dict]:
+    return [{"TargetHealthDescriptions": [{"TargetHealth": {"State": "healthy"}}]}]
+
+
 def test_zero_capacity_recovery_requires_explicit_mode_and_exactly_one_task():
     request = capacity.validate_recovery_inputs(_recovery_inputs())
 
@@ -176,21 +279,80 @@ def test_zero_capacity_recovery_requires_explicit_mode_and_exactly_one_task():
             capacity.validate_recovery_inputs(_recovery_inputs(**overrides))
 
 
+def test_zero_capacity_recovery_rejects_pending_manifest_and_threat_model_only_evidence():
+    current_manifest = json.loads(RECOVERY_ACCEPTANCE_MANIFEST.read_text(encoding="utf-8"))
+
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(
+            current_manifest, _recovery_inputs()["rollback_evidence_sha"]
+        )
+
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(
+            {"schema_version": "pr06c-recovery-safety/v1", "status": "ACCEPTED"},
+            _recovery_inputs()["rollback_evidence_sha"],
+        )
+
+
+def test_zero_capacity_recovery_cli_rejects_the_committed_pending_manifest(capsys):
+    inputs = _recovery_inputs()
+
+    with pytest.raises(SystemExit) as exit_info:
+        capacity.main(
+            [
+                "--release-mode",
+                inputs["release_mode"],
+                "--expected-current-task-definition",
+                inputs["expected_current_task_definition"],
+                "--expected-current-image-digest",
+                inputs["expected_current_image_digest"],
+                "--expected-current-desired-count",
+                inputs["expected_current_desired_count"],
+                "--recovery-desired-count",
+                inputs["recovery_desired_count"],
+                "--rollback-evidence-sha",
+                inputs["rollback_evidence_sha"],
+                "--recovery-safety-manifest-json",
+                str(RECOVERY_ACCEPTANCE_MANIFEST),
+            ]
+        )
+
+    assert exit_info.value.code == 2
+    assert "recovery safety manifest is not accepted" in capsys.readouterr().err
+
+
+def test_zero_capacity_recovery_requires_accepted_experiment_schema_and_approval_evidence():
+    manifest = _accepted_recovery_manifest()
+
+    capacity.validate_recovery_safety_manifest(
+        manifest, _recovery_inputs()["rollback_evidence_sha"]
+    )
+
+    for path, value in (
+        (("isolated_experiment", "status"), "PENDING"),
+        (("old_runtime_forward_schema", "status"), "UNKNOWN"),
+        (("approval", "status"), "PENDING"),
+        (("isolated_experiment", "evidence_ref"), ""),
+    ):
+        invalid = copy.deepcopy(manifest)
+        invalid[path[0]][path[1]] = value
+        with pytest.raises(capacity.CapacityRecoveryContractError):
+            capacity.validate_recovery_safety_manifest(
+                invalid, _recovery_inputs()["rollback_evidence_sha"]
+            )
+
+
 def test_capacity_contract_cli_outputs_only_the_derived_recovery_count(capsys):
     result = capacity.main(
         [
             "--release-mode",
-            "zero_capacity_recovery",
+            "standard",
             "--expected-current-task-definition",
             _recovery_inputs()["expected_current_task_definition"],
             "--expected-current-image-digest",
             _recovery_inputs()["expected_current_image_digest"],
             "--expected-current-desired-count",
-            "0",
-            "--recovery-desired-count",
             "1",
-            "--rollback-evidence-sha",
-            _recovery_inputs()["rollback_evidence_sha"],
         ]
     )
 
@@ -198,11 +360,26 @@ def test_capacity_contract_cli_outputs_only_the_derived_recovery_count(capsys):
     assert capsys.readouterr().out == "1\n"
 
 
+def test_standard_mode_preserves_its_nonzero_baseline_without_recovery_manifest():
+    request = capacity.validate_recovery_inputs(
+        _recovery_inputs(
+            release_mode="standard",
+            expected_current_desired_count="1",
+            recovery_desired_count="",
+            rollback_evidence_sha="",
+        )
+    )
+    service = _service_baseline(desiredCount=1, runningCount=1)
+
+    capacity.validate_live_baseline(service, _safe_live_task_definition(), request)
+
+
 def test_zero_capacity_recovery_rejects_nonzero_or_drifting_live_baseline():
     request = capacity.validate_recovery_inputs(_recovery_inputs())
     task = _safe_live_task_definition()
+    manifest = _accepted_recovery_manifest()
 
-    capacity.validate_live_baseline(_service_baseline(), task, request)
+    capacity.validate_live_baseline(_service_baseline(), task, request, manifest)
 
     for service_overrides in (
         {"desiredCount": 1, "runningCount": 1},
@@ -210,25 +387,95 @@ def test_zero_capacity_recovery_rejects_nonzero_or_drifting_live_baseline():
         {"pendingCount": 1},
     ):
         with pytest.raises(capacity.CapacityRecoveryContractError):
-            capacity.validate_live_baseline(_service_baseline(**service_overrides), task, request)
+            capacity.validate_live_baseline(
+                _service_baseline(**service_overrides), task, request, manifest
+            )
 
 
 def test_zero_capacity_recovery_rejects_running_image_and_gate_drift():
     request = capacity.validate_recovery_inputs(_recovery_inputs())
+    manifest = _accepted_recovery_manifest()
 
     bad_image = _safe_live_task_definition()
     bad_image["taskDefinition"]["containerDefinitions"][0]["image"] = (
         "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "e" * 64
     )
     with pytest.raises(capacity.CapacityRecoveryContractError):
-        capacity.validate_live_baseline(_service_baseline(), bad_image, request)
+        capacity.validate_live_baseline(_service_baseline(), bad_image, request, manifest)
 
     bad_gate = copy.deepcopy(_safe_live_task_definition())
     bad_gate["taskDefinition"]["containerDefinitions"][0]["environment"].append(
         {"name": "CADENSY_B3_PROTECTED_PREVIEW_APPLY", "value": "1"}
     )
     with pytest.raises(capacity.CapacityRecoveryContractError):
-        capacity.validate_live_baseline(_service_baseline(), bad_gate, request)
+        capacity.validate_live_baseline(_service_baseline(), bad_gate, request, manifest)
+
+
+def test_zero_capacity_recovery_rejects_task_payload_and_service_configuration_drift():
+    request = capacity.validate_recovery_inputs(_recovery_inputs())
+    manifest = _accepted_recovery_manifest()
+
+    bad_task_arn = _safe_live_task_definition()
+    bad_task_arn["taskDefinition"]["taskDefinitionArn"] = (
+        "arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:20"
+    )
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_live_baseline(_service_baseline(), bad_task_arn, request, manifest)
+
+    for field, value in (
+        ("networkConfiguration", {"awsvpcConfiguration": {"assignPublicIp": "ENABLED", "securityGroups": ["sg-approved"], "subnets": ["subnet-a", "subnet-b"]}}),
+        ("loadBalancers", []),
+        ("deploymentController", {"type": "CODE_DEPLOY"}),
+        ("launchType", "EC2"),
+    ):
+        service = _service_baseline()
+        service["services"][0][field] = value
+        with pytest.raises(capacity.CapacityRecoveryContractError):
+            capacity.validate_live_baseline(service, _safe_live_task_definition(), request, manifest)
+
+
+def test_deployed_runtime_verification_requires_live_task_definition_digest_and_health():
+    task_definition = "arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:20"
+    digest = "sha256:" + "b" * 64
+    service = _deployed_service(task_definition)
+    tasks = _running_tasks(task_definition, digest)
+
+    capacity.validate_deployed_runtime(service, tasks, _healthy_target_groups(), task_definition, digest, 1)
+
+    variants = []
+    old_task = copy.deepcopy(tasks)
+    old_task["tasks"][0]["taskDefinitionArn"] = _recovery_inputs()["expected_current_task_definition"]
+    variants.append((service, old_task, _healthy_target_groups(), 1))
+    mixed_digest = copy.deepcopy(tasks)
+    mixed_digest["tasks"].append(copy.deepcopy(tasks["tasks"][0]))
+    mixed_digest["tasks"][1]["containers"][0]["imageDigest"] = "sha256:" + "c" * 64
+    variants.append(
+        (
+            _deployed_service(task_definition, count=2),
+            mixed_digest,
+            [
+                {
+                    "TargetHealthDescriptions": [
+                        {"TargetHealth": {"State": "healthy"}},
+                        {"TargetHealth": {"State": "healthy"}},
+                    ]
+                }
+            ],
+            2,
+        )
+    )
+    bad_digest = copy.deepcopy(tasks)
+    bad_digest["tasks"][0]["containers"][0]["imageDigest"] = "sha256:" + "c" * 64
+    variants.append((service, bad_digest, _healthy_target_groups(), 1))
+    variants.append(
+        (_deployed_service(task_definition, rollout_state="IN_PROGRESS"), tasks, _healthy_target_groups(), 1)
+    )
+
+    for service_payload, task_payload, health_payloads, expected_count in variants:
+        with pytest.raises(capacity.CapacityRecoveryContractError):
+            capacity.validate_deployed_runtime(
+                service_payload, task_payload, health_payloads, task_definition, digest, expected_count
+            )
 
 
 def test_capacity_contract_is_offline_and_standard_mode_cannot_restore_zero_capacity():
@@ -273,6 +520,8 @@ def test_cd01_zero_capacity_recovery_is_explicit_and_rechecks_before_service_upd
     assert "--desired-count" in release_script
     assert "expected_current_image_digest" in release_script
     assert "rollback evidence" in release_script
+    assert "08_pr06c_recovery_safety_acceptance_manifest.json" in release_script
+    assert "git show" in release_script
     assert "required_reviewers" in release_script
     assert "jq -e 'any(.protection_rules[]?; .type == \"required_reviewers\")'" in release_text
     assert release_text.index("Run read-only schema-head preflight") < release_text.index(
@@ -281,6 +530,17 @@ def test_cd01_zero_capacity_recovery_is_explicit_and_rechecks_before_service_upd
         "aws ecs update-service"
     )
     assert "set -euo pipefail" in release_text
+
+
+def test_cd01_post_deployment_verification_uses_actual_running_task_digests():
+    release_script = _workflow_script(_workflow(RELEASE_WORKFLOW))
+
+    assert "aws ecs list-tasks" in release_script
+    assert "aws ecs describe-tasks" in release_script
+    assert "--verify-deployed-runtime" in release_script
+    assert "--expected-deployed-runtime-image-digest" in release_script
+    assert "--running-tasks-json" in release_script
+    assert "--target-health-json" in release_script
 
 
 def test_rollback_threat_model_keeps_zero_capacity_rollback_semantics_blocked():

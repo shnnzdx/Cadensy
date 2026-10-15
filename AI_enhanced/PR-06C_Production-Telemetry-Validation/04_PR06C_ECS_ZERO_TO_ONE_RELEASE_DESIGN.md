@@ -110,6 +110,61 @@ drift, do not retry with copied values: stop, re-audit, obtain a new explicit
 approval, and dispatch once. If a service mutation has begun, do not launch a
 second workflow or manually change desired count while ECS is converging.
 
+## Final independent-review corrections
+
+### Recovery Safety Acceptance Manifest
+
+`rollback_evidence_sha` no longer passes merely because it contains a Markdown
+threat model. For `zero_capacity_recovery`, CD-01 reads the committed
+[`08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json`](08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json)
+at that exact SHA before AWS credentials are configured. The pure offline
+contract rejects unless all of the following are present and positive:
+
+- schema version `pr06c-recovery-safety/v1` and top-level `ACCEPTED` state;
+- a `PASSED` isolated non-production experiment, a Cadensy GitHub evidence
+  reference, the same evidence commit SHA, and an observed rollback outcome;
+- `COMPATIBLE` old-runtime forward-schema evidence;
+- `APPROVED` recovery-safety evidence; and
+- an approved service baseline snapshot.
+
+The committed Manifest is deliberately `PENDING`: it contains no invented
+experiment, compatibility, or approval data. Therefore every current
+zero-capacity production dispatch fails closed. This is intentional and is not
+a release failure to work around.
+
+### Configuration baseline scope
+
+For zero-capacity recovery, the approved Manifest snapshot binds the current
+task-definition ARN, normalized `awsvpc` subnets/security groups/public-IP
+setting, application-container/port-to-target-group bindings, deployment
+controller type, launch type, scheduling strategy, and health-check grace
+period. Network and list ordering are normalized, but each configured member
+must match exactly. These fields materially affect whether a recovered task can
+start and receive production traffic.
+
+Dynamic values such as task ARNs, deployment IDs, timestamps, service events,
+and current counts are not snapshot-equaled; they are checked through separate
+safety invariants. All modes require Fargate, ECS controller, replica
+scheduling, valid `awsvpc` configuration, and valid load-balancer bindings.
+Only zero recovery requires the exact approved configuration snapshot because
+it is the exceptional transition from no running workload.
+
+### Deployed runtime identity
+
+After ECS stability and before CD-01 writes a success summary, the workflow
+uses read-only `list-tasks` and `describe-tasks` evidence. It requires exact
+service and primary-deployment task definition, desired/running/pending counts,
+one `RUNNING` application container per expected running task, and each
+container's returned `imageDigest` equal to the approved runtime digest. It
+also requires evidence for every configured ALB target group and a successful
+read-only health endpoint. Missing task evidence, an old task definition,
+mixed/incorrect digest, non-completed primary deployment, or non-healthy target
+fails the workflow; it cannot produce a deployment-pass result.
+
+AWS exposes `taskDefinitionArn` and per-container `imageDigest` in
+`DescribeTasks`, which is why the check is based on actual task evidence rather
+than only the service's intended task definition. [DescribeTasks API](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeTasks.html)
+
 ## Non-goals
 
 This design does not change PR-06A/PR-06B behavior, automatically roll back,
