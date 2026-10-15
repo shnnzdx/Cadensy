@@ -1,6 +1,6 @@
 # PR-06B.0M — Membership Lifecycle Impact Audit
 
-Status: **CHANGES REQUIRED before PR-06B.1.** This is a documentation-only audit. It does not change application code, schema, migrations, infrastructure, or provider behavior.
+Status: **FINAL CONTRACT CLOSED — READY FOR PR-06B.1 IMPLEMENTATION PLANNING.** This is a documentation-only audit. It does not change application code, schema, migrations, infrastructure, or provider behavior.
 
 ## Decision frozen by this audit
 
@@ -26,15 +26,15 @@ The present repeat-join test proves only an active-account retry returns the sam
 account absent
     | valid invite + authenticated account identity
     v
-ACTIVE Membership A ── remove ──> REMOVED Membership A (immutable historical owner)
-    |                               |  auth/read/write/replay denied
-    | active repeat join             |  old conversation remains owned by A
-    +---------- same A <-------------+
-                                        | valid later rejoin
-                                        v
-                                  ACTIVE Membership B (new ID)
-                                        | owns only B's new conversations
-                                        +-- remove --> REMOVED Membership B
+ACTIVE Membership A ── active repeat join ──> ACTIVE Membership A (same ID)
+    |
+    | remove
+    v
+REMOVED Membership A (terminal, immutable historical owner)
+    | auth/read/write/replay denied; old conversation remains owned by A
+    | valid later rejoin creates a different identity
+    v
+ACTIVE Membership B (new ID) ── remove ──> REMOVED Membership B
 
 Guest active membership -- credential expired/revoked --> inaccessible Guest membership
     (V1 deliberately has no Guest cross-device recovery or Guest-to-account adoption)
@@ -54,16 +54,27 @@ Guest active membership -- credential expired/revoked --> inaccessible Guest mem
 | Expired/revoked invite | `_valid_invite` rejects either. [service.py:258](../../backend/app/domain/trips/service.py#L258) | Reject before any User, Membership, session, conversation, or revision write. | Re-read and lock Invite after Trip root as the protected path already does. |
 | Membership removal racing join | Removal preserves/deauthorizes membership. | The root-lock order decides first. If removal wins, a later valid rejoin creates a new incarnation; if join wins, removal removes the newly active target only through its normal authorized operation. | No direct service call may bypass the root writer. |
 
-### Account proof and Guest adoption
+### A. Authenticated Account Join — final contract
 
-The invite join endpoint is public and passes `body.email` to `join_invite`; it is not an authenticated Account-join proof. [main.py:1606](../../backend/app/api/main.py#L1606) A bearer/Membership ID cannot substitute for authentication. The current model comment says a future Guest binding would update a Guest row, but the audit found no production adoption flow assigning `membership.user_id`; only a test mutates that field. [models.py:152](../../backend/app/db/models.py#L152), [test_trip_transaction_kernel.py:663](../../backend/tests/test_trip_transaction_kernel.py#L663)
+**Decision.** Account Join is a distinct authenticated operation. Add `POST /api/invites/{token}/account-join`, requiring a valid non-Guest `Authorization` bearer. The endpoint resolves `AuthSession.user_id` with `auth.user_for_token`, derives the target User exclusively from that session, and passes that User ID to the one Trip-root join/rejoin writer. It accepts neither `email` nor a client-chosen account ID. It does not require an existing Membership in the target Trip, so an authenticated account can accept a new invite or rejoin after removal.
 
-Therefore V1 must explicitly choose the safe protocol:
+Guest Join remains `POST /api/invites/{token}/join`, public and limited to `display_name`; it creates only a Guest Membership/session. A supplied `email` on that public route receives `409 account_join_requires_authenticated_session`, not an email-based lookup or User creation. A Membership ID, Trip ID, invite token, or a Guest bearer is never account proof.
 
-1. An existing account joins/rejoins only with a valid Account bearer whose `AuthSession.user_id` is the target User; the server derives the user from the bearer, not email input.
-2. A new account must first complete an authenticated account-creation/verification flow outside invite redemption, then use that bearer.
-3. Guest-to-account binding is **not implemented and is out of scope for PR-06B.1**. Do not update a Guest Membership's `user_id`, and do not transfer its conversations, preferences, votes, or private text to an account.
-4. If product later needs adoption, it requires a separately reviewed, authenticated, one-time transfer protocol and a privacy decision for every historical child row.
+**Source evidence.** The current route is public, accepts `email`, and calls the email-based service path. [main.py:565](../../backend/app/api/main.py#L565), [main.py:1604](../../backend/app/api/main.py#L1604), [service.py:309](../../backend/app/domain/trips/service.py#L309) The current UI sends exactly that public request for both choices. [TripAppState.jsx:761](../../trip/src/final/TripAppState.jsx#L761), [FinalApp.jsx:1406](../../trip/src/final/FinalApp.jsx#L1406) `user_for_token` already validates session expiration/revocation and returns the server-owned User. [auth.py:223](../../backend/app/domain/auth.py#L223)
+
+**Safe `password_hash IS NULL` handling.** Existing null-password Users were created by the unsafe historical invite path; their email is not ownership proof. The `User` model permits the null state, while registration rejects a duplicate email and login cannot establish a password credential for it. [models.py:54](../../backend/app/db/models.py#L54), [auth.py:196](../../backend/app/domain/auth.py#L196), [auth.py:213](../../backend/app/domain/auth.py#L213) V1 classifies these rows as *unclaimed legacy identities*: Account Join must return `409 account_activation_required`, even if the caller knows that email. It must not attach a password, mint an AuthSession, merge a Guest, or reuse the row. A future account-activation/credential-recovery flow requires independently verified email possession and separate security approval. Until then, the person may use the Guest path; no account continuity is promised for that legacy email.
+
+**Frontend/backend migration sequence.**
+
+1. Release the authenticated backend route and corrected Trip-root writer first. Keep public Guest Join working; make legacy public email payloads fail explicitly and safely.
+2. Update `TripAppState` with an account-authenticated request seam for Account Join; do not use `publicRequestJson` for it. It sends the current Account bearer but no email.
+3. Update `FinalApp` so an existing signed-in account sees “Join as <account name>”; a signed-out user is sent through normal sign-in/registration with the invite token preserved as a routing hint, then returns to Account Join. Guest remains a separate explicit action.
+4. Use only server-returned profile/Membership data to adopt Trip context. No client echo of email/name establishes identity.
+5. Remove the legacy email field after all shipped clients use the split paths. No compatibility flag may revive email-as-identity.
+
+**Regression tests.** Cover: valid account session joins/rejoins as its session User; missing/expired/revoked/Guest bearer cannot Account Join; public email payload creates no User/Membership; Guest Join still returns only a bounded Guest bearer; an active account retry is idempotent; removed A becomes new B; and null-password User receives activation-required with no session/membership mutation.
+
+Guest-to-account binding remains **not implemented and out of scope**. The model comment describes a future update, but the audit found no production adoption flow assigning `membership.user_id`; only a test mutates it. [models.py:152](../../backend/app/db/models.py#L152), [test_trip_transaction_kernel.py:663](../../backend/tests/test_trip_transaction_kernel.py#L663)
 
 ## Current-active versus historical reference matrix
 
@@ -75,13 +86,47 @@ Therefore V1 must explicitly choose the safe protocol:
 | Member roster / counts | Member list and dashboard/invite counts currently include every row. [preferences/service.py:532](../../backend/app/domain/preferences/service.py#L532), [service.py:183](../../backend/app/domain/trips/service.py#L183), [service.py:287](../../backend/app/domain/trips/service.py#L287) | **Current-active:** exclude removed rows, so rejoin does not appear as two current people. An explicit history/audit view may include both. |
 | Constraints used by planner | Constraint load joins every Trip membership. [orchestrator.py:114](../../backend/app/domain/decisions/orchestrator.py#L114) | **Current-active:** exclude removed rows; removed constraints cannot influence a current plan. |
 | Comments and append-only plan changes | Comment has membership FK; plan change stores a scalar actor membership id. [models.py:407](../../backend/app/db/models.py#L407), [models.py:425](../../backend/app/db/models.py#L425) | **Historical/audit:** preserve attribution to A; B must not be represented as author of A's activity. |
-| Votes and decision rounds | Vote FK/unique is per membership; vote denominator currently counts all rows. [models.py:477](../../backend/app/db/models.py#L477), [vote.py:207](../../backend/app/domain/transactions/vote.py#L207) | **Mixed:** preserve A's recorded vote historically. Define the electorate snapshot for already-open rounds before implementation; new/current electorate counts exclude removed members and B is not retroactively a voter. |
-| Change proposals / decisions | Proposal requester and decision membership FKs; affected-member selection currently uses every membership. [models.py:492](../../backend/app/db/models.py#L492), [orchestrator.py:873](../../backend/app/domain/decisions/orchestrator.py#L873) | **Mixed:** preserve past requester/decision IDs. Pending proposals require an explicit removal policy (expire/recompute under lock); B does not inherit A's pending decision. |
+| Votes and decision rounds | Vote FK/unique is per membership; vote denominator currently counts all rows. [models.py:477](../../backend/app/db/models.py#L477), [vote.py:207](../../backend/app/domain/transactions/vote.py#L207) | **Mixed:** preserve A's recorded vote historically. The final V1 decision-window policy below prevents an electorate change mid-round; new/current counts exclude removed members and B is never retroactively a voter. |
+| Change proposals / decisions | Proposal requester and decision membership FKs; affected-member selection currently uses every membership. [models.py:492](../../backend/app/db/models.py#L492), [orchestrator.py:873](../../backend/app/domain/decisions/orchestrator.py#L873) | **Mixed:** `ProposalDecision` rows are the immutable affected-member snapshot. While nonterminal, membership changes are rejected; B never inherits A's pending decision. |
 | Notifications | Recipient is a membership ID. [models.py:548](../../backend/app/db/models.py#L548) | **Historical/delivery:** retain A records but do not deliver A-targeted notifications to B. |
 | `MutationIdempotency` / durable commands | Stores actor Membership identity in the ledger. [models.py:276](../../backend/app/db/models.py#L276) | **Security/audit:** never replay A's command result under B. B starts a distinct key namespace. |
 | Future conversations | Proposed `owner_membership_id`. [01_PR06B_PERSISTENCE_ARCHITECTURE_DECISION.md](01_PR06B_PERSISTENCE_ARCHITECTURE_DECISION.md) | **Private historical:** A's conversations are inaccessible after removal and never attached to B. |
 
-The two incomplete current-active areas are planner constraints and group decision counts/affected-set selection. They are documented blockers because blindly adding `status != 'removed'` to only one endpoint creates inconsistent outcomes. The implementation must centralize an `active_memberships_for_trip`/electorate policy and apply it where product semantics require current participants.
+### B. Current electorate and historical decisions — final V1 policy
+
+**Decision.** A Trip enters a **decision window** while it has either an `open` `DecisionRound` or a `ChangeProposal` in `waiting_affected_members`/`escalated`. During that window, any operation that would change the active Membership set — first Account Join, Account rejoin, Guest Join, or Membership removal — returns `409 membership_change_pending_decision`. An idempotent retry that returns the same already-active account Membership is not a set change and may succeed. Invite preview/revocation remains separate.
+
+This is the minimal fail-closed policy: a former member is never dynamically removed from an in-flight denominator, a new Membership is never added to one, and no current-member query must reinterpret a historical vote. The protected writer must test this predicate under the existing Trip-root transaction and lock the relevant nonterminal Round/Proposal children after its established `Trip -> memberships -> Plan` locks; no legacy direct writer may bypass it.
+
+**Historical semantics.** New Rounds record immutable `electorate_count` at opening from active Memberships. All-voted checks, reopened-round majority, and closed-round response display use that stored count, not a later live roster. Votes retain their original `trip_membership_id`. New Proposals already materialize their affected electorate as `ProposalDecision` rows; completion continues to require every recorded decision to be accepted, and removal/rejoin cannot rewrite those rows. Completed/declined/expired/resolved decisions are append-only historical facts and are never changed by later Membership lifecycle events.
+
+For existing open/pending rows, deployment must fail closed: do not enable active-only decision queries or lifecycle mutations until a preflight confirms there are no nonterminal legacy Rounds/Proposals (or they have reached their ordinary deadline/terminal domain outcome). Existing closed Rounds lacking `electorate_count` must expose an explicit unavailable historical-count field rather than recomputing against today's roster.
+
+**Why this policy.** The current code dynamically counts every Membership for early settlement and result display, and dynamically builds the Proposal affected set. [vote.py:207](../../backend/app/domain/transactions/vote.py#L207), [vote.py:222](../../backend/app/domain/transactions/vote.py#L222), [orchestrator.py:133](../../backend/app/domain/decisions/orchestrator.py#L133), [orchestrator.py:873](../../backend/app/domain/decisions/orchestrator.py#L873) Simply filtering `removed` would let a non-voter's removal make `len(votes) >= total`, causing accidental early settlement; recomputing a closed round would rewrite history. `settle_round` also uses the live count for reopened-majority semantics. [orchestrator.py:757](../../backend/app/domain/decisions/orchestrator.py#L757) Membership removal is already a Trip-root durable mutation, so the gate fits the current transaction architecture. [membership_remove.py:35](../../backend/app/domain/transactions/membership_remove.py#L35)
+
+**Alternatives rejected for V1.** Dynamic active denominators are unsafe for early settlement. Recomputing/auto-expiring affected Proposal decisions on removal changes an already-issued confirmation contract. A full per-round Membership-ID snapshot would be valid but is more invasive than the decision-window gate plus an immutable count. An emergency-removal override would need separate product approval because it must define whether to expire each affected proposal and how to handle an open Round; it is not silently introduced here.
+
+**Regression tests.** Cover a blocked remove/join/rejoin during open Round and waiting/escalated Proposal; no new Membership/revision/session is written on `409`; an active retry remains idempotent; open-round early settlement cannot be triggered by lifecycle change; reopened majority uses opening count; pending proposals cannot apply after a membership-change attempt; and later removal/rejoin leaves closed Round counts, Vote ownership, ProposalDecision ownership, and terminal outcomes unchanged.
+
+### C. Recovery idempotency — final contract
+
+**Decision.** Recovery is a retry of one durable Submission, never a second message. The original `conversation_submission` owns its immutable `user_message_id`, optional sole `assistant_message_id`, original submission idempotency key, current `attempt_number`, `lease_expires_at`, and monotonic `fence`. A new `conversation_submission_recovery` row is keyed by `(submission_id, recovery_key)` and records the accepted attempt/fence; it has no replacement text or new user-message reference.
+
+**Implementation implication.** Under the Conversation/Submission lock, the same Recovery Key is a pure durable replay. A different key is rejected while the lease is live. Only after expiry can a new key atomically create one recovery record, increment attempt/fence, and claim a new lease. Completion must match both current attempt and fence before it can attach the one assistant result. Thus the durable effect is exactly-once (at most one committed assistant reply), while an ambiguous crash after sending a Provider request can produce repeated external Provider calls across fenced attempts. Provider invocation is deliberately not claimed exactly-once.
+
+**Source evidence.** Today the client sends mutable history to `/chat`, not a durable submission identity. [TripAppState.jsx:1032](../../trip/src/final/TripAppState.jsx#L1032) The only existing durable idempotency model is `MutationIdempotency`, which belongs to protected domain mutations rather than Provider execution. [models.py:276](../../backend/app/db/models.py#L276) There is therefore no source implementation to reinterpret; the new recovery record is required rather than an extension of client history or `MutationIdempotency`.
+
+**Regression tests.** Verify repeated/concurrent same Recovery Keys return one attempt, different keys before expiry get `409`, a reclaimed attempt fences the prior completion, no recovery inserts a second user message, and two Provider responses can result in only one committed assistant message. Inject an uncertain Provider timeout and assert that a second Provider invocation is possible but is not represented as duplicate durable output.
+
+### D. Expiry and session scope — final contract
+
+**Decision.** `retention_expires_at` is an authorization/read/context boundary, not a best-effort cleanup signal: after expiry, list/discovery/read/context/submission/replay/recovery/completion fail closed even if the purge scheduler has not run. Membership removal immediately removes Trip access for that Membership and its Guest credential, but does not globally revoke the Account Session.
+
+**Implementation implication.** One shared Conversation eligibility predicate must compare the authoritative clock, active owner Membership, deletion marker, and retention expiry before any content read or Provider invocation and again before result persistence. The purge worker only performs later physical erasure. The Account Join route can still authenticate an account for another Trip/rejoin; it cannot use that session to read the removed Membership's data.
+
+**Source evidence.** Existing removal changes only Membership status and revokes Guest sessions. [service.py:386](../../backend/app/domain/trips/service.py#L386), [auth.py:282](../../backend/app/domain/auth.py#L282) Account-session revocation is a separate explicit function. [auth.py:241](../../backend/app/domain/auth.py#L241) The present `/chat` path has no durable conversation expiry boundary. [main.py:1329](../../backend/app/api/main.py#L1329)
+
+**Regression tests.** With the purge worker disabled and a controlled clock past retention, every Conversation read/context/submission/recovery attempt returns the expired result and makes no Provider call; a late completion cannot persist. Separately, remove one account Membership and prove the Account Session still accesses another authorized Trip while the removed Trip and its conversations remain denied.
 
 ## Schema and migration design (planned, not executed)
 
@@ -116,6 +161,8 @@ Downgrade must fail safely, not delete history. Before recreating the old all-ti
 | Rejoin inherits private preferences, votes, notifications, or conversations | Do not copy/repoint child rows. B begins with no private history; only explicitly designed current-group policy sees B. |
 | Email spoofing claims an existing account | Do not treat invite email as account identity; require account-authenticated join/rejoin. |
 
+Membership removal revokes **Trip access for that Membership** and Guest credentials bound to it; it does not globally revoke the User's `AuthSession`. That is intentional: the same authenticated account may still use other Trips and can later perform the separate Account Rejoin operation if the decision-window gate permits it. [service.py:406](../../backend/app/domain/trips/service.py#L406), [auth.py:282](../../backend/app/domain/auth.py#L282)
+
 ## Minimum regression suite for PR-06B.1
 
 1. First authenticated account join creates one active Membership and advances each planning revision once.
@@ -128,10 +175,12 @@ Downgrade must fail safely, not delete history. Before recreating the old all-ti
 8. Current roster/counts/constraints/electorate behavior treats removed rows correctly; historical records retain A IDs.
 9. Migration upgrade verifies the partial index and FK preservation; downgrade encounters valid A+B history and fails with its intended safety error.
 10. Cadensy conversation tests prove delete/removal/rejoin never resurrect or expose A-owned messages, including late fenced completion.
+11. Account/Guest split integration exercises the actual `FinalApp`/`TripAppState` request paths and proves a public email can neither discover nor claim a User.
+12. Decision-window preflight and writer tests prove no active Membership mutation occurs while a Round/Proposal is nonterminal and no closed historical count is recomputed from the live roster.
 
 ## Blockers and gate recommendation
 
-**CHANGES REQUIRED.** PR-06B.1 must not begin until its implementation design accepts all of the following:
+**READY FOR PR-06B.1 (contract gate).** Implementation must faithfully deliver all of the following; reopening any item requires a new architecture review:
 
 - a bearer-authenticated account join/rejoin protocol (or a separately approved identity-verification design), replacing email-as-identity;
 - one corrected, Trip-root serialized account join writer and retirement/routing of legacy bypasses;

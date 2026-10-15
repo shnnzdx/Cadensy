@@ -11,6 +11,8 @@ Deliverables:
 - A deliberate migration of the account Membership uniqueness index from all account rows to active account rows only.
 - Fresh Membership-row creation on rejoin; historical Conversation owner IDs remain unchanged.
 - Bearer-authenticated account join/rejoin (not invite-body email), one Trip-root writer, no V1 Guest-to-account adoption, and centralized current-active versus historical-membership query policy.
+- Split public Guest Join from Account-Session-derived Account Join, including an explicit `password_hash IS NULL` activation-required outcome and the frontend return-to-invite sequence.
+- Decision-window gate for active Membership changes, immutable Round electorate counts, and no rewrite of terminal Round/Proposal history.
 - authorization service/seam tests for cross-Trip, cross-Member, Organizer, Guest expiry/revocation, removal, and rejoin isolation.
 
 Required migration validation:
@@ -34,6 +36,7 @@ Required tests:
 - same key/different payload is rejected;
 - two keys concurrently submitted to one Conversation produce one active execution and one `409 conversation_busy`;
 - lease reclaim increments fence and old completion is rejected;
+- repeated/concurrent Recovery Keys produce one accepted attempt/fence and no duplicate user message or committed assistant reply; tests explicitly permit uncertain repeated Provider invocation across fenced attempts;
 - failure/persistence error reaches durable failed state safely;
 - database-unavailable initial or completion transaction never produces a false success/provider invocation or a false durable terminal claim;
 - an authorized device without the original idempotency key discovers an expired submission and uses fenced recovery without replacement text;
@@ -90,6 +93,8 @@ Required acceptance scenarios:
 19. Removal followed by account rejoin creates a new Membership incarnation; the new identity cannot access the old identity's conversations or private child data.
 20. The retention purge worker claims, retries, catches up after downtime, and physically purges deleted primary records by the 30-day deadline under a controlled clock.
 21. Post-cutover legacy `/chat` history calls receive the specified retirement response and cannot mix with durable Conversations.
+22. Account Join derives identity from a valid Account Session; public Guest Join rejects an email claim, and legacy null-password Users receive activation-required without mutation.
+23. Membership-change requests during an open Round or pending/escalated Proposal return the specified conflict; terminal decisions retain their historical electorate/ownership after later removal or rejoin.
 
 ## Explicitly deferred / out of scope
 
@@ -101,7 +106,7 @@ Required acceptance scenarios:
 
 ## Remaining design gate
 
-The product/security decisions D1–D7 are now resolved, but the Membership audit has found required implementation design changes. PR-06B.1 must not start until the rejoin migration, authenticated account-join protocol, legacy-writer routing, and current-electorate policy are reviewed and accepted. See [04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md](04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md).
+The product/security decisions D1–D7 and the final Membership/recovery closure are resolved. PR-06B.1 is ready for scoped implementation planning only; it must follow the rejoin migration, Account-Session join protocol, legacy-writer routing, decision-window gate, and recovery contract in [04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md](04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md). No implementation is included in PR-06B.0.
 
 ## Verification for this PR-06B.0 documentation change
 

@@ -25,7 +25,7 @@ The discovery endpoint returns only owner-scoped conversation metadata, latest s
 
 ## Read and pagination contract
 
-- Reads require the active owner Membership and active Conversation status.
+- Reads require the active owner Membership, active Conversation status, and `now < retention_expires_at`.
 - Response ordering is immutable ascending `sequence`; reverse cursor pagination may be used for older messages.
 - Deleted/expired Conversations return no content and do not create model context.
 - Candidate option data is returned only for its owning assistant message, never as a global Trip resource.
@@ -69,6 +69,19 @@ No transaction remains open during model/provider execution. This follows the ex
 - Recovery without the original key is an explicit, owner-authorized operation on the discovered submission ID; it must use a separate recovery idempotency key and cannot accept replacement text. It increments fencing before any provider retry.
 - V1 intentionally has no queue or background provider worker.
 
+### Recovery idempotency record
+
+`conversation_submission_recovery` is durable and distinct from the original submission key. Its unique identity is `(submission_id, recovery_key)`; its accepted payload is only `submission_id + operation version`, and it stores the resulting `attempt_number`, `fence`, lease/state, and timestamps. It has no user-message foreign key because it reuses the parent's immutable original message.
+
+Under one Conversation/Submission lock:
+
+1. Same Recovery Key returns its prior running/completed/failed recovery state and does not change parent attempt, fence, lease, user messages, or Provider invocation.
+2. A different Recovery Key before lease expiry returns `409 conversation_busy` and cannot create a recovery row.
+3. A new key after expiry atomically inserts one recovery row, increments the parent's `attempt_number` and `fence`, and assigns a new lease. Only that fence can persist the one assistant result attached to the parent Submission.
+4. A late attempt, including an earlier recovery, fails its fence comparison. Duplicate committed assistant replies are impossible through a unique parent assistant-result reference plus the completion transaction.
+
+The durable result is exactly-once (at most one committed assistant reply for the original user message). External Provider invocation is **at-least-once under uncertainty**: a provider may have received an earlier request before a crash/timeout, so a later fenced recovery can invoke it again. V1 must not claim exactly-once Provider execution.
+
 ### Database-unavailable and result-persistence failure
 
 - If the initial authorization/lock/submission transaction cannot commit, return `503 conversation_state_unavailable` and do **not** invoke the provider.
@@ -77,7 +90,7 @@ No transaction remains open during model/provider execution. This follows the ex
 
 ## Server-owned bounded context adapter
 
-The adapter reads only completed, nondeleted messages from the authorized Conversation. It builds two projections:
+The adapter reads only completed, nondeleted, unexpired messages from the authorized Conversation. It builds two projections:
 
 1. **Deterministic history projection:** bounded `HistoryTurn` plus persisted validated options for the follow-up option resolver.
 2. **Runtime textual projection:** bounded `RuntimeHistoryTurn` values for Legacy and Pydantic runtimes.
@@ -101,7 +114,7 @@ Stale, deleted, ambiguous, conflicting, or no-op options return a safe clarifica
 
 ## Deletion and retention lifecycle
 
-Deletion is an owner-authorized short transaction that marks the Conversation deleted, clears active submission eligibility, and schedules primary-record purge no later than 30 days later. Context/list/read queries filter deletion immediately. Completion transactions check deletion after acquiring their lock, so an in-flight run cannot recreate output.
+Deletion is an owner-authorized short transaction that marks the Conversation deleted, clears active submission eligibility, and schedules primary-record purge no later than 30 days later. Context/list/read queries filter deletion immediately. Completion transactions check deletion after acquiring their lock, so an in-flight run cannot recreate output. The same authorization/read/context/submission/recovery/completion boundaries independently enforce `retention_expires_at`; a late purge worker cannot prolong access to an expired row.
 
 A scheduled purge worker is mandatory for the 30-day deletion SLA and 180-day retention policy. It must be idempotent, batchable, observable through content-free counters/categories, and tested with a controlled clock. No existing scheduler is evidence that this contract has been implemented.
 

@@ -23,6 +23,8 @@ Conversation history is user data and a contextual aid. It is not Current Plan s
 
 The 180-day and 30-day commitments are technically enforceable only with database fields, an idempotent scheduled purge worker, alerting for overdue rows, and acceptance tests that advance a controlled clock. A SQL constraint alone cannot enforce future-time deletion.
 
+Retention is enforced independently of the purge worker: every conversation authorization, discovery/list/read, context build, submission/replay/recovery, and completion-persistence boundary compares `now` to `retention_expires_at`. A row past that instant is fail-closed as expired (and may be marked/scheduled in a successful transaction), even if a scheduler is late or unavailable. The purge worker controls physical deletion timing; it is not an access-control clock.
+
 ## D2 — scope and ownership
 
 Allowed `scope` values are `personal` and `plan_assistant`.
@@ -49,6 +51,8 @@ On account rejoin after removal:
 The existing index currently applies whenever `user_id IS NOT NULL`, even after removal. [backend/app/db/models.py:156](../../backend/app/db/models.py#L156) This must be migrated deliberately, not silently worked around in conversation code.
 
 The approved migration shape is an active-only PostgreSQL partial unique index, created and validated concurrently **before** the old index is dropped. Downgrade must refuse safely if valid rejoin history has created both an old and new Membership for one account/Trip; it must never collapse those rows. Account join/rejoin must use authenticated account identity rather than an invite-body email. Guest-to-account adoption is not a V1 path. The complete impact/migration review is [04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md](04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md).
+
+The implementation uses a split invite contract: public Guest Join creates only Guest identity; Account Join derives the User from a valid Account Session and never from email. Legacy `User.password_hash IS NULL` rows are unclaimed and require independently verified activation before Account Join; they must not be silently adopted. Membership removal revokes that Trip Membership rather than globally revoking the Account Session.
 
 ## Proposed data model
 
@@ -99,6 +103,12 @@ This is intentionally separate from `mutation_idempotency`.
 - safe failure category and response metadata, never raw provider payload.
 
 One partial unique active-submission index per Conversation enforces D6. A separate unique `(conversation_id, idempotency_key)` supports replay.
+
+### `conversation_submission_recovery`
+
+Recovery is not a second user submission. It is a durable idempotency record keyed by `(submission_id, recovery_key)` and contains the operation version, accepted `attempt_number`, accepted `fence`, state, and timestamps. It never contains replacement user text. The parent Submission owns the original immutable user-message reference, current lease/fence, and the sole assistant-message/result reference.
+
+This shape makes a recovery key replayable without creating a second user message and distinguishes recovery request idempotency from the original message idempotency key. A recovery key is accepted only after the parent lease has expired and under the Conversation/Submission lock; the transaction increments parent attempt/fence, creates the recovery record, and grants the new lease atomically. A unique assistant-result reference on the parent makes the durable effect exactly-once (zero or one committed assistant reply) even though an uncertain timeout can require more than one external Provider invocation across fenced attempts.
 
 ## D7 — privacy and encryption posture
 
