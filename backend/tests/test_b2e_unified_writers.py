@@ -23,7 +23,10 @@ from app.domain.transactions import booking as protected_booking
 from app.domain.transactions import membership_join, membership_remove, organizer_actions
 from app.domain.transactions import proposal_decision as protected_proposal_decision
 from app.domain.transactions import scheduler as protected_scheduler
-from app.domain.transactions.membership_join import join_invite_under_trip_root
+from app.domain.transactions.membership_join import (
+    join_account_invite_under_trip_root,
+    join_invite_under_trip_root,
+)
 from app.domain.transactions.scheduler import expire_due_proposal, settle_due_round
 from app.domain.transactions.trip_preferences_common import StaticHmacKeyring
 
@@ -297,13 +300,20 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
     if case == "account_join":
         invite_token = f"account-invite-{seed['trip']}"
         with factory.begin() as db:
-            joiner = User(name="Account joiner", email=f"joiner-{seed['trip']}@test.local")
+            joiner_token = f"account-joiner-{seed['trip']}"
+            joiner = User(
+                name="Account joiner",
+                email=f"joiner-{seed['trip']}@test.local",
+                password_hash=auth_service.hash_password("correct-horse"),
+            )
             db.add(joiner)
             db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
             db.flush()
+            db.add(AuthSession(user_id=joiner.id, token_hash=auth_service.token_hash(joiner_token), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
             _seeded[-1] = (seed["trip"], (*_seeded[-1][1], joiner.id))
-        operation = lambda: join_invite_under_trip_root(
-            session_factory=factory, token=invite_token, display_name="Account joiner", email=f"joiner-{seed['trip']}@test.local"
+        operation = lambda: join_account_invite_under_trip_root(
+            session_factory=factory, token=invite_token, account_token=joiner_token,
+            account_user_id=joiner.id,
         )
     elif case == "guest_join":
         invite_token = f"guest-invite-{seed['trip']}"
@@ -381,17 +391,25 @@ def test_join_final_commit_failure_leaves_no_member_guest_or_revision_partial(te
     with factory.begin() as db:
         db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
         if email:
-            joiner = User(name="Rollback account", email=f"rollback-{seed['trip']}@test.local")
+            joiner_token = f"rollback-account-{seed['trip']}"
+            joiner = User(name="Rollback account", email=f"rollback-{seed['trip']}@test.local", password_hash=auth_service.hash_password("correct-horse"))
             db.add(joiner)
             db.flush()
+            db.add(AuthSession(user_id=joiner.id, token_hash=auth_service.token_hash(joiner_token), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
             _seeded[-1] = (seed["trip"], (*_seeded[-1][1], joiner.id))
     before_commit = lambda _session: (_ for _ in ()).throw(RuntimeError("final commit fault"))
     event.listen(membership_join.Session, "before_commit", before_commit)
     try:
         with pytest.raises(RuntimeError, match="final commit fault"):
-            join_invite_under_trip_root(
-                session_factory=factory, token=invite_token, display_name="Rollback",
-                email=f"rollback-{seed['trip']}@test.local" if email else None,
+            (
+                join_account_invite_under_trip_root(
+                    session_factory=factory, token=invite_token, account_token=joiner_token,
+                    account_user_id=joiner.id,
+                )
+                if email
+                else join_invite_under_trip_root(
+                    session_factory=factory, token=invite_token, display_name="Rollback", email=None,
+                )
             )
     finally:
         event.remove(membership_join.Session, "before_commit", before_commit)
@@ -521,38 +539,20 @@ def test_protected_deadlock_branches_commit_once_and_replay_without_duplicate_ef
         assert db.query(MutationIdempotency).filter(MutationIdempotency.trip_id == seed["trip"]).count() == 1
 
 
-def test_membership_routes_preserve_legacy_off_and_use_protected_transaction_when_enabled(test_engine, monkeypatch):
+def test_membership_routes_always_use_protected_transaction(test_engine, monkeypatch):
     factory = _factory(test_engine)
     monkeypatch.setattr(api, "SessionLocal", factory)
     monkeypatch.setattr(db_session, "SessionLocal", factory)
     legacy = _seed(test_engine)
-    legacy_invite = f"http-legacy-{legacy['trip']}"
+    legacy_invite = f"http-protected-{legacy['trip']}"
     with factory.begin() as db:
         db.add(InviteLink(trip_id=legacy["trip"], token_hash=auth_service.token_hash(legacy_invite), is_primary=True))
     with TestClient(api.app) as client:
-        response = client.post(f"/api/invites/{legacy_invite}/join", json={"display_name": "Legacy guest"})
+        response = client.post(f"/api/invites/{legacy_invite}/join", json={"display_name": "Guest"})
     assert response.status_code == 200 and "guest_token" in response.json()
     with factory() as db:
-        assert db.get(Trip, legacy["trip"]).planning_facts_revision == 0
-        assert db.get(Plan, legacy["plan"]).revision == 0
-
-    protected = _seed(test_engine)
-    protected_invite = f"http-protected-{protected['trip']}"
-    with factory.begin() as db:
-        db.add(InviteLink(trip_id=protected["trip"], token_hash=auth_service.token_hash(protected_invite), is_primary=True))
-    monkeypatch.setenv("CADENSY_B2E_PROTECTED_MEMBERSHIP_WRITES", "1")
-    monkeypatch.setenv("APP_ENV", "test")
-    with TestClient(api.app) as client:
-        joined = client.post(f"/api/invites/{protected_invite}/join", json={"display_name": "Protected guest"})
-    assert joined.status_code == 200 and "guest_token" in joined.json()
-    with factory() as db:
-        assert db.get(Trip, protected["trip"]).planning_facts_revision == 1
-        assert db.get(Plan, protected["plan"]).revision == 1
-
-    monkeypatch.setenv("APP_ENV", "production")
-    with TestClient(api.app) as client:
-        denied = client.post(f"/api/invites/{protected_invite}/join", json={"display_name": "Never writes"})
-    assert denied.status_code == 503
+        assert db.get(Trip, legacy["trip"]).planning_facts_revision == 1
+        assert db.get(Plan, legacy["plan"]).revision == 1
 
 
 def test_membership_remove_http_requires_protected_headers_and_replays_without_second_revocation(test_engine, monkeypatch):

@@ -48,7 +48,7 @@ from ..observability.telemetry import (
     FailureCategory,
     emit_event_safely,
 )
-from . import auth as auth_service
+from .membership_policy import is_membership_access_authorized
 from .constraints.types import Classification
 from .decisions import orchestrator as orch
 
@@ -532,11 +532,7 @@ def _assert_captured_current(db: Session, captured: _CapturedRevisions) -> None:
 
 
 def _is_active_preview_membership(membership: TripMembership | None) -> bool:
-    if membership is None:
-        return False
-    if membership.user_id is not None:
-        return membership.status != "removed"
-    return auth_service.is_active_guest_membership_status(membership.status)
+    return membership is not None and is_membership_access_authorized(membership)
 
 
 def _safe_patch(raw: Mapping[str, object]) -> dict[str, object]:

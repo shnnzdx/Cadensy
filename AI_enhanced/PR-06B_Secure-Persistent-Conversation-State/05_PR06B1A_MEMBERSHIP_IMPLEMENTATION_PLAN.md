@@ -32,10 +32,10 @@ It does **not** create `conversation`, `conversation_message`, `conversation_sub
 
 | API | Authentication | Input | Outcome |
 |---|---|---|---|
-| `POST /api/invites/{token}/join` | Public | `display_name` only | Creates a new Guest Membership plus bounded GuestSession. `email` is rejected with stable `409 account_join_requires_authenticated_session`; no User lookup/write occurs. |
+| `POST /api/invites/{token}/join` | Public | `display_name` only | Creates a new Guest Membership plus bounded GuestSession. `email` is rejected with `422` directing the client to authenticated Account Join; no User lookup/write occurs. |
 | `POST /api/invites/{token}/account-join` | Valid Account bearer, never Guest bearer | No email or account ID; optional presentation-free request body | Derives User from locked `AuthSession`, creates/returns active Account Membership, and returns server-derived profile/Membership data. |
 
-`User.password_hash IS NULL` is an unclaimed legacy identity. Account Join must return `409 account_activation_required`; it must not create a password, session, Membership, merge Guest history, or infer ownership from email. A future verified email credential-activation flow is separately scoped.
+`User.password_hash IS NULL` is an unclaimed legacy identity. Account Join denies it without creating a password, session, Membership, Guest-history merge, or inferred email ownership. A future verified email credential-activation flow is separately scoped.
 
 ### Controlled frontend cutover
 
@@ -67,7 +67,7 @@ The Invite token may be read before the transaction only to discover the Trip ID
 
 ### Active versus historical rules
 
-- **Access-authorized Account Membership:** only `status='joined'` and no quarantine marker. **Access-authorized Guest Membership:** only `status in ('joined', 'preferences_submitted')` and no quarantine marker, preserving the pre-existing bounded Guest credential policy. `invited`, `removed`, quarantined, null, blank, and unknown/corrupt statuses fail closed. The migration preflight rejects unsupported stored statuses and the database check prevents new unsupported values.
+- **Access-authorized Account and Guest Membership:** `status in ('joined', 'preferences_submitted')` and no quarantine marker. `preferences_submitted` remains active for existing Account preference writers as well as the bounded Guest credential policy. `invited`, `removed`, quarantined, null, blank, and unknown/corrupt statuses fail closed. The migration preflight rejects unsupported stored statuses and the database check prevents new unsupported values.
 - **Current roster, dashboard/invite counts, planner constraints, newly created Proposal affected sets:** use the shared current-participant predicate, not `status != 'removed'`. It uses the same explicit status/identity allow-list and quarantine exclusion as Trip access.
 - **Closed Round/Proposal, Votes, ProposalDecisions, comments, notices, preferences, constraints, GuestSessions, durable command records:** preserve original Membership IDs. No copy, reparenting, or visibility grant to Membership B.
 - **Round:** `DecisionRound.electorate_count` is an immutable nonnegative **count**, not a stored Membership-ID snapshot. It is set from the active count while the Round is opened under root locks. Existing closed Rounds retain `NULL` and expose `historical_electorate_count_available: false`, never a recomputed live count.

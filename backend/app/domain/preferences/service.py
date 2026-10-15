@@ -30,6 +30,7 @@ from ...db.models import (
     User,
 )
 from ..constraints.engine import SAFE_TEXT, violates
+from ..membership_policy import current_participant_membership_clause
 from ..constraints.types import (
     Constraint,
     ConstraintKind,
@@ -530,7 +531,10 @@ def list_members(db: Session, membership: TripMembership) -> dict:
     """
     rows = db.scalars(
         select(TripMembership)
-        .where(TripMembership.trip_id == membership.trip_id)
+        .where(
+            TripMembership.trip_id == membership.trip_id,
+            current_participant_membership_clause(),
+        )
         .order_by(TripMembership.created_at)
     ).all()
 

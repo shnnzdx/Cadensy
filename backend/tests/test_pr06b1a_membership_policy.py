@@ -44,7 +44,7 @@ def test_access_and_current_participant_exclude_removed_and_quarantined_membersh
     assert is_membership_access_authorized(_membership(status="preferences_submitted")) is True
     assert is_membership_access_authorized(
         _membership(status="preferences_submitted", account=True)
-    ) is False
+    ) is True
     for status in ("invited", "removed", "corrupted"):
         assert is_membership_access_authorized(_membership(status=status)) is False
         assert is_current_participant(_membership(status=status)) is False
@@ -66,7 +66,7 @@ def test_sql_predicates_keep_current_state_and_historical_snapshot_separate() ->
     current_sql = _postgres_sql(current_participant_membership_clause())
     frozen_sql = _postgres_sql(frozen_electorate_membership_clause({"membership-a"}))
 
-    assert "trip_membership.status IN ('joined')" in access_sql
+    assert "trip_membership.status IN ('joined', 'preferences_submitted')" in access_sql
     assert "trip_membership.status IN ('joined', 'preferences_submitted')" in access_sql
     assert "trip_membership.quarantined_at IS NULL" in access_sql
     assert current_sql == access_sql

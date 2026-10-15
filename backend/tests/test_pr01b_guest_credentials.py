@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api import main as api
 from app.db.models import AuthSession, GuestSession, Trip, TripMembership, User
@@ -16,12 +16,20 @@ from app.domain import auth
 
 @contextmanager
 def _client(db: Session):
+    previous_factory = api.SessionLocal
+    api.SessionLocal = sessionmaker(
+        bind=db.connection(),
+        future=True,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
     api.app.dependency_overrides[api.get_session] = lambda: db
     try:
         with TestClient(api.app) as client:
             yield client
     finally:
         api.app.dependency_overrides.clear()
+        api.SessionLocal = previous_factory
 
 
 def _organizer_trip(db: Session) -> tuple[User, Trip, TripMembership]:
@@ -198,15 +206,21 @@ def test_invite_revocation_blocks_future_join_without_revoking_joined_guest(db: 
     assert existing_guest.status_code == 200
 
 
-def test_membership_removal_revokes_all_bound_guest_sessions(db: Session):
+def test_membership_removal_revokes_all_bound_guest_sessions(db: Session, monkeypatch):
     organizer, trip, _ = _organizer_trip(db)
 
     with _client(db) as client:
+        monkeypatch.setenv("CADENSY_B2C_HMAC_KEY", "pr01b-guest-removal-key")
         organizer_token, result = _guest_join(client, organizer, trip, "Removed Guest")
         guest = result["joined"]
         removed = client.delete(
             f"/api/trips/{trip.id}/members/{guest['membership_id']}",
-            headers={"Authorization": f"Bearer {organizer_token}", "X-Trip-Id": trip.id},
+            headers={
+                "Authorization": f"Bearer {organizer_token}",
+                "X-Trip-Id": trip.id,
+                "Idempotency-Key": "remove-guest-member",
+                "X-Expected-Trip-Facts-Revision": "1",
+            },
         )
         after_removal = client.get(
             f"/api/trips/{trip.id}",
@@ -223,7 +237,7 @@ def test_membership_removal_revokes_all_bound_guest_sessions(db: Session):
     assert after_removal.status_code == 401
 
 
-def test_removed_account_membership_keeps_account_session_but_loses_trip_access(db: Session):
+def test_removed_account_membership_keeps_account_session_but_loses_trip_access(db: Session, monkeypatch):
     organizer, trip, _ = _organizer_trip(db)
     participant = User(
         name="Removed Account Member",
@@ -242,6 +256,7 @@ def test_removed_account_membership_keeps_account_session_but_loses_trip_access(
     db.flush()
 
     with _client(db) as client:
+        monkeypatch.setenv("CADENSY_B2C_HMAC_KEY", "pr01b-membership-removal-key")
         organizer_token = _login(client, organizer)
         participant_token = _login(client, participant)
         before_removal = client.get(
@@ -249,7 +264,12 @@ def test_removed_account_membership_keeps_account_session_but_loses_trip_access(
         )
         removed = client.delete(
             f"/api/trips/{trip.id}/members/{participant_membership.id}",
-            headers={"Authorization": f"Bearer {organizer_token}", "X-Trip-Id": trip.id},
+            headers={
+                "Authorization": f"Bearer {organizer_token}",
+                "X-Trip-Id": trip.id,
+                "Idempotency-Key": "remove-account-member",
+                "X-Expected-Trip-Facts-Revision": "0",
+            },
         )
         dashboard_after = client.get(
             "/api/trips", headers={"Authorization": f"Bearer {participant_token}"}

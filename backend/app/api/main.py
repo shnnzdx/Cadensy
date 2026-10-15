@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -41,6 +41,7 @@ from ..db.models import (
 from ..db.session import SessionLocal, get_session
 from ..domain.access import ForeignTripAccess, ScopedResourceNotFound, for_membership
 from ..domain import auth as auth_service
+from ..domain.membership_policy import current_participant_membership_clause
 from ..domain.chat import service as chat_service
 from ..domain.decisions import orchestrator as orch
 from ..domain.preview_apply import (
@@ -117,6 +118,8 @@ from ..domain.transactions import preferences_save as protected_preferences_save
 from ..domain.transactions import organizer_actions as protected_organizer_actions
 from ..domain.transactions import membership_remove as protected_membership_remove
 from ..domain.transactions import membership_join as protected_membership_join
+from ..domain.transactions import membership_quarantine as protected_membership_quarantine
+from ..domain.transactions.membership_lifecycle import MembershipChangePendingDecision
 from ..domain.transactions.protected_profile import b3_profile_admission
 from ..domain.transactions.trip_preferences_common import ProtectedConstraintMissing, StaticHmacKeyring as TripStaticHmacKeyring
 
@@ -567,6 +570,16 @@ class InviteJoinRequest(BaseModel):
     email: str | None = Field(default=None, max_length=255)
 
 
+class AccountInviteJoinRequest(BaseModel):
+    """Identity-free: the verified bearer session is the only Account authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MembershipQuarantineRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=40)
+
+
 class LoginRequest(BaseModel):
     email: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=255)
@@ -720,11 +733,13 @@ def _classification_out(verdict) -> dict:
 def _round_out(db: Session, round_: DecisionRound, me: TripMembership | None = None) -> dict:
     item = db.get(PlanItem, round_.plan_item_id)
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    total = len(
-        db.scalars(
-            select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-        ).all()
-    )
+    total = round_.electorate_count
+    if total is None:
+        total = len(
+            db.scalars(
+                select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
+            ).all()
+        )
     tally: dict[str, int] = {}
     for vote in votes:
         tally[vote.option_id] = tally.get(vote.option_id, 0) + 1
@@ -752,9 +767,11 @@ def _round_has_all_votes(db: Session, round_: DecisionRound) -> bool:
     item = db.get(PlanItem, round_.plan_item_id)
     trip_id = item.plan.trip_id
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    total = len(
-        db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all()
-    )
+    total = round_.electorate_count
+    if total is None:
+        total = len(
+            db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all()
+        )
     return total > 0 and len(votes) >= total
 
 
@@ -925,7 +942,12 @@ def get_trip(
         if trip.preferred_end_date
         else None,
         "member_count": len(
-            db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all()
+            db.scalars(
+                select(TripMembership).where(
+                    TripMembership.trip_id == trip_id,
+                    current_participant_membership_clause(),
+                )
+            ).all()
         ),
     }
     result.update(trip_cover_service.trip_cover_out(trip))
@@ -1609,23 +1631,19 @@ def join_invite(
 ) -> dict:
     if not body.display_name.strip():
         raise HTTPException(422, "Display name is required")
+    if body.email is not None:
+        raise HTTPException(
+            422,
+            "Guest Join does not accept email identity; use authenticated account-join",
+        )
     try:
-        if _b2c_trip_writer_gate_requested(_B2E_MEMBERSHIP_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
-            raise HTTPException(503, "Protected membership writes are not available in production")
-        if _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE):
-            joined = protected_membership_join.join_invite_under_trip_root(
-                session_factory=SessionLocal, token=token, display_name=body.display_name, email=body.email,
-            )
-        else:
-            joined = trip_service.join_invite(
-                db,
-                token,
-                display_name=body.display_name,
-                email=body.email,
-            )
+        joined = protected_membership_join.join_guest_invite_under_trip_root(
+            session_factory=SessionLocal, token=token, display_name=body.display_name,
+        )
     except trip_service.InviteNotFound as exc:
         raise HTTPException(404, "Invite not found") from exc
-    db.commit()
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
     response = {
         "membership_id": joined.membership.id,
         "trip_id": joined.trip_id,
@@ -1635,6 +1653,45 @@ def join_invite(
         response["guest_token"] = joined.guest_session.token
         response["guest_expires_at"] = joined.guest_session.session.expires_at.isoformat()
     return response
+
+
+@app.post("/api/invites/{token}/account-join")
+def account_join_invite(
+    token: str,
+    body: AccountInviteJoinRequest,
+    user: User = Depends(current_account_user),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Join by a verified Account Session; request body supplies no identity."""
+
+    del body
+    bearer = _bearer_token(authorization)
+    if bearer is None:
+        raise HTTPException(401, "Login required")
+    try:
+        joined = protected_membership_join.join_account_invite_under_trip_root(
+            session_factory=SessionLocal,
+            token=token,
+            account_token=bearer,
+            account_user_id=user.id,
+        )
+    except trip_service.InviteNotFound as exc:
+        raise HTTPException(404, "Invite not found") from exc
+    except protected_membership_join.LegacyAccountIdentityDenied as exc:
+        raise HTTPException(403, "Legacy identity is not an authenticated Account") from exc
+    except protected_membership_join.MembershipQuarantined as exc:
+        raise HTTPException(409, "Membership is quarantined") from exc
+    except protected_membership_join.AccountMembershipJoinDenied as exc:
+        raise HTTPException(409, "Account Membership cannot join") from exc
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Account authentication required") from exc
+    return {
+        "membership_id": joined.membership.id,
+        "trip_id": joined.trip_id,
+        "role": joined.membership.role,
+    }
 
 
 @app.post("/api/invites/{invite_id}/revoke")
@@ -1665,42 +1722,68 @@ def remove_membership(
     expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
     response: Response = None,
 ) -> dict:
-    if _b2c_trip_writer_gate_requested(_B2E_MEMBERSHIP_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
-        raise HTTPException(503, "Protected membership writes are not available in production")
-    if _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE):
-        try:
-            scope, credential, key, revision, keyring = _protected_trip_revision(
-                membership=me, authorization=authorization, idempotency_key=idempotency_key,
-                expected_trip_facts_revision=expected_trip_facts_revision,
-            )
-            result = protected_membership_remove.execute_protected_membership_remove(
-                session_factory=SessionLocal, scope=scope, credential=credential,
-                command=protected_membership_remove.ProtectedMembershipRemove(membership_id, key, revision),
-                keyring=keyring,
-            )
-        except protected_membership_remove.MembershipTargetMissing as exc:
-            raise HTTPException(404, "Trip membership not found") from exc
-        except trip_service.MembershipRemovalDenied as exc:
-            raise HTTPException(409, "Membership cannot be removed") from exc
-        except Exception as exc:
-            _protected_trip_error(exc)
-        if response is not None:
-            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
-        return result.payload
     _require_scoped_trip(db, me, trip_id)
     try:
-        trip_service.remove_membership(
-            db,
-            trip_id=trip_id,
-            organizer=me,
-            membership_id=membership_id,
+        scope, credential, key, revision, keyring = _protected_trip_revision(
+            membership=me, authorization=authorization, idempotency_key=idempotency_key,
+            expected_trip_facts_revision=expected_trip_facts_revision,
         )
-    except trip_service.OrganizerRequired as exc:
-        raise HTTPException(403, str(exc)) from exc
+        result = protected_membership_remove.execute_protected_membership_remove(
+            session_factory=SessionLocal, scope=scope, credential=credential,
+            command=protected_membership_remove.ProtectedMembershipRemove(membership_id, key, revision),
+            keyring=keyring,
+        )
+    except protected_membership_remove.MembershipTargetMissing as exc:
+        raise HTTPException(404, "Trip membership not found") from exc
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
     except trip_service.MembershipRemovalDenied as exc:
-        raise HTTPException(404, str(exc)) from exc
-    db.commit()
-    return {"removed": True}
+        raise HTTPException(409, "Membership cannot be removed") from exc
+    except Exception as exc:
+        _protected_trip_error(exc)
+    if response is not None:
+        response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+    return result.payload
+
+
+@app.post("/api/trips/{trip_id}/members/{membership_id}/quarantine")
+def quarantine_membership(
+    trip_id: str,
+    membership_id: str,
+    body: MembershipQuarantineRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        scope, credential, key, revision, keyring = _protected_trip_revision(
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_trip_facts_revision=expected_trip_facts_revision,
+        )
+        result = protected_membership_quarantine.execute_protected_membership_quarantine(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=credential,
+            command=protected_membership_quarantine.ProtectedMembershipQuarantine(
+                membership_id, body.reason, key, revision
+            ),
+            keyring=keyring,
+        )
+    except protected_membership_quarantine.MembershipQuarantineTargetMissing as exc:
+        raise HTTPException(404, "Trip membership not found") from exc
+    except protected_membership_quarantine.MembershipQuarantineDenied as exc:
+        raise HTTPException(409, "Membership cannot be quarantined") from exc
+    except Exception as exc:
+        _protected_trip_error(exc)
+    if response is not None:
+        response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+    return result.payload
 
 
 def _generator_result_out(result: plan_generator.GenerationResult) -> dict:

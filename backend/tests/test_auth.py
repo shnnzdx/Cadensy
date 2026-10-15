@@ -22,6 +22,7 @@ def _client(db: Session):
 
 def test_login_returns_token_and_trip_membership(db: Session, full_trip: dict):
     user = db.get(User, full_trip["members"][0].user_id)
+    full_trip["members"][0].status = "joined"
     user.email = "organizer@cadensy.local"
     user.password_hash = auth.hash_password("12345678")
     db.flush()

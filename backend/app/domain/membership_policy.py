@@ -15,7 +15,9 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.db.models import TripMembership
 
 
-ACCOUNT_ACCESS_STATUSES = ("joined",)
+# Preference submission is an active Account state in the established writer
+# contract.  It must not invalidate an Account's own next protected command.
+ACCOUNT_ACCESS_STATUSES = ("joined", "preferences_submitted")
 # This preserves the existing explicit Guest credential policy in auth.py.
 GUEST_ACCESS_STATUSES = ("joined", "preferences_submitted")
 

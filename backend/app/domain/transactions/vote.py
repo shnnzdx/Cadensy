@@ -202,11 +202,13 @@ def _round_has_all_votes(session: Session, round_: DecisionRound) -> bool:
     item = session.get(PlanItem, round_.plan_item_id)
     if item is None:
         raise VoteRoundMissing("Decision round has no Plan item")
-    total = len(
-        session.scalars(
-            select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-        ).all()
-    )
+    total = round_.electorate_count
+    if total is None:
+        total = len(
+            session.scalars(
+                select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
+            ).all()
+        )
     return total > 0 and len(votes) >= total
 
 
@@ -217,11 +219,13 @@ def vote_round_out(session: Session, round_: DecisionRound, membership_id: str) 
     if item is None:
         raise VoteRoundMissing("Decision round has no Plan item")
     votes = session.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    total = len(
-        session.scalars(
-            select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-        ).all()
-    )
+    total = round_.electorate_count
+    if total is None:
+        total = len(
+            session.scalars(
+                select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
+            ).all()
+        )
     tally: dict[str, int] = {}
     for vote in votes:
         tally[vote.option_id] = tally.get(vote.option_id, 0) + 1

@@ -37,6 +37,7 @@ from ...db.models import (
     Vote,
 )
 from ..constraints.engine import affected_membership_ids, classify
+from ..membership_policy import current_participant_membership_clause
 from ..constraints.types import (
     Classification,
     Constraint,
@@ -116,7 +117,10 @@ def _load_constraints(db: Session, trip_id: str) -> list[Constraint]:
     rows = db.scalars(
         select(MemberConstraint)
         .join(TripMembership, TripMembership.id == MemberConstraint.trip_membership_id)
-        .where(TripMembership.trip_id == trip_id)
+        .where(
+            TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
+        )
     ).all()
     return [
         Constraint(
@@ -132,6 +136,17 @@ def _load_constraints(db: Session, trip_id: str) -> list[Constraint]:
 
 def _member_count(db: Session, trip_id: str) -> int:
     return len(db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all())
+
+
+def _current_participant_count(db: Session, trip_id: str) -> int:
+    return len(
+        db.scalars(
+            select(TripMembership).where(
+                TripMembership.trip_id == trip_id,
+                current_participant_membership_clause(),
+            )
+        ).all()
+    )
 
 
 def _deadline_for(trip: Trip) -> datetime:
@@ -679,6 +694,7 @@ def _do_round(
         reason=reason,
         deadline=_deadline_for(trip),
         status="open",
+        electorate_count=_current_participant_count(db, trip.id),
     )
     db.add(round_)
     if item.settledness == Settledness.LOOSE.value:
@@ -762,7 +778,12 @@ def settle_round(db: Session, round_: DecisionRound) -> str:
     item = db.get(PlanItem, round_.plan_item_id)
     trip_id = item.plan.trip_id
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    winner = _winner(round_, votes, _member_count(db, trip_id))
+    electorate_count = (
+        round_.electorate_count
+        if round_.electorate_count is not None
+        else _member_count(db, trip_id)
+    )
+    winner = _winner(round_, votes, electorate_count)
 
     option = next((o for o in round_.options if o["id"] == winner), None)
     patch = {} if winner == KEEP_CURRENT else _patch_from_json(option.get("patch") or {"title": option["title"]})
@@ -788,7 +809,7 @@ def settle_round(db: Session, round_: DecisionRound) -> str:
             kind="round",
             title=f"{item_title} was removed by a group round" if removing else f"{item.title} was settled by a group round",
             body=(
-                f"{len(votes)} of {_member_count(db, trip_id)} took part. Members who "
+                f"{len(votes)} of {electorate_count} took part. Members who "
                 "did not respond are recorded as no preference, not as agreement."
             ),
         )
@@ -870,7 +891,12 @@ def _do_confirm(
     #   Member hard constraint: only those members plus the proposer approve.
     # Pulling too broadly makes proposals impossible to complete and holds the slot indefinitely.
     everyone = list(
-        db.scalars(select(TripMembership).where(TripMembership.trip_id == trip.id))
+        db.scalars(
+            select(TripMembership).where(
+                TripMembership.trip_id == trip.id,
+                current_participant_membership_clause(),
+            )
+        )
     )
     if item.settledness == Settledness.BOOKED.value:
         involved = everyone
