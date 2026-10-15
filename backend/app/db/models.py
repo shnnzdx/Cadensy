@@ -26,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -167,6 +168,18 @@ class TripMembership(Base, TimestampMixin):
             "('security_incident', 'abuse', 'unauthorized_access', 'organizer_emergency')",
             name="ck_trip_membership_quarantine_reason",
         ),
+        CheckConstraint(
+            "status IN ('invited', 'joined', 'preferences_submitted', 'removed')",
+            name="ck_trip_membership_status_supported",
+        ),
+        # The target's trip_id is part of the reference, so a quarantine
+        # audit actor can never be a membership from another Trip.
+        UniqueConstraint("id", "trip_id", name="uq_trip_membership_id_trip"),
+        ForeignKeyConstraint(
+            ["quarantined_by_membership_id", "trip_id"],
+            ["trip_membership.id", "trip_membership.trip_id"],
+            name="fk_trip_membership_quarantined_by_same_trip",
+        ),
         Index(
             "ux_trip_membership_active_account",
             "trip_id",
@@ -187,9 +200,7 @@ class TripMembership(Base, TimestampMixin):
     # incarnation or turning an in-flight electorate into a live roster query.
     quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     quarantine_reason: Mapped[str | None] = mapped_column(String(40))
-    quarantined_by_membership_id: Mapped[str | None] = mapped_column(
-        ForeignKey("trip_membership.id")
-    )
+    quarantined_by_membership_id: Mapped[str | None] = mapped_column(String(32))
 
     trip: Mapped[Trip] = relationship(back_populates="memberships")
 

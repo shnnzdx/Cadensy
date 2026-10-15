@@ -15,8 +15,13 @@ from app.domain.membership_policy import (
 )
 
 
-def _membership(*, status: str = "joined", quarantined: bool = False) -> TripMembership:
-    membership = TripMembership(status=status)
+def _membership(
+    *,
+    status: str = "joined",
+    account: bool = False,
+    quarantined: bool = False,
+) -> TripMembership:
+    membership = TripMembership(status=status, user_id="account-a" if account else None)
     if quarantined:
         # The predicate only needs the access-revocation marker; the database
         # check constraint is independently covered by the schema contract.
@@ -34,10 +39,15 @@ def _postgres_sql(clause: object) -> str:
 
 
 def test_access_and_current_participant_exclude_removed_and_quarantined_memberships() -> None:
-    assert is_membership_access_authorized(_membership()) is True
-    assert is_current_participant(_membership()) is True
-    assert is_membership_access_authorized(_membership(status="removed")) is False
-    assert is_current_participant(_membership(status="removed")) is False
+    assert is_membership_access_authorized(_membership(account=True)) is True
+    assert is_current_participant(_membership(account=True)) is True
+    assert is_membership_access_authorized(_membership(status="preferences_submitted")) is True
+    assert is_membership_access_authorized(
+        _membership(status="preferences_submitted", account=True)
+    ) is False
+    for status in ("invited", "removed", "corrupted"):
+        assert is_membership_access_authorized(_membership(status=status)) is False
+        assert is_current_participant(_membership(status=status)) is False
     assert is_membership_access_authorized(_membership(quarantined=True)) is False
     assert is_current_participant(_membership(quarantined=True)) is False
 
@@ -56,7 +66,8 @@ def test_sql_predicates_keep_current_state_and_historical_snapshot_separate() ->
     current_sql = _postgres_sql(current_participant_membership_clause())
     frozen_sql = _postgres_sql(frozen_electorate_membership_clause({"membership-a"}))
 
-    assert "trip_membership.status != 'removed'" in access_sql
+    assert "trip_membership.status IN ('joined')" in access_sql
+    assert "trip_membership.status IN ('joined', 'preferences_submitted')" in access_sql
     assert "trip_membership.quarantined_at IS NULL" in access_sql
     assert current_sql == access_sql
     assert frozen_sql == "trip_membership.id IN ('membership-a')"

@@ -9,13 +9,30 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.models import TripMembership
 
 
-REMOVED_MEMBERSHIP_STATUS = "removed"
+ACCOUNT_ACCESS_STATUSES = ("joined",)
+# This preserves the existing explicit Guest credential policy in auth.py.
+GUEST_ACCESS_STATUSES = ("joined", "preferences_submitted")
+
+
+def _access_status_clause() -> ColumnElement[bool]:
+    """Allow only explicitly recognized active status/identity combinations."""
+
+    return or_(
+        and_(
+            TripMembership.user_id.is_not(None),
+            TripMembership.status.in_(ACCOUNT_ACCESS_STATUSES),
+        ),
+        and_(
+            TripMembership.user_id.is_(None),
+            TripMembership.status.in_(GUEST_ACCESS_STATUSES),
+        ),
+    )
 
 
 def is_membership_access_authorized(membership: TripMembership) -> bool:
@@ -26,10 +43,12 @@ def is_membership_access_authorized(membership: TripMembership) -> bool:
     never access-authorized.
     """
 
-    return (
-        membership.status != REMOVED_MEMBERSHIP_STATUS
-        and membership.quarantined_at is None
+    allowed_statuses = (
+        ACCOUNT_ACCESS_STATUSES
+        if membership.user_id is not None
+        else GUEST_ACCESS_STATUSES
     )
+    return membership.status in allowed_statuses and membership.quarantined_at is None
 
 
 def is_current_participant(membership: TripMembership) -> bool:
@@ -48,9 +67,10 @@ def is_frozen_electorate_member(
 ) -> bool:
     """Return membership inclusion from a persisted electorate snapshot only.
 
-    Membership current status and quarantine are deliberately irrelevant:
-    a later lifecycle mutation cannot rewrite a Round's or Proposal's already
-    captured historical electorate.
+    Membership current status and quarantine are deliberately irrelevant. This
+    predicate is for persisted Membership-ID snapshots (for example,
+    ProposalDecision rows), not DecisionRound: a Round stores only its frozen
+    electorate *count*, never an ID snapshot.
     """
 
     return membership_id in frozen_membership_ids
@@ -59,10 +79,7 @@ def is_frozen_electorate_member(
 def access_authorized_membership_clause() -> ColumnElement[bool]:
     """SQL predicate for Trip-scoped authorization reads and writers."""
 
-    return and_(
-        TripMembership.status != REMOVED_MEMBERSHIP_STATUS,
-        TripMembership.quarantined_at.is_(None),
-    )
+    return and_(_access_status_clause(), TripMembership.quarantined_at.is_(None))
 
 
 def current_participant_membership_clause() -> ColumnElement[bool]:
@@ -74,6 +91,10 @@ def current_participant_membership_clause() -> ColumnElement[bool]:
 def frozen_electorate_membership_clause(
     frozen_membership_ids: Collection[str],
 ) -> ColumnElement[bool]:
-    """SQL predicate for historical snapshots; never filter by current state."""
+    """SQL predicate for persisted ID snapshots; never filter by current state.
+
+    DecisionRound uses ``electorate_count`` instead; this must not be used to
+    imply that a Round stores Membership IDs.
+    """
 
     return TripMembership.id.in_(frozen_membership_ids)

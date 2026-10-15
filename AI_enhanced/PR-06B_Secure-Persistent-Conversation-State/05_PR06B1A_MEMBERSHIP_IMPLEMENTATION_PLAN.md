@@ -1,6 +1,6 @@
 # PR-06B.1A — Membership Authentication & Lifecycle Safety Plan
 
-Status: **BLOCKED FOR IMPLEMENTATION pending emergency-removal policy approval.** This document is implementation preparation only. It creates no application code, migration, Conversation table, persistent chat behavior, infrastructure change, or Provider call.
+Status: **PR-06B.1A.1 remediation in review; PR-06B.1A.2 remains unauthorized.** The approved quarantine policy authorizes only the reviewed schema/security primitives in 1A.1. It does not authorize Account Join, Guest Join, protected lifecycle Writers, frontend work, infrastructure changes, or Provider calls.
 
 ## Scope and non-goals
 
@@ -67,10 +67,17 @@ The Invite token may be read before the transaction only to discover the Trip ID
 
 ### Active versus historical rules
 
-- **Current roster, dashboard/invite counts, planner constraints, newly created Proposal affected sets:** filter `TripMembership.status != 'removed'` through a shared active-membership query.
+- **Access-authorized Account Membership:** only `status='joined'` and no quarantine marker. **Access-authorized Guest Membership:** only `status in ('joined', 'preferences_submitted')` and no quarantine marker, preserving the pre-existing bounded Guest credential policy. `invited`, `removed`, quarantined, null, blank, and unknown/corrupt statuses fail closed. The migration preflight rejects unsupported stored statuses and the database check prevents new unsupported values.
+- **Current roster, dashboard/invite counts, planner constraints, newly created Proposal affected sets:** use the shared current-participant predicate, not `status != 'removed'`. It uses the same explicit status/identity allow-list and quarantine exclusion as Trip access.
 - **Closed Round/Proposal, Votes, ProposalDecisions, comments, notices, preferences, constraints, GuestSessions, durable command records:** preserve original Membership IDs. No copy, reparenting, or visibility grant to Membership B.
-- **Round:** add `DecisionRound.electorate_count` as an immutable nonnegative integer set from the active count while the Round is opened under the root locks. Existing closed Rounds retain `NULL` and expose `historical_electorate_count_available: false`, never a recomputed live count.
-- **Proposal:** existing `ProposalDecision` rows are the immutable snapshot. New active filtering applies only while creating a new Proposal.
+- **Round:** `DecisionRound.electorate_count` is an immutable nonnegative **count**, not a stored Membership-ID snapshot. It is set from the active count while the Round is opened under root locks. Existing closed Rounds retain `NULL` and expose `historical_electorate_count_available: false`, never a recomputed live count.
+- **Proposal:** existing `ProposalDecision` rows are the immutable Membership-ID snapshot. New active filtering applies only while creating a new Proposal.
+
+### Quarantine audit authority boundary
+
+The 1A.1 schema stores `quarantined_at`, categorical `quarantine_reason`, and `quarantined_by_membership_id`. A composite self-reference `(quarantined_by_membership_id, trip_id) -> (id, trip_id)` proves only that the audit actor belongs to the same Trip; it does **not** prove authorization, current access, Organizer role, target eligibility, idempotency, or lock ordering.
+
+The future protected Writer must lock the Trip root and re-read: (1) the actor's currently access-authorized Membership in that Trip, (2) `role='organizer'`, (3) the target Membership in the same locked Trip, and (4) that the target is not an Organizer. It must then atomically apply the audit fields with Guest credential/invite revocation and durable outcome handling. A route-level claim or the foreign key alone is never sufficient.
 
 ## Remaining security decision — emergency removal
 
@@ -132,6 +139,24 @@ Downgrade must refuse before destructive loss:
 - if quarantine is approved, refuse to drop its state while any target remains access-revoked.
 
 No downgrade may delete/repoint Membership children, convert B into A, or rewrite historical decisions.
+
+### Checkpointed index-cutover recovery (PR-06B.1A.1 remediation)
+
+The additive schema revision is an atomic Alembic checkpoint. `alembic/env.py` uses `transaction_per_migration=True`, so its revision record is committed before the next revision enters PostgreSQL `autocommit_block()` for concurrent index operations.
+
+The following revision alone performs the unique-index cutover. It reads `pg_index` and refuses to trust an index name by itself:
+
+| Observed catalog state | Recovery action |
+|---|---|
+| Legacy unique index valid/ready; target absent | Create target concurrently, then re-read exact columns/predicate plus `indisvalid`/`indisready`. |
+| Legacy valid/ready; target valid/ready | Resume by dropping legacy only after target validation. |
+| Legacy valid/ready; target invalid/not-ready but exact expected definition | Drop only that invalid target concurrently, recreate it, and validate before any legacy drop. |
+| Target valid/ready; legacy absent | The physical cutover already completed; re-run records the checkpoint without rebuilding data. |
+| Missing guard or an unexpected index definition | Fail closed. Stop writers, inspect catalog, and use an explicitly reviewed recovery; do not use `IF NOT EXISTS` or drop data. |
+
+The migration contains a test-only `-x pr06b1a_fail_after_index_validation=1` injection point. It proves that a failure after target validation but before legacy drop leaves both valid indexes and the index revision unrecorded; a normal rerun completes safely. A real canceled `CREATE INDEX CONCURRENTLY` test also proves recovery from an invalid `pg_index` target while legacy uniqueness remains live.
+
+No Account Join writer is introduced or deployable in 1A.1. PR-06B.1A.2 may only be considered after this final active-only uniqueness checkpoint is at head and after explicit review authorization.
 
 ## Required validation matrix after approval
 
