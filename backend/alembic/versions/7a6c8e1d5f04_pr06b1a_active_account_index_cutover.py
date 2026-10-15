@@ -25,10 +25,14 @@ _LEGACY_ACCOUNT_INDEX = "one_membership_per_user_per_trip"
 _ACTIVE_PREDICATE = "((user_id IS NOT NULL) AND ((status)::text <> 'removed'::text))"
 _LEGACY_PREDICATE = "(user_id IS NOT NULL)"
 _INDEX_COLUMNS = ("trip_id", "user_id")
+_DEFAULT_KEY_OPTIONS = (0, 0)
 
 
 _IndexState = namedtuple(
-    "_IndexState", "name is_unique is_valid is_ready predicate columns"
+    "_IndexState",
+    "name access_method is_unique is_valid is_ready predicate "
+    "key_attribute_count included_attribute_count key_columns key_attnums "
+    "key_options has_expression_key",
 )
 
 
@@ -44,17 +48,32 @@ def _read_index_state(index_name: str) -> _IndexState | None:
             """
             SELECT
                 index_class.relname AS name,
+                access_method.amname AS access_method,
                 index_data.indisunique AS is_unique,
                 index_data.indisvalid AS is_valid,
                 index_data.indisready AS is_ready,
                 coalesce(pg_get_expr(index_data.indpred, index_data.indrelid), '') AS predicate,
+                index_data.indnkeyatts AS key_attribute_count,
+                index_data.indnatts - index_data.indnkeyatts AS included_attribute_count,
                 array_agg(attribute.attname ORDER BY index_key.ordinality)
-                    FILTER (WHERE index_key.attnum > 0) AS columns
+                    FILTER (WHERE index_key.ordinality <= index_data.indnkeyatts) AS key_columns,
+                array_agg(index_key.attnum ORDER BY index_key.ordinality)
+                    FILTER (WHERE index_key.ordinality <= index_data.indnkeyatts) AS key_attnums,
+                array_agg(index_option.option ORDER BY index_key.ordinality)
+                    FILTER (WHERE index_key.ordinality <= index_data.indnkeyatts) AS key_options,
+                bool_or(
+                    index_key.ordinality <= index_data.indnkeyatts
+                    AND index_key.attnum = 0
+                ) AS has_expression_key
             FROM pg_index AS index_data
             JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
             JOIN pg_namespace AS index_namespace ON index_namespace.oid = index_class.relnamespace
+            JOIN pg_am AS access_method ON access_method.oid = index_class.relam
             LEFT JOIN unnest(index_data.indkey) WITH ORDINALITY
                 AS index_key(attnum, ordinality) ON TRUE
+            LEFT JOIN unnest(index_data.indoption) WITH ORDINALITY
+                AS index_option(option, ordinality)
+                ON index_option.ordinality = index_key.ordinality
             LEFT JOIN pg_attribute AS attribute
                 ON attribute.attrelid = index_data.indrelid
                AND attribute.attnum = index_key.attnum
@@ -63,11 +82,14 @@ def _read_index_state(index_name: str) -> _IndexState | None:
               AND index_data.indrelid = 'trip_membership'::regclass
             GROUP BY
                 index_class.relname,
+                access_method.amname,
                 index_data.indisunique,
                 index_data.indisvalid,
                 index_data.indisready,
                 index_data.indpred,
-                index_data.indrelid
+                index_data.indrelid,
+                index_data.indnkeyatts,
+                index_data.indnatts
             """
         ),
         {"index_name": index_name},
@@ -76,18 +98,30 @@ def _read_index_state(index_name: str) -> _IndexState | None:
         return None
     return _IndexState(
         name=row["name"],
+        access_method=row["access_method"],
         is_unique=row["is_unique"],
         is_valid=row["is_valid"],
         is_ready=row["is_ready"],
         predicate=row["predicate"],
-        columns=tuple(row["columns"] or ()),
+        key_attribute_count=row["key_attribute_count"],
+        included_attribute_count=row["included_attribute_count"],
+        key_columns=tuple(row["key_columns"] or ()),
+        key_attnums=tuple(row["key_attnums"] or ()),
+        key_options=tuple(row["key_options"] or ()),
+        has_expression_key=row["has_expression_key"],
     )
 
 
 def _require_index_shape(state: _IndexState, *, predicate: str) -> None:
     if (
-        not state.is_unique
-        or state.columns != _INDEX_COLUMNS
+        state.access_method != "btree"
+        or not state.is_unique
+        or state.key_attribute_count != len(_INDEX_COLUMNS)
+        or state.included_attribute_count != 0
+        or state.has_expression_key
+        or state.key_columns != _INDEX_COLUMNS
+        or any(attribute_number == 0 for attribute_number in state.key_attnums)
+        or state.key_options != _DEFAULT_KEY_OPTIONS
         or _normalized_sql(state.predicate) != _normalized_sql(predicate)
     ):
         raise RuntimeError(

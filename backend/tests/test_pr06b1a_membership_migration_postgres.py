@@ -128,18 +128,54 @@ def _index_catalog(engine, index_name: str) -> dict | None:
             text(
                 """
                 SELECT
+                    access_method.amname AS access_method,
                     index_data.indisunique AS is_unique,
                     index_data.indisvalid AS is_valid,
                     index_data.indisready AS is_ready,
-                    pg_get_expr(index_data.indpred, index_data.indrelid) AS predicate
+                    pg_get_expr(index_data.indpred, index_data.indrelid) AS predicate,
+                    index_data.indnkeyatts AS key_attribute_count,
+                    index_data.indnatts - index_data.indnkeyatts AS included_attribute_count,
+                    array_agg(attribute.attname ORDER BY index_key.ordinality)
+                        FILTER (WHERE index_key.ordinality <= index_data.indnkeyatts)
+                        AS key_columns,
+                    array_agg(index_option.option ORDER BY index_key.ordinality)
+                        FILTER (WHERE index_key.ordinality <= index_data.indnkeyatts)
+                        AS key_options,
+                    bool_or(
+                        index_key.ordinality <= index_data.indnkeyatts
+                        AND index_key.attnum = 0
+                    ) AS has_expression_key
                 FROM pg_index AS index_data
                 JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
+                JOIN pg_am AS access_method ON access_method.oid = index_class.relam
+                LEFT JOIN unnest(index_data.indkey) WITH ORDINALITY
+                    AS index_key(attnum, ordinality) ON TRUE
+                LEFT JOIN unnest(index_data.indoption) WITH ORDINALITY
+                    AS index_option(option, ordinality)
+                    ON index_option.ordinality = index_key.ordinality
+                LEFT JOIN pg_attribute AS attribute
+                    ON attribute.attrelid = index_data.indrelid
+                   AND attribute.attnum = index_key.attnum
                 WHERE index_class.relname = :index_name
                   AND index_data.indrelid = 'trip_membership'::regclass
+                GROUP BY
+                    access_method.amname,
+                    index_data.indisunique,
+                    index_data.indisvalid,
+                    index_data.indisready,
+                    index_data.indpred,
+                    index_data.indrelid,
+                    index_data.indnkeyatts,
+                    index_data.indnatts
                 """
             ),
             {"index_name": index_name},
         ).mappings().one_or_none()
+
+
+def _execute_concurrently(engine, statement: str) -> None:
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text(statement))
 
 
 def _seed_account_and_trip(engine) -> None:
@@ -249,6 +285,36 @@ def test_pr06b1a_postgresql_migration_recovery_and_schema_contract() -> None:
         legacy = _index_catalog(engine, LEGACY_INDEX)
         assert legacy is not None and legacy["is_valid"] and legacy["is_ready"]
 
+        # A same-name, valid B-tree index with an expression key must fail
+        # closed; silently accepting it would weaken the uniqueness contract.
+        _execute_concurrently(
+            engine,
+            """
+            CREATE UNIQUE INDEX CONCURRENTLY ux_trip_membership_active_account
+            ON trip_membership (trip_id, user_id, lower(status))
+            WHERE user_id IS NOT NULL AND status <> 'removed'
+            """,
+        )
+        malformed_shape = _run_alembic(url, "upgrade", "head", succeeds=False)
+        assert "has an unexpected definition" in malformed_shape
+        assert _index_catalog(engine, LEGACY_INDEX)["is_valid"] is True
+        _execute_concurrently(engine, "DROP INDEX CONCURRENTLY ux_trip_membership_active_account")
+
+        # A same-name index with a changed predicate is equally unsafe and
+        # must leave the legacy uniqueness guard intact.
+        _execute_concurrently(
+            engine,
+            """
+            CREATE UNIQUE INDEX CONCURRENTLY ux_trip_membership_active_account
+            ON trip_membership (trip_id, user_id)
+            WHERE user_id IS NOT NULL AND status = 'joined'
+            """,
+        )
+        malformed_predicate = _run_alembic(url, "upgrade", "head", succeeds=False)
+        assert "has an unexpected definition" in malformed_predicate
+        assert _index_catalog(engine, LEGACY_INDEX)["is_valid"] is True
+        _execute_concurrently(engine, "DROP INDEX CONCURRENTLY ux_trip_membership_active_account")
+
         # Cancel an actual CREATE INDEX CONCURRENTLY while the old unique index
         # remains authoritative. The next upgrade must repair, not destroy rows.
         _create_cancelled_target_index(url)
@@ -261,6 +327,12 @@ def test_pr06b1a_postgresql_migration_recovery_and_schema_contract() -> None:
         active = _index_catalog(engine, ACTIVE_INDEX)
         assert active is not None
         assert active["is_unique"] and active["is_valid"] and active["is_ready"]
+        assert active["access_method"] == "btree"
+        assert active["key_attribute_count"] == 2
+        assert active["included_attribute_count"] == 0
+        assert tuple(active["key_columns"]) == ("trip_id", "user_id")
+        assert tuple(active["key_options"]) == (0, 0)
+        assert active["has_expression_key"] is False
         assert active["predicate"] == "((user_id IS NOT NULL) AND ((status)::text <> 'removed'::text))"
         assert _index_catalog(engine, LEGACY_INDEX) is None
 
