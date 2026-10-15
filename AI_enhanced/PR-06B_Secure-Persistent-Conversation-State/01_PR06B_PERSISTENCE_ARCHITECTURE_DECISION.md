@@ -48,6 +48,8 @@ On account rejoin after removal:
 
 The existing index currently applies whenever `user_id IS NOT NULL`, even after removal. [backend/app/db/models.py:156](../../backend/app/db/models.py#L156) This must be migrated deliberately, not silently worked around in conversation code.
 
+The approved migration shape is an active-only PostgreSQL partial unique index, created and validated concurrently **before** the old index is dropped. Downgrade must refuse safely if valid rejoin history has created both an old and new Membership for one account/Trip; it must never collapse those rows. Account join/rejoin must use authenticated account identity rather than an invite-body email. Guest-to-account adoption is not a V1 path. The complete impact/migration review is [04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md](04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md).
+
 ## Proposed data model
 
 ### `conversation`

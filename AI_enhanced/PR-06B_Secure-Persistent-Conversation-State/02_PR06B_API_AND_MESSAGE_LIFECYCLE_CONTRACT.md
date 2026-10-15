@@ -8,14 +8,20 @@ Introduce a durable Conversation API rather than changing the current client-his
 
 ```text
 POST   /api/trips/{trip_id}/conversations
+GET    /api/trips/{trip_id}/conversations?scope=&context_key=
+GET    /api/trips/{trip_id}/conversations/{conversation_id}
 GET    /api/trips/{trip_id}/conversations/{conversation_id}/messages?before=&limit=
+GET    /api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission_id}
 POST   /api/trips/{trip_id}/conversations/{conversation_id}/messages
+POST   /api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission_id}/recover
 DELETE /api/trips/{trip_id}/conversations/{conversation_id}
 ```
 
 All endpoints authenticate through the existing bearer/Membership path. The server derives Trip and Membership scope; neither is accepted as a client authority. [backend/app/api/main.py:195](../../backend/app/api/main.py#L195)
 
 The old `POST /api/trips/{trip_id}/chat` remains an explicit compatibility concern during migration. It must not silently accept a client history as the new authority after the durable UI path is released.
+
+The discovery endpoint returns only owner-scoped conversation metadata, latest safe submission state, and no other member's content. The conversation/submission reads let a refreshed, re-logged-in, or second authorized account device find the durable state without possessing the original idempotency key. They never make a Trip ID, Membership ID, invite link, or Organizer role an identity substitute.
 
 ## Read and pagination contract
 
@@ -37,6 +43,7 @@ Canonical request input includes Conversation ID, owner scope, text, selected it
 | Same key, different payload | `409 idempotency_key_conflict`. |
 | New key while another submission is active | `409 conversation_busy`. |
 | Deleted, expired, revoked, or removed owner | Access-denied/not-found response with no context or result persistence. |
+| Expired running submission and original key is unavailable | Authorized owner discovers its `submission_id`, then calls `.../recover` with a **new** idempotency key. Under the Conversation lock the server verifies lease expiry, fences/terminally abandons the old attempt, and starts/reclaims only the stored original request. A non-expired submission remains busy. |
 
 ## State machine and short transactions
 
@@ -59,7 +66,14 @@ No transaction remains open during model/provider execution. This follows the ex
 - Completion requires the row to still be `running`, the fence to match, the Conversation not deleted, and the owner Membership to remain active.
 - A late worker with an older fence is rejected and cannot write an assistant reply, options, telemetry content, or resurrect deleted data.
 - A same-key retry can reclaim only its own expired submission; a distinct new key remains `409 conversation_busy` while an active submission exists.
+- Recovery without the original key is an explicit, owner-authorized operation on the discovered submission ID; it must use a separate recovery idempotency key and cannot accept replacement text. It increments fencing before any provider retry.
 - V1 intentionally has no queue or background provider worker.
+
+### Database-unavailable and result-persistence failure
+
+- If the initial authorization/lock/submission transaction cannot commit, return `503 conversation_state_unavailable` and do **not** invoke the provider.
+- If the post-provider completion transaction cannot establish state or persist safely, do not return a successful assistant result. Discard the in-memory provider body, emit only a content-free failure category, and return retryable `503 conversation_result_unavailable` when possible.
+- A durable `failed` state is written only when that transaction actually commits. If the database is unavailable, no claim that it failed/completed may be made; owner discovery/recovery resolves state after restoration.
 
 ## Server-owned bounded context adapter
 
@@ -90,3 +104,12 @@ Stale, deleted, ambiguous, conflicting, or no-op options return a safe clarifica
 Deletion is an owner-authorized short transaction that marks the Conversation deleted, clears active submission eligibility, and schedules primary-record purge no later than 30 days later. Context/list/read queries filter deletion immediately. Completion transactions check deletion after acquiring their lock, so an in-flight run cannot recreate output.
 
 A scheduled purge worker is mandatory for the 30-day deletion SLA and 180-day retention policy. It must be idempotent, batchable, observable through content-free counters/categories, and tested with a controlled clock. No existing scheduler is evidence that this contract has been implemented.
+
+The implementation must add a distinct purge execution path rather than treating the current in-process decision scheduler as proof of compliance. Each run claims due rows with database-safe batching/leases, deletes child rows before the conversation root, records content-free success/failure/overdue counters, retries after interruption, and alerts before `purge_due_at` is missed. Deployment needs a single documented scheduler ownership/leader policy and a catch-up run after downtime; no background provider queue is introduced.
+
+### Exact legacy `/chat` cutover policy
+
+1. Deploy durable APIs and server-owned authorization first; do not pass durable Conversation IDs or durable history through `/chat`.
+2. PR-06B.4 migrates the shipped Trip client to the durable endpoints. Its normal path sends no `history` field to `/chat`.
+3. After the release's client-usage verification window, default-disable legacy history chat and return a deterministic `410 legacy_chat_endpoint_retired` for `/chat` history calls. A time-bounded, explicitly configured rollback exception may exist only for an identified old client build and still must remain isolated from durable conversations.
+4. Remove that exception in a separately approved deprecation change. `/chat` must never merge client history with durable history or become a read/write alias for Conversations.

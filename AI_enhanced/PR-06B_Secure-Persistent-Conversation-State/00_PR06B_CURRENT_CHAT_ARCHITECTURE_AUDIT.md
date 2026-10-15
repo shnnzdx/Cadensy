@@ -69,6 +69,8 @@ Account Membership lookup excludes `removed` rows. [backend/app/domain/auth.py:2
 
 Therefore a later account rejoin cannot safely create a fresh Membership row without first changing that index. Reusing the removed row would violate D5 by reconnecting the new membership incarnation to old private conversations. PR-06B.1 must replace this with an active-only account membership uniqueness rule and create a new Membership row for rejoin. The Membership primary key is then the required ownership incarnation; no extra “incarnation number” is needed for V1.
 
+The dedicated lifecycle audit confirms that this is an implemented defect, not a hypothetical migration concern: both legacy and protected account invite joins query the old row without excluding `removed`, and the protected writer therefore misses its revision invalidation. It also distinguishes active-group reads from historical membership attribution; see [04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md](04_PR06B_MEMBERSHIP_REJOIN_IMPACT_AUDIT.md).
+
 ## Current tests relevant to preservation
 
 - `backend/tests/test_chat.py`: endpoint/auth/chat baseline coverage.
