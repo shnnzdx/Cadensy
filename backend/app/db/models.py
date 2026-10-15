@@ -149,17 +149,30 @@ class TripMembership(Base, TimestampMixin):
     """角色挂在这张表上,不挂在账户上。
 
     同一个人可以在 A 旅行是组织者、B 旅行是普通成员。
-    guest 的 user_id 为空;以后绑定账户时**只更新这一行的 user_id**,不新建成员。
+    Guest 的 user_id 为空。PR-06B V1 不把 Guest 历史绑定/转移给账户；
+    移除后的账户重返会创建一个新的 Membership incarnation。
     """
 
     __tablename__ = "trip_membership"
     __table_args__ = (
+        CheckConstraint(
+            "(quarantined_at IS NULL AND quarantine_reason IS NULL "
+            "AND quarantined_by_membership_id IS NULL) OR "
+            "(quarantined_at IS NOT NULL AND quarantine_reason IS NOT NULL "
+            "AND quarantined_by_membership_id IS NOT NULL)",
+            name="ck_trip_membership_quarantine_audit_complete",
+        ),
+        CheckConstraint(
+            "quarantine_reason IS NULL OR quarantine_reason IN "
+            "('security_incident', 'abuse', 'unauthorized_access', 'organizer_emergency')",
+            name="ck_trip_membership_quarantine_reason",
+        ),
         Index(
-            "one_membership_per_user_per_trip",
+            "ux_trip_membership_active_account",
             "trip_id",
             "user_id",
             unique=True,
-            postgresql_where="user_id IS NOT NULL",
+            postgresql_where="user_id IS NOT NULL AND status <> 'removed'",
         ),
     )
 
@@ -170,6 +183,13 @@ class TripMembership(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(20), default="participant")  # organizer | participant
     join_method: Mapped[str] = mapped_column(String(20), default="invite_guest")
     status: Mapped[str] = mapped_column(String(30), default="invited")
+    # Quarantine revokes Trip access without changing the historical Membership
+    # incarnation or turning an in-flight electorate into a live roster query.
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quarantine_reason: Mapped[str | None] = mapped_column(String(40))
+    quarantined_by_membership_id: Mapped[str | None] = mapped_column(
+        ForeignKey("trip_membership.id")
+    )
 
     trip: Mapped[Trip] = relationship(back_populates="memberships")
 
@@ -450,6 +470,10 @@ class DecisionRound(Base):
 
     __tablename__ = "decision_round"
     __table_args__ = (
+        CheckConstraint(
+            "electorate_count IS NULL OR electorate_count >= 0",
+            name="ck_decision_round_electorate_count_nonnegative",
+        ),
         Index(
             "one_open_round_per_item",
             "plan_item_id",
@@ -472,6 +496,9 @@ class DecisionRound(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # A round can be extended once. More time is fine; never settling is not.
     extended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # NULL is reserved for pre-PR-06B.1A historical rounds whose electorate
+    # cannot be reconstructed safely. New writers set this exactly once.
+    electorate_count: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class Vote(Base, TimestampMixin):
