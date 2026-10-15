@@ -138,6 +138,15 @@ def _member_count(db: Session, trip_id: str) -> int:
     return len(db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all())
 
 
+class LegacyElectorateUnavailable(Exception):
+    """A pre-cutover open Round has no immutable opening electorate.
+
+    Counting the current roster would let a later lifecycle mutation rewrite
+    the Round's denominator.  Such Rows remain historical data, but V1 must
+    not settle them until an explicitly approved recovery procedure exists.
+    """
+
+
 def _current_participant_count(db: Session, trip_id: str) -> int:
     return len(
         db.scalars(
@@ -778,11 +787,11 @@ def settle_round(db: Session, round_: DecisionRound) -> str:
     item = db.get(PlanItem, round_.plan_item_id)
     trip_id = item.plan.trip_id
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    electorate_count = (
-        round_.electorate_count
-        if round_.electorate_count is not None
-        else _member_count(db, trip_id)
-    )
+    if round_.electorate_count is None:
+        raise LegacyElectorateUnavailable(
+            "Legacy open Round has no immutable electorate count"
+        )
+    electorate_count = round_.electorate_count
     winner = _winner(round_, votes, electorate_count)
 
     option = next((o for o in round_.options if o["id"] == winner), None)
@@ -859,9 +868,13 @@ def settle_due_rounds(db: Session, now: datetime | None = None) -> list[str]:
             DecisionRound.status == "open", DecisionRound.deadline <= now
         )
     ).all()
+    settled: list[str] = []
     for round_ in due:
+        if round_.electorate_count is None:
+            continue
         settle_round(db, round_)
-    return [r.id for r in due]
+        settled.append(round_.id)
+    return settled
 
 
 # -------------------- Path C: confirmation --------------------

@@ -44,6 +44,7 @@ _VOTE_RESPONSE_FIELDS = frozenset(
         "winning_option_id",
         "responded",
         "total_members",
+        "electorate_count_available",
         "tally",
         "my_vote",
     }
@@ -204,11 +205,7 @@ def _round_has_all_votes(session: Session, round_: DecisionRound) -> bool:
         raise VoteRoundMissing("Decision round has no Plan item")
     total = round_.electorate_count
     if total is None:
-        total = len(
-            session.scalars(
-                select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-            ).all()
-        )
+        return False
     return total > 0 and len(votes) >= total
 
 
@@ -220,12 +217,6 @@ def vote_round_out(session: Session, round_: DecisionRound, membership_id: str) 
         raise VoteRoundMissing("Decision round has no Plan item")
     votes = session.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
     total = round_.electorate_count
-    if total is None:
-        total = len(
-            session.scalars(
-                select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-            ).all()
-        )
     tally: dict[str, int] = {}
     for vote in votes:
         tally[vote.option_id] = tally.get(vote.option_id, 0) + 1
@@ -244,6 +235,7 @@ def vote_round_out(session: Session, round_: DecisionRound, membership_id: str) 
         "winning_option_id": round_.winning_option_id,
         "responded": len(votes),
         "total_members": total,
+        "electorate_count_available": total is not None,
         "tally": tally,
         "my_vote": my_vote,
     }

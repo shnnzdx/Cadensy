@@ -1,10 +1,7 @@
 # PR-06B.1A.2 — Membership Lifecycle Implementation Report
 
-Status: **CHANGES REQUIRED for final integration review.** The PR-06B.1A.2
-security acceptance suite passes on local disposable PostgreSQL. The complete
-backend suite has one order-dependent AI-tool isolation failure that passes in
-isolation and is not attributed to this change; it must be resolved or
-explicitly waived before a repository-wide green gate. No frontend work,
+Status: **PASS for the PR-06B.1A.2 integration review.** All backend tests
+pass against a disposable local PostgreSQL database. No frontend work,
 Conversation persistence, AWS action, push, or merge was performed.
 
 ## Delivered contract
@@ -13,7 +10,7 @@ Conversation persistence, AWS action, push, or merge was performed.
 
 | Route | Identity authority | Mutation contract |
 |---|---|---|
-| `POST /api/invites/{token}/join` | Public Guest payload: `display_name` only | Uses the Trip-root Guest writer. An `email` payload receives `422` with the Account-join migration message; no `User` lookup or creation occurs. |
+| `POST /api/invites/{token}/join` | Public Guest payload: `display_name` only | Uses the Trip-root Guest writer. An `email` payload receives `409 account_join_requires_authenticated_session`; no `User` lookup or creation occurs. |
 | `POST /api/invites/{token}/account-join` | Verified Account bearer only | Empty, extra-forbidden body; the writer locks and revalidates `AuthSession`, derives its `user_id`, and never trusts email or a body User ID. |
 | `DELETE /api/trips/{trip_id}/members/{membership_id}` | Active Organizer + credential reauthorization | Always uses the protected durable writer; idempotency and expected Trip-facts revision headers are mandatory. |
 | `POST /api/trips/{trip_id}/members/{membership_id}/quarantine` | Active non-quarantined Organizer | Protected durable emergency operation; categorical reason, idempotency, and expected revision are mandatory. |
@@ -60,9 +57,11 @@ Trip root
 - Current roster, dashboard/invite counts, newly classified constraints, and
   new Proposal affected sets use the current-participant predicate.
 - New Rounds write immutable `DecisionRound.electorate_count`; all-voted,
-  response display, and reopen settlement use it. Historical null-count
-  Rounds retain their preexisting fallback semantics; no completed history is
-  rewritten.
+  response display, and reopen settlement use it. A legacy closed null-count
+  Round exposes `total_members: null` and `electorate_count_available: false`;
+  it is never recomputed from today's roster. A legacy open null-count Round
+  cannot settle (manually, by all-voted, or by the scheduler) until a separately
+  approved recovery procedure exists.
 - Quarantine locks nonterminal decisions but does not settle, apply, reparent,
   or recalculate them. Existing Vote and ProposalDecision rows remain bound to
   their original Membership IDs.
@@ -77,6 +76,8 @@ All commands used a disposable local PostgreSQL database and `MOCK_AI=1`.
 | PR-06B.1A.2 lifecycle + invite/auth/kernel + B2E + schema/policy/migration | 92 passed |
 | Protected vote/proposal/change/idempotency/preference/Guest credential/profile regressions | 186 passed |
 | Isolated AI read-only tool regression | 1 passed |
+| Exact collected prefix through the former AI-tool failure | 47 passed |
+| Full backend suite (`pytest -q --tb=short`) | 1152 passed, 10 Alembic deprecation warnings |
 | `python -m compileall -q app tests` and `git diff --check` | passed |
 
 The lifecycle suite proves real PostgreSQL Account rejoin concurrency, exact
@@ -84,15 +85,39 @@ once revisions, Decision Window rejection, durable replay and conflicting-key
 rejection, Guest credential and invite containment, Account-session retention,
 and Account/Guest HTTP identity separation.
 
+## Final integration remediation
+
+- **AI-tool failure:** the former `test_tools_do_not_write_decision_or_plan_tables`
+  report was not reproducible. The exact collected predecessor sequence is
+  green and the complete suite is green. No application-side tool write or
+  authorization bypass was found. The real test-isolation correction is a
+  teardown for this suite's separately committed PostgreSQL writer Sessions;
+  it cannot be the source of that earlier target because this file is collected
+  later.
+- **Guest error contract:** the frozen response is restored to `409
+  account_join_requires_authenticated_session`. HTTP tests prove that a
+  rejected email-bearing Guest request creates neither a User nor a Membership.
+- **Legacy decisions:** Open Rows with a null immutable count cannot settle;
+  their all-voted shortcut is disabled. Closed null-count Rows expose an
+  unavailable count, not a derived current roster. Quarantine regression tests
+  preserve the original Vote and ProposalDecision Membership IDs and leave
+  incomplete decisions nonterminal.
+- **Authorization graph:** Account/Guest bearer resolution, Trip reads, Trip
+  and Plan kernels, Preview revalidation, and durable replay use the central
+  active-membership policy. Global Account sessions remain usable for other
+  Trips; revoked Guest tokens and revoked invite links do not regain access.
+  No remaining backend authorization gap was found in the audited paths.
+
 ## Deferred and remaining work
 
 - PR-06B.1A.3 owns frontend Account Join integration; backend contracts are
   ready but no `trip/` UI was changed here.
 - Persistent Conversation, recovery, AI provider changes, telemetry changes,
   deployment, AWS, and PR-06C remain out of scope.
-- `pytest -q` currently stops at an existing order-dependent failure in
-  `tests/test_agents_tools.py::test_tools_do_not_write_decision_or_plan_tables`:
-  it observes writes after prior suite state, while the same test passes in a
-  fresh isolated disposable database. This must be investigated as test
-  isolation before a full-suite PASS; it is not represented as a lifecycle
-  success claim.
+- The previously reported AI-tool failure could not be reproduced. Its exact
+  collected prefix and the complete suite pass. No preceding contaminator or
+  AI authorization write path was found. The investigation did find a real,
+  later-order test-isolation flaw: this lifecycle suite used independently
+  committed writer Sessions without teardown. It now deletes its complete
+  owned graph after each test. Its position after `test_agents_tools.py` means
+  it could not have caused the earlier AI-tool report.

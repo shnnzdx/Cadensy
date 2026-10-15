@@ -259,7 +259,7 @@ def test_guest_invite_join_uses_trip_root_and_advances_both_revisions(test_engin
 def test_scheduler_terminal_state_is_retry_safe_and_advances_plan_revision(test_engine):
     seed = _seed(test_engine)
     with _factory(test_engine).begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_); db.flush(); round_id = round_.id
     assert settle_due_round(session_factory=_factory(test_engine), trip_id=seed["trip"], round_id=round_id, now=datetime.now(timezone.utc)) is True
     assert settle_due_round(session_factory=_factory(test_engine), trip_id=seed["trip"], round_id=round_id, now=datetime.now(timezone.utc)) is False
@@ -329,7 +329,7 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
         )
     elif case == "settle":
         with factory.begin() as db:
-            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
             db.add(round_)
             db.flush()
             resource_id = round_.id
@@ -343,7 +343,7 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
         operation = lambda: expire_due_proposal(session_factory=factory, trip_id=seed["trip"], proposal_id=resource_id, now=datetime.now(timezone.utc))
     elif case == "extend":
         with factory.begin() as db:
-            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="extend", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="extend", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
             db.add(round_)
             db.flush()
             resource_id = round_.id
@@ -447,7 +447,7 @@ def test_scheduler_final_commit_failure_restores_due_terminal_state(test_engine,
     factory = _factory(test_engine)
     with factory.begin() as db:
         if case == "settle":
-            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         else:
             row = ChangeProposal(plan_item_id=seed["item"], action_type="edit", before_json={}, after_json={}, requested_by_membership_id=seed["guest"], status="waiting_affected_members", deadline=datetime.now(timezone.utc) - timedelta(minutes=1))
         db.add(row)
@@ -484,7 +484,7 @@ def test_organizer_ledger_failure_rolls_back_every_action_family(test_engine, op
     factory = _factory(test_engine)
     with factory.begin() as db:
         if operation == organizer_actions.ROUND_EXTEND_OPERATION:
-            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
         else:
             row = ChangeProposal(plan_item_id=seed["item"], action_type="edit", before_json={}, after_json={}, requested_by_membership_id=seed["guest"], status="escalated" if operation == organizer_actions.PROPOSAL_DEADLOCK_OPERATION else "waiting_affected_members", deadline=datetime.now(timezone.utc) + timedelta(hours=1))
         db.add(row)
@@ -587,7 +587,7 @@ def test_organizer_http_gate_is_default_off_protected_on_and_production_closed(t
     monkeypatch.setattr(api, "SessionLocal", factory)
     monkeypatch.setattr(db_session, "SessionLocal", factory)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="http", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="http", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
         db.add(round_)
         db.flush()
         round_id = round_.id
@@ -599,7 +599,7 @@ def test_organizer_http_gate_is_default_off_protected_on_and_production_closed(t
         # The schema permits one open Round per item.  Closing the exercised
         # Legacy fixture lets the protected branch use a distinct real Round.
         db.get(DecisionRound, round_id).status = "closed"
-        second = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="protected", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+        second = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="protected", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
         db.add(second)
         db.flush()
         protected_round_id = second.id
@@ -658,7 +658,7 @@ def test_scheduler_job_gate_selects_protected_due_claim_and_retries_terminal_sta
     seed = _seed(test_engine)
     factory = _factory(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="job", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="job", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_)
         db.flush()
         round_id = round_.id
@@ -680,7 +680,7 @@ def test_due_settlement_and_real_booking_serialize_then_stale_booking_is_rejecte
     seed = _seed(test_engine)
     factory = _factory(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_)
         db.flush()
         round_id = round_.id
@@ -795,7 +795,7 @@ def test_extension_and_settlement_orders_recheck_round_eligibility(test_engine):
     factory = _factory(test_engine)
     first = _seed(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=first["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=first["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_); db.flush(); round_id = round_.id
     extended = organizer_actions.execute_protected_organizer_action(session_factory=factory, scope=_scope(first), credential=CredentialProof.from_bearer_token(first["token"]), command=organizer_actions.ProtectedOrganizerAction(organizer_actions.ROUND_EXTEND_OPERATION, round_id, "extend-first", 0), keyring=_keyring())
     assert extended.plan_revision == 1
@@ -805,7 +805,7 @@ def test_extension_and_settlement_orders_recheck_round_eligibility(test_engine):
 
     second = _seed(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=second["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=second["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_); db.flush(); round_id = round_.id
     assert settle_due_round(session_factory=factory, trip_id=second["trip"], round_id=round_id, now=datetime.now(timezone.utc)) is True
     with pytest.raises(legacy_organizer.NothingToDo):
@@ -882,7 +882,7 @@ def test_real_overlap_expiry_blocks_then_stales_proposal_decision(test_engine):
 def test_real_overlap_extension_blocks_then_scheduler_rechecks_deadline(test_engine):
     seed = _seed(test_engine); factory = _factory(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="overlap", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open"); db.add(round_); db.flush(); round_id = round_.id
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="overlap", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3); db.add(round_); db.flush(); round_id = round_.id
     outcomes, pids = _real_writer_overlap(test_engine,
         lambda: organizer_actions.execute_protected_organizer_action(session_factory=factory, scope=_scope(seed), credential=CredentialProof.from_bearer_token(seed["token"]), command=organizer_actions.ProtectedOrganizerAction(organizer_actions.ROUND_EXTEND_OPERATION, round_id, "overlap-extend", 0), keyring=_keyring()),
         lambda: settle_due_round(session_factory=factory, trip_id=seed["trip"], round_id=round_id, now=datetime.now(timezone.utc)),

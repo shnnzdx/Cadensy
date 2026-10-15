@@ -32,7 +32,7 @@ It does **not** create `conversation`, `conversation_message`, `conversation_sub
 
 | API | Authentication | Input | Outcome |
 |---|---|---|---|
-| `POST /api/invites/{token}/join` | Public | `display_name` only | Creates a new Guest Membership plus bounded GuestSession. `email` is rejected with `422` directing the client to authenticated Account Join; no User lookup/write occurs. |
+| `POST /api/invites/{token}/join` | Public | `display_name` only | Creates a new Guest Membership plus bounded GuestSession. `email` is rejected with `409 account_join_requires_authenticated_session`; no User lookup/write occurs. |
 | `POST /api/invites/{token}/account-join` | Valid Account bearer, never Guest bearer | No email or account ID; optional presentation-free request body | Derives User from locked `AuthSession`, creates/returns active Account Membership, and returns server-derived profile/Membership data. |
 
 `User.password_hash IS NULL` is an unclaimed legacy identity. Account Join denies it without creating a password, session, Membership, Guest-history merge, or inferred email ownership. A future verified email credential-activation flow is separately scoped.

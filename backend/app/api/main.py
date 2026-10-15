@@ -734,12 +734,6 @@ def _round_out(db: Session, round_: DecisionRound, me: TripMembership | None = N
     item = db.get(PlanItem, round_.plan_item_id)
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
     total = round_.electorate_count
-    if total is None:
-        total = len(
-            db.scalars(
-                select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-            ).all()
-        )
     tally: dict[str, int] = {}
     for vote in votes:
         tally[vote.option_id] = tally.get(vote.option_id, 0) + 1
@@ -758,6 +752,7 @@ def _round_out(db: Session, round_: DecisionRound, me: TripMembership | None = N
         "winning_option_id": round_.winning_option_id,
         "responded": len(votes),
         "total_members": total,
+        "electorate_count_available": total is not None,
         "tally": tally,
         "my_vote": my_vote,
     }
@@ -769,9 +764,7 @@ def _round_has_all_votes(db: Session, round_: DecisionRound) -> bool:
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
     total = round_.electorate_count
     if total is None:
-        total = len(
-            db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all()
-        )
+        return False
     return total > 0 and len(votes) >= total
 
 
@@ -1633,8 +1626,8 @@ def join_invite(
         raise HTTPException(422, "Display name is required")
     if body.email is not None:
         raise HTTPException(
-            422,
-            "Guest Join does not accept email identity; use authenticated account-join",
+            409,
+            "account_join_requires_authenticated_session",
         )
     try:
         joined = protected_membership_join.join_guest_invite_under_trip_root(
@@ -2555,7 +2548,10 @@ def settle(
     if _b2c_round_settlement_gate_enabled():
         return _protected_round_settlement(round_id=round_id, membership=me, authorization=authorization, idempotency_key=idempotency_key, expected_plan_revision=expected_plan_revision)
     round_ = _require_scoped_round(db, me, round_id)
-    orch.settle_round(db, round_)
+    try:
+        orch.settle_round(db, round_)
+    except orch.LegacyElectorateUnavailable as exc:
+        raise HTTPException(409, "legacy_round_electorate_unavailable") from exc
     db.commit()
     return _round_out(db, round_, me)
 
@@ -2577,6 +2573,8 @@ def _protected_round_settlement(*, round_id: str, membership: TripMembership, au
         result = protected_round_settlements.execute_protected_round_settlement(session_factory=SessionLocal, scope=scope, credential=CredentialProof.from_bearer_token(token), command=protected_round_settlements.ProtectedRoundSettlement(round_id, idempotency_key, revision), keyring=protected_round_settlements.StaticHmacKeyring(protected_round_settlements.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))))
     except protected_round_settlements.RoundSettlementRoundMissing as exc:
         raise HTTPException(404, "Round not found") from exc
+    except orch.LegacyElectorateUnavailable as exc:
+        raise HTTPException(409, "legacy_round_electorate_unavailable") from exc
     except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
         raise HTTPException(409, "Protected round settlement conflicts with current state") from exc
     except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:

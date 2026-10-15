@@ -303,14 +303,23 @@ def test_account_join_returns_existing_membership_on_repeat(client: TestClient, 
 def test_guest_join_rejects_legacy_email_identity_claim(client: TestClient, api_session: Session):
     trip, organizer, _ = _trip(api_session)
     invite = _create_invite(client, organizer, trip)
+    user_count_before = api_session.scalar(select(func.count()).select_from(User))
+    membership_count_before = api_session.scalar(
+        select(func.count()).select_from(TripMembership)
+    )
 
     response = client.post(
         f"/api/invites/{invite['token']}/join",
         json={"display_name": "No Claim", "email": "claimed@example.com"},
     )
 
-    assert response.status_code == 422
-    assert "account-join" in response.json()["detail"]
+    assert response.status_code == 409
+    assert response.json()["detail"] == "account_join_requires_authenticated_session"
+    assert api_session.scalar(select(func.count()).select_from(User)) == user_count_before
+    assert (
+        api_session.scalar(select(func.count()).select_from(TripMembership))
+        == membership_count_before
+    )
 
 
 def test_non_organizer_cannot_create_invite(client: TestClient, api_session: Session):

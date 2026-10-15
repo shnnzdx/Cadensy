@@ -54,7 +54,10 @@ from app.domain.transactions.trip_preferences_common import StaticHmacKeyring
 from app.domain.plans import generator
 from app.domain.transactions import constraint_create, preferences_save
 from app.domain.transactions import membership_remove
-from app.domain.transactions.membership_join import join_invite_under_trip_root
+from app.domain.transactions.membership_join import (
+    join_account_invite_under_trip_root,
+    join_invite_under_trip_root,
+)
 from app.domain.places import service as place_service
 
 
@@ -766,12 +769,25 @@ def test_real_protected_invite_join_during_detached_generator_work_stales_existi
         invite_token = f"generator-{join_kind}-invite-{uuid4().hex}"
         session.add(InviteLink(trip_id=data.trip_id, token_hash=auth_service.token_hash(invite_token), is_primary=True))
         if join_kind == "account":
-            joiner = User(name="Generator account joiner", email=f"generator-join-{uuid4().hex}@example.test")
+            joiner = User(
+                name="Generator account joiner",
+                email=f"generator-join-{uuid4().hex}@example.test",
+                password_hash=auth_service.hash_password("generator-join-password"),
+            )
             session.add(joiner)
             session.flush()
-            email = joiner.email
+            account_token = f"generator-account-{uuid4().hex}"
+            session.add(
+                AuthSession(
+                    user_id=joiner.id,
+                    token_hash=auth_service.token_hash(account_token),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            joiner_id = joiner.id
         else:
-            email = None
+            account_token = None
+            joiner_id = None
 
     provider_entered, release_provider = Event(), Event()
     outcomes: Queue[object] = Queue()
@@ -807,12 +823,20 @@ def test_real_protected_invite_join_during_detached_generator_work_stales_existi
         assert provider_entered.wait(5)
         # This is a real, separately-owned Trip transaction while the Provider
         # is paused.  No Generator Session or root lock survives Prepare.
-        joined = join_invite_under_trip_root(
-            session_factory=factory,
-            token=invite_token,
-            display_name=f"Generator {join_kind} joiner",
-            email=email,
-        )
+        if join_kind == "account":
+            joined = join_account_invite_under_trip_root(
+                session_factory=factory,
+                token=invite_token,
+                account_token=account_token,
+                account_user_id=joiner_id,
+            )
+        else:
+            joined = join_invite_under_trip_root(
+                session_factory=factory,
+                token=invite_token,
+                display_name="Generator guest joiner",
+                email=None,
+            )
         assert (joined.guest_session is not None) is (join_kind == "guest")
     finally:
         release_provider.set()
@@ -1218,6 +1242,15 @@ def test_protected_generator_matches_legacy_business_outcome_for_key_scenarios(
         command=command,
         provider_fetch=provider_fetch,
         planner_call=planner_call,
+    )
+    # The protected path has persisted the detached provider snapshot.  The
+    # fixture deliberately supplies fewer than the production refresh minimum,
+    # so make the legacy comparison consume that exact persisted snapshot
+    # instead of issuing an unrelated real-provider refresh.
+    monkeypatch.setattr(
+        generator.place_service,
+        "_cache_needs_refresh",
+        lambda _rows, *, minimum: False,
     )
     with factory.begin() as session:
         organizer = session.get(TripMembership, legacy_seed.organizer_id)

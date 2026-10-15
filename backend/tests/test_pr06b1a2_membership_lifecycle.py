@@ -8,24 +8,29 @@ from threading import Thread
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
 
 from app.api import main as api
 from app.db import session as db_session
 from app.db.models import (
     AuthSession,
+    ChangeProposal,
     DecisionRound,
     GuestSession,
     InviteLink,
     MutationIdempotency,
     Plan,
+    PlanChange,
     PlanItem,
+    ProposalDecision,
     Trip,
     TripMembership,
     User,
+    Vote,
 )
 from app.domain import auth
+from app.domain.decisions import orchestrator as orch
 from app.domain.trips import service as trip_service
 from app.domain.transactions import (
     CredentialProof,
@@ -50,6 +55,9 @@ from app.domain.transactions.membership_remove import (
     execute_protected_membership_remove,
 )
 from app.domain.transactions.trip_preferences_common import StaticHmacKeyring
+
+
+_seed_records: list[tuple[str, tuple[str, ...]]] = []
 
 
 def _factory(engine):
@@ -137,6 +145,7 @@ def _seed(engine):
             )
         )
         db.flush()
+        _seed_records.append((trip.id, (organizer_user.id, account_user.id, target_user.id)))
         return {
             "trip": trip.id,
             "plan": plan.id,
@@ -153,6 +162,41 @@ def _seed(engine):
             "guest": guest.id,
             "guest_token": guest_token,
         }
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_lifecycle_seed_data(test_engine):
+    """These real-PG tests use independent committed writer Sessions.
+
+    Delete their complete ownership graph after every test so the session-scoped
+    test engine cannot leak a previous lifecycle scenario into another test.
+    """
+
+    _seed_records.clear()
+    yield
+    records, _seed_records[:] = list(_seed_records), []
+    if not records:
+        return
+    with _factory(test_engine).begin() as db:
+        for trip_id, user_ids in records:
+            plan_ids = select(Plan.id).where(Plan.trip_id == trip_id)
+            item_ids = select(PlanItem.id).where(PlanItem.plan_id.in_(plan_ids))
+            round_ids = select(DecisionRound.id).where(DecisionRound.plan_item_id.in_(item_ids))
+            proposal_ids = select(ChangeProposal.id).where(ChangeProposal.plan_item_id.in_(item_ids))
+            db.execute(delete(MutationIdempotency).where(MutationIdempotency.trip_id == trip_id))
+            db.execute(delete(GuestSession).where(GuestSession.trip_id == trip_id))
+            db.execute(delete(InviteLink).where(InviteLink.trip_id == trip_id))
+            db.execute(delete(Vote).where(Vote.round_id.in_(round_ids)))
+            db.execute(delete(ProposalDecision).where(ProposalDecision.proposal_id.in_(proposal_ids)))
+            db.execute(delete(DecisionRound).where(DecisionRound.plan_item_id.in_(item_ids)))
+            db.execute(delete(ChangeProposal).where(ChangeProposal.plan_item_id.in_(item_ids)))
+            db.execute(delete(PlanChange).where(PlanChange.plan_id.in_(plan_ids)))
+            db.execute(delete(PlanItem).where(PlanItem.plan_id.in_(plan_ids)))
+            db.execute(delete(Plan).where(Plan.id.in_(plan_ids)))
+            db.execute(delete(TripMembership).where(TripMembership.trip_id == trip_id))
+            db.execute(delete(AuthSession).where(AuthSession.user_id.in_(user_ids)))
+            db.execute(delete(Trip).where(Trip.id == trip_id))
+            db.execute(delete(User).where(User.id.in_(user_ids)))
 
 
 def _invite(engine, trip_id: str, token: str) -> None:
@@ -304,6 +348,77 @@ def test_decision_window_rejects_normal_join_and_removal_without_effect(test_eng
         assert db.scalar(select(TripMembership.id).where(TripMembership.guest_display_name == "Blocked")) is None
 
 
+def test_rounds_capture_opening_electorate_and_legacy_open_rounds_fail_closed(test_engine):
+    seed = _seed(test_engine)
+    factory = _factory(test_engine)
+    with factory.begin() as db:
+        item = db.get(PlanItem, seed["item"])
+        outcome = orch._do_round(
+            db,
+            item,
+            db.get(Trip, seed["trip"]),
+            "opening electorate regression",
+            orch.Classification(orch.Path.ROUND, "Round", "Regression coverage"),
+            kind="normal",
+            patch={"title": "Updated museum"},
+        )
+        new_round = db.get(DecisionRound, outcome.round_id)
+        assert new_round.electorate_count == 3
+        new_round.status = "closed"
+
+        legacy = DecisionRound(
+            plan_item_id=seed["item"],
+            kind="normal",
+            options=[{"id": "keep", "title": "Keep", "patch": {}}],
+            deadline=datetime.now(timezone.utc) - timedelta(minutes=1),
+            status="open",
+            electorate_count=None,
+        )
+        db.add(legacy)
+        db.flush()
+        db.add(Vote(round_id=legacy.id, trip_membership_id=seed["organizer"], option_id="keep"))
+        # Simulate a post-opening roster change that must never redefine this
+        # legacy round's denominator. Production lifecycle writers reject it.
+        db.get(TripMembership, seed["target"]).status = "removed"
+        legacy_id = legacy.id
+
+    with factory.begin() as db:
+        legacy = db.get(DecisionRound, legacy_id)
+        assert legacy_id not in orch.settle_due_rounds(db)
+        with pytest.raises(orch.LegacyElectorateUnavailable):
+            orch.settle_round(db, legacy)
+        payload = api._round_out(db, legacy)
+        assert payload["total_members"] is None
+        assert payload["electorate_count_available"] is False
+        assert legacy.status == "open"
+
+
+def test_closed_legacy_round_never_recomputes_its_historical_electorate(test_engine):
+    seed = _seed(test_engine)
+    factory = _factory(test_engine)
+    with factory.begin() as db:
+        legacy = DecisionRound(
+            plan_item_id=seed["item"],
+            kind="normal",
+            options=[{"id": "keep", "title": "Keep", "patch": {}}],
+            deadline=datetime.now(timezone.utc) - timedelta(days=1),
+            status="closed",
+            winning_option_id="keep",
+            settled_at=datetime.now(timezone.utc) - timedelta(days=1),
+            electorate_count=None,
+        )
+        db.add(legacy)
+        db.flush()
+        legacy_id = legacy.id
+        db.get(TripMembership, seed["target"]).status = "removed"
+    with factory.begin() as db:
+        legacy = db.get(DecisionRound, legacy_id)
+        assert orch.settle_round(db, legacy) == "keep"
+        payload = api._round_out(db, legacy)
+        assert payload["total_members"] is None
+        assert payload["electorate_count_available"] is False
+
+
 def test_quarantine_revokes_trip_access_credentials_and_invites_once(test_engine):
     seed = _seed(test_engine)
     factory = _factory(test_engine)
@@ -313,15 +428,36 @@ def test_quarantine_revokes_trip_access_credentials_and_invites_once(test_engine
     # containment effect even for malformed/legacy target data.
     target_guest_token = f"gst-target-{seed['trip']}"
     with factory.begin() as db:
-        db.add(
-            DecisionRound(
+        round_ = DecisionRound(
                 plan_item_id=seed["item"],
                 options=[{"id": "keep", "title": "Keep", "patch": {}}],
                 deadline=datetime.now(timezone.utc) + timedelta(hours=1),
                 status="open",
                 electorate_count=3,
             )
+        db.add(round_)
+        db.flush()
+        db.add(Vote(round_id=round_.id, trip_membership_id=seed["target"], option_id="keep"))
+        proposal = ChangeProposal(
+            plan_item_id=seed["item"],
+            action_type="edit",
+            before_json={},
+            after_json={},
+            requested_by_membership_id=seed["organizer"],
+            status="waiting_affected_members",
+            deadline=datetime.now(timezone.utc) + timedelta(hours=1),
         )
+        db.add(proposal)
+        db.flush()
+        db.add(
+            ProposalDecision(
+                proposal_id=proposal.id,
+                trip_membership_id=seed["target"],
+                status="pending",
+            )
+        )
+        proposal_id = proposal.id
+        round_id = round_.id
         db.add(
             GuestSession(
                 membership_id=seed["target"],
@@ -371,6 +507,12 @@ def test_quarantine_revokes_trip_access_credentials_and_invites_once(test_engine
         assert db.query(MutationIdempotency).filter(MutationIdempotency.trip_id == seed["trip"]).count() == 1
         open_round = db.scalar(select(DecisionRound).where(DecisionRound.plan_item_id == seed["item"]))
         assert open_round.status == "open" and open_round.electorate_count == 3
+        assert db.scalar(select(Vote.trip_membership_id).where(Vote.round_id == round_id)) == seed["target"]
+        assert db.scalar(
+            select(ProposalDecision.trip_membership_id).where(
+                ProposalDecision.proposal_id == proposal_id
+            )
+        ) == seed["target"]
     with pytest.raises(auth.AuthRequired):
         with factory() as db:
             auth.membership_for_guest_token(db, target_guest_token)
@@ -427,7 +569,8 @@ def test_account_and_guest_join_routes_enforce_the_public_identity_contract(test
                 headers={"Authorization": f"Bearer {seed['account_token']}"},
                 json={},
             )
-        assert rejected.status_code == 422
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"] == "account_join_requires_authenticated_session"
         assert guest.status_code == 200 and guest.json()["guest_token"].startswith("gst_")
         assert account.status_code == 200
     finally:

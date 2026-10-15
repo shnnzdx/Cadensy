@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
 from app.api import main as api
 from app.db.models import AuthSession, Trip, TripMembership, User
@@ -23,12 +24,20 @@ from app.domain import auth
 
 @contextmanager
 def _client(db: Session):
+    previous_session_local = api.SessionLocal
+    api.SessionLocal = sessionmaker(
+        bind=db.connection(),
+        expire_on_commit=False,
+        future=True,
+        join_transaction_mode="create_savepoint",
+    )
     api.app.dependency_overrides[api.get_session] = lambda: db
     try:
         with TestClient(api.app) as client:
             yield client
     finally:
         api.app.dependency_overrides.clear()
+        api.SessionLocal = previous_session_local
 
 
 def _user(db: Session, *, label: str, password: str = "correct-horse") -> User:
