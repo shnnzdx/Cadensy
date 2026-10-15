@@ -41,10 +41,28 @@ def _require_mapping(value: object, name: str) -> dict[str, Any]:
     return value
 
 
-def _require_evidence_ref(value: object, name: str) -> str:
+def _require_evidence_pointer(value: object, name: str) -> str:
+    """Validate a reviewable pointer without claiming its contents were verified."""
+
     if not isinstance(value, str) or not value.startswith("https://github.com/shnnzdx/Cadensy/"):
         raise CapacityRecoveryContractError(f"{name} must be a Cadensy GitHub evidence reference")
     return value
+
+
+def _require_evidence_attestation(evidence: dict[str, Any], name: str) -> None:
+    """Require reviewable evidence metadata; URL syntax alone is never verification."""
+
+    _require_evidence_pointer(evidence.get("evidence_ref"), name)
+    if not isinstance(evidence.get("evidence_commit_sha"), str) or not _GIT_SHA.fullmatch(
+        evidence["evidence_commit_sha"]
+    ):
+        raise CapacityRecoveryContractError(f"{name} must identify an immutable evidence commit")
+    if not isinstance(evidence.get("evidence_content_sha256"), str) or not _SHA256.fullmatch(
+        evidence["evidence_content_sha256"]
+    ):
+        raise CapacityRecoveryContractError(f"{name} must include an evidence content sha256")
+    if evidence.get("verification") != "INDEPENDENT_HUMAN_REVIEW":
+        raise CapacityRecoveryContractError(f"{name} requires independent human verification")
 
 
 def _require_nonnegative_int(value: object, name: str) -> int:
@@ -110,6 +128,16 @@ class RecoveryRequest:
     expected_current_desired_count: int
     release_desired_count: int
     rollback_evidence_sha: str | None
+
+
+@dataclass(frozen=True)
+class ReleaseIdentity:
+    source_sha: str
+    runtime_image_digest: str
+    migration_runner_digest: str
+    expected_current_task_definition: str
+    expected_current_image_digest: str
+    expected_current_desired_count: int
 
 
 def _require_string(inputs: dict[str, str], name: str) -> str:
@@ -184,8 +212,90 @@ def validate_recovery_inputs(inputs: dict[str, str]) -> RecoveryRequest:
     )
 
 
+def validate_current_recovery_authorization(
+    rollback_evidence_sha: str, current_main_snapshot_sha: str
+) -> str:
+    """Require recovery evidence to be the exact current Main authorization snapshot."""
+
+    if not _GIT_SHA.fullmatch(rollback_evidence_sha):
+        raise CapacityRecoveryContractError("rollback evidence SHA is invalid")
+    if not _GIT_SHA.fullmatch(current_main_snapshot_sha):
+        raise CapacityRecoveryContractError("current Main authorization snapshot SHA is invalid")
+    if rollback_evidence_sha != current_main_snapshot_sha:
+        raise CapacityRecoveryContractError(
+            "recovery authorization is stale or has been revoked by current Main"
+        )
+    return current_main_snapshot_sha
+
+
+def release_identity_from_inputs(
+    request: RecoveryRequest,
+    source_sha: str,
+    runtime_image_digest: str,
+    migration_runner_digest: str,
+) -> ReleaseIdentity:
+    """Bind an ACCEPTED recovery manifest to exactly one immutable promotion request."""
+
+    if request.release_mode != "zero_capacity_recovery":
+        raise CapacityRecoveryContractError("recovery release identity is only valid for zero-capacity recovery")
+    if not _GIT_SHA.fullmatch(source_sha):
+        raise CapacityRecoveryContractError("recovery source SHA is invalid")
+    if not _SHA256.fullmatch(runtime_image_digest):
+        raise CapacityRecoveryContractError("recovery runtime image digest is invalid")
+    if not _SHA256.fullmatch(migration_runner_digest):
+        raise CapacityRecoveryContractError("recovery migration runner digest is invalid")
+    return ReleaseIdentity(
+        source_sha=source_sha,
+        runtime_image_digest=runtime_image_digest,
+        migration_runner_digest=migration_runner_digest,
+        expected_current_task_definition=request.expected_current_task_definition,
+        expected_current_image_digest=request.expected_current_image_digest,
+        expected_current_desired_count=request.expected_current_desired_count,
+    )
+
+
+def _manifest_release_identity(value: object) -> ReleaseIdentity:
+    release = _require_mapping(value, "approved_release")
+    fields = {
+        "source_sha",
+        "runtime_image_digest",
+        "migration_runner_digest",
+        "expected_current_task_definition",
+        "expected_current_image_digest",
+        "expected_current_desired_count",
+    }
+    if set(release) != fields:
+        raise CapacityRecoveryContractError("approved_release fields are incomplete or unapproved")
+    source_sha = release.get("source_sha")
+    runtime_image_digest = release.get("runtime_image_digest")
+    migration_runner_digest = release.get("migration_runner_digest")
+    task_definition = release.get("expected_current_task_definition")
+    image_digest = release.get("expected_current_image_digest")
+    desired_count = release.get("expected_current_desired_count")
+    if not isinstance(source_sha, str) or not _GIT_SHA.fullmatch(source_sha):
+        raise CapacityRecoveryContractError("approved_release source SHA is invalid")
+    if not isinstance(runtime_image_digest, str) or not _SHA256.fullmatch(runtime_image_digest):
+        raise CapacityRecoveryContractError("approved_release runtime digest is invalid")
+    if not isinstance(migration_runner_digest, str) or not _SHA256.fullmatch(migration_runner_digest):
+        raise CapacityRecoveryContractError("approved_release migration digest is invalid")
+    if not isinstance(task_definition, str) or not _TASK_DEFINITION_ARN.fullmatch(task_definition):
+        raise CapacityRecoveryContractError("approved_release task definition is invalid")
+    if not isinstance(image_digest, str) or not _SHA256.fullmatch(image_digest):
+        raise CapacityRecoveryContractError("approved_release baseline image digest is invalid")
+    if isinstance(desired_count, bool) or not isinstance(desired_count, int) or desired_count != 0:
+        raise CapacityRecoveryContractError("approved_release baseline desired count must be zero")
+    return ReleaseIdentity(
+        source_sha=source_sha,
+        runtime_image_digest=runtime_image_digest,
+        migration_runner_digest=migration_runner_digest,
+        expected_current_task_definition=task_definition,
+        expected_current_image_digest=image_digest,
+        expected_current_desired_count=desired_count,
+    )
+
+
 def validate_recovery_safety_manifest(
-    manifest_payload: dict[str, Any], rollback_evidence_sha: str
+    manifest_payload: dict[str, Any], request: RecoveryRequest, release_identity: ReleaseIdentity
 ) -> dict[str, Any]:
     """Fail closed unless reviewed recovery evidence has positive, complete state."""
 
@@ -194,15 +304,17 @@ def validate_recovery_safety_manifest(
         raise CapacityRecoveryContractError("recovery safety manifest schema version is not approved")
     if manifest.get("status") != "ACCEPTED":
         raise CapacityRecoveryContractError("recovery safety manifest is not accepted")
+    if request.release_mode != "zero_capacity_recovery":
+        raise CapacityRecoveryContractError("recovery safety manifest is only valid for zero-capacity recovery")
+    if _manifest_release_identity(manifest.get("approved_release")) != release_identity:
+        raise CapacityRecoveryContractError("approved_release does not match the intended recovery release")
 
     experiment = _require_mapping(manifest.get("isolated_experiment"), "isolated_experiment")
     if experiment.get("status") != "PASSED":
         raise CapacityRecoveryContractError("isolated experiment has not passed")
     if experiment.get("environment") != "isolated-non-production":
         raise CapacityRecoveryContractError("isolated experiment environment is not approved")
-    _require_evidence_ref(experiment.get("evidence_ref"), "isolated experiment evidence")
-    if experiment.get("evidence_commit_sha") != rollback_evidence_sha:
-        raise CapacityRecoveryContractError("isolated experiment evidence is not bound to rollback_evidence_sha")
+    _require_evidence_attestation(experiment, "isolated experiment evidence")
     if experiment.get("rollback_outcome_observed") is not True:
         raise CapacityRecoveryContractError("isolated experiment did not record rollback outcome")
 
@@ -211,12 +323,14 @@ def validate_recovery_safety_manifest(
     )
     if compatibility.get("status") != "COMPATIBLE":
         raise CapacityRecoveryContractError("old runtime forward-schema compatibility is not accepted")
-    _require_evidence_ref(compatibility.get("evidence_ref"), "old runtime schema evidence")
+    _require_evidence_attestation(compatibility, "old runtime schema evidence")
 
     approval = _require_mapping(manifest.get("approval"), "approval")
     if approval.get("status") != "APPROVED":
         raise CapacityRecoveryContractError("recovery safety approval is not approved")
-    _require_evidence_ref(approval.get("evidence_ref"), "recovery safety approval evidence")
+    _require_evidence_attestation(approval, "recovery safety approval evidence")
+    if _manifest_release_identity(approval.get("approved_release")) != release_identity:
+        raise CapacityRecoveryContractError("approval does not match the intended recovery release")
 
     baseline = _require_mapping(manifest.get("approved_service_baseline"), "approved_service_baseline")
     task_definition_arn = baseline.get("task_definition_arn")
@@ -483,6 +597,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-current-desired-count", required=True)
     parser.add_argument("--recovery-desired-count", default="")
     parser.add_argument("--rollback-evidence-sha", default="")
+    parser.add_argument("--authorization-snapshot-sha", default="")
+    parser.add_argument("--source-sha", default="")
+    parser.add_argument("--runtime-image-digest", default="")
+    parser.add_argument("--migration-runner-digest", default="")
     parser.add_argument("--recovery-safety-manifest-json", type=Path)
     parser.add_argument("--service-json", type=Path)
     parser.add_argument("--task-definition-json", type=Path)
@@ -510,8 +628,20 @@ def main(argv: list[str] | None = None) -> int:
         if request.release_mode == "zero_capacity_recovery":
             if args.recovery_safety_manifest_json is None:
                 raise CapacityRecoveryContractError("zero-capacity recovery requires recovery-safety-manifest-json")
+            manifest_payload = _read_json(args.recovery_safety_manifest_json)
+            if manifest_payload.get("status") != "ACCEPTED":
+                raise CapacityRecoveryContractError("recovery safety manifest is not accepted")
+            validate_current_recovery_authorization(
+                request.rollback_evidence_sha or "", args.authorization_snapshot_sha
+            )
+            release_identity = release_identity_from_inputs(
+                request,
+                args.source_sha,
+                args.runtime_image_digest,
+                args.migration_runner_digest,
+            )
             recovery_safety_manifest = validate_recovery_safety_manifest(
-                _read_json(args.recovery_safety_manifest_json), request.rollback_evidence_sha or ""
+                manifest_payload, request, release_identity
             )
         elif args.recovery_safety_manifest_json is not None:
             raise CapacityRecoveryContractError("standard release cannot carry a recovery safety manifest")

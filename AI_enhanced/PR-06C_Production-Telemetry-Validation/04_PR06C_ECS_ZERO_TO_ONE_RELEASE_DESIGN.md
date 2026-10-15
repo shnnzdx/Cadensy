@@ -41,7 +41,7 @@ digests:
 | `expected_current_image_digest` | exact SHA-256 in the currently running definition | rejects old-image/image-provenance drift |
 | `expected_current_desired_count` | exact `0` | makes zero-to-one intentional |
 | `recovery_desired_count` | exact `1` | blocks arbitrary scaling |
-| `rollback_evidence_sha` | 40-hex Main ancestor containing reviewed threat model | binds a recovery attempt to approved rollback evidence |
+| `rollback_evidence_sha` | exact current `origin/main` authorization snapshot | prevents a formerly accepted snapshot from bypassing a later pending or revoked state |
 
 The contract is implemented in
 [`capacity_recovery_contract.py`](../../scripts/cd01/capacity_recovery_contract.py).
@@ -55,9 +55,10 @@ release has run:
 
 1. GitHub's protected `Main` Environment requires a reviewer before AWS
    credentials are configured.
-2. CD-01 validates source ancestry, image digest syntax, the recovery contract,
-   and (in recovery mode) that the evidence commit is an ancestor of `main` and
-   contains this reviewed rollback threat model.
+2. CD-01 validates source ancestry, image digest syntax, and the recovery
+   contract. In recovery mode it requires the workflow commit and supplied
+   `rollback_evidence_sha` to equal the current `origin/main` authorization
+   snapshot, then reads the Manifest from that exact immutable snapshot.
 3. It verifies account, ECR source tags, the exact live service/task-definition
    baseline, container digest, production/gate posture, `awslogs`, secret
    reference, no pending task, a sole completed primary deployment, and the
@@ -121,8 +122,9 @@ at that exact SHA before AWS credentials are configured. The pure offline
 contract rejects unless all of the following are present and positive:
 
 - schema version `pr06c-recovery-safety/v1` and top-level `ACCEPTED` state;
-- a `PASSED` isolated non-production experiment, a Cadensy GitHub evidence
-  reference, the same evidence commit SHA, and an observed rollback outcome;
+- a `PASSED` isolated non-production experiment with an immutable evidence
+  commit/content fingerprint, an evidence pointer, independent-human-review
+  declaration, and an observed rollback outcome;
 - `COMPATIBLE` old-runtime forward-schema evidence;
 - `APPROVED` recovery-safety evidence; and
 - an approved service baseline snapshot.
@@ -131,6 +133,36 @@ The committed Manifest is deliberately `PENDING`: it contains no invented
 experiment, compatibility, or approval data. Therefore every current
 zero-capacity production dispatch fails closed. This is intentional and is not
 a release failure to work around.
+
+### Current authorization snapshot and evidence semantics
+
+An `ACCEPTED` Manifest is effective only when it is stored at the exact current
+`origin/main` SHA. CD-01 rejects both a dispatch SHA and a workflow checkout
+that differ from that snapshot, and re-fetches `origin/main`, reloads the
+Manifest, and compares the same SHA immediately before `UpdateService`. A
+newer `PENDING` or `REVOKED` Manifest therefore supersedes an older accepted
+one before service mutation.
+
+The approved Manifest binds one release identity: source SHA, runtime and
+migration image digests, expected baseline task-definition ARN, baseline image
+digest, and baseline desired count zero. The recovery-safety approval must
+repeat that exact identity. This prevents approval for one release/baseline
+from being reused for another.
+
+The offline parser machine-verifies JSON shape, SHA syntax, equality of the
+current authorization snapshot, release identity, and approved baseline
+configuration. A GitHub URL prefix, an evidence SHA, or a content fingerprint
+is only a required evidence *pointer*; it does **not** prove that an isolated
+experiment occurred, that old-runtime forward-schema compatibility is true, or
+that a named human reviewed the artifact. Those three claims remain distinct
+independent human-review gates. GitHub `Main` Environment required-reviewer
+protection remains a separate mandatory release authorization.
+
+There remains an unavoidable interval after the final Main fetch/baseline read
+and before `UpdateService`; ordinary Git and AWS CLI calls do not provide a
+cross-system compare-and-swap. A new Main revocation or external ECS mutation
+in that interval must be handled as an operational stop/incident condition,
+not silently assumed away.
 
 ### Configuration baseline scope
 

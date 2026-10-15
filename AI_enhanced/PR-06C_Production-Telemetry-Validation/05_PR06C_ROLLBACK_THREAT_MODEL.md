@@ -46,10 +46,12 @@ that evidence.
 The P1-A correction adds a committed, machine-checked
 `08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json`. Its current state is
 `PENDING`, so it is negative evidence and must reject recovery. An accepted
-future Manifest must bind experiment evidence to `rollback_evidence_sha`, prove
-old-runtime forward-schema compatibility, record explicit approval evidence,
-and snapshot the service configuration used for recovery. A Threat Model file
-alone is never sufficient evidence.
+future Manifest must be stored at the exact current Main authorization
+snapshot, bind the experiment, compatibility, approval, source/image, and
+baseline identities, and snapshot the service configuration used for recovery.
+A GitHub URL or SHA-shaped reference is only a pointer: independent reviewers
+must verify the experiment result, forward-schema conclusion, and human
+approval separately. A Threat Model file alone is never sufficient evidence.
 
 ## Post-completion failure policy
 

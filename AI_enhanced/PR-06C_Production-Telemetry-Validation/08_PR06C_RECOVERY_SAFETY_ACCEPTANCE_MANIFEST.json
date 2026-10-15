@@ -6,15 +6,25 @@
     "environment": null,
     "evidence_ref": null,
     "evidence_commit_sha": null,
+    "evidence_content_sha256": null,
+    "verification": "PENDING",
     "rollback_outcome_observed": false
   },
   "old_runtime_forward_schema": {
     "status": "PENDING",
-    "evidence_ref": null
+    "evidence_ref": null,
+    "evidence_commit_sha": null,
+    "evidence_content_sha256": null,
+    "verification": "PENDING"
   },
   "approval": {
     "status": "PENDING",
-    "evidence_ref": null
+    "evidence_ref": null,
+    "evidence_commit_sha": null,
+    "evidence_content_sha256": null,
+    "verification": "PENDING",
+    "approved_release": null
   },
+  "approved_release": null,
   "approved_service_baseline": null
 }

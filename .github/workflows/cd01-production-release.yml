@@ -41,7 +41,7 @@ on:
         default: ""
         type: string
       rollback_evidence_sha:
-        description: Approved Main commit containing reviewed zero-capacity rollback evidence
+        description: Exact current Main authorization snapshot containing the reviewed zero-capacity recovery acceptance manifest
         required: false
         default: ""
         type: string
@@ -121,11 +121,20 @@ jobs:
           [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          authorization_snapshot_sha="$(git rev-parse origin/main)"
           manifest_args=()
+          recovery_authorization_args=()
           if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
-            git merge-base --is-ancestor "${ROLLBACK_EVIDENCE_SHA}" origin/main
-            git show "${ROLLBACK_EVIDENCE_SHA}:AI_enhanced/PR-06C_Production-Telemetry-Validation/08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json" > /tmp/recovery-safety-manifest.json
+            test "${GITHUB_SHA}" = "${authorization_snapshot_sha}"
+            test "${ROLLBACK_EVIDENCE_SHA}" = "${authorization_snapshot_sha}"
+            git show "${authorization_snapshot_sha}:AI_enhanced/PR-06C_Production-Telemetry-Validation/08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json" > /tmp/recovery-safety-manifest.json
             manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${authorization_snapshot_sha}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
           fi
           release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
             --release-mode "${RELEASE_MODE}" \
@@ -134,10 +143,12 @@ jobs:
             --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
             --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
             --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
             "${manifest_args[@]}")"
           echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "migration_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
+          echo "authorization_snapshot_sha=${authorization_snapshot_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Configure AWS credentials from the approved Main environment
         uses: aws-actions/configure-aws-credentials@v6
@@ -159,6 +170,7 @@ jobs:
           EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
           RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
           ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
+          AUTHORIZATION_SNAPSHOT_SHA: ${{ steps.inputs.outputs.authorization_snapshot_sha }}
         run: |
           set -euo pipefail
           test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
@@ -177,8 +189,15 @@ jobs:
           test -n "${previous_image}" && test "${previous_image}" != "null"
           jq -e '.services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .services[0].deploymentConfiguration.minimumHealthyPercent == 100 and .services[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
           manifest_args=()
+          recovery_authorization_args=()
           if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
             manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${AUTHORIZATION_SNAPSHOT_SHA}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
           fi
           release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
             --release-mode "${RELEASE_MODE}" \
@@ -187,6 +206,7 @@ jobs:
             --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
             --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
             --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
             "${manifest_args[@]}" \
             --service-json /tmp/service.json \
             --task-definition-json /tmp/current-task-definition.json)"
@@ -236,20 +256,35 @@ jobs:
         id: pre_promote
         shell: bash
         env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
           RELEASE_MODE: ${{ inputs.release_mode }}
           EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
           EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
           EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
           RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
           ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
+          AUTHORIZATION_SNAPSHOT_SHA: ${{ steps.inputs.outputs.authorization_snapshot_sha }}
         run: |
           set -euo pipefail
           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/pre-promote-service.json
           current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/pre-promote-service.json)"
           aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/pre-promote-task-definition.json
           manifest_args=()
+          recovery_authorization_args=()
           if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
+            git fetch --no-tags origin main
+            test "${AUTHORIZATION_SNAPSHOT_SHA}" = "$(git rev-parse origin/main)"
+            test "${ROLLBACK_EVIDENCE_SHA}" = "${AUTHORIZATION_SNAPSHOT_SHA}"
+            git show "${AUTHORIZATION_SNAPSHOT_SHA}:AI_enhanced/PR-06C_Production-Telemetry-Validation/08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json" > /tmp/recovery-safety-manifest.json
             manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${AUTHORIZATION_SNAPSHOT_SHA}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
           fi
           release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
             --release-mode "${RELEASE_MODE}" \
@@ -258,6 +293,7 @@ jobs:
             --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
             --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
             --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
             "${manifest_args[@]}" \
             --service-json /tmp/pre-promote-service.json \
             --task-definition-json /tmp/pre-promote-task-definition.json)"
@@ -279,6 +315,7 @@ jobs:
         id: verify
         shell: bash
         env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_MODE: ${{ inputs.release_mode }}
           EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
           EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
@@ -286,6 +323,8 @@ jobs:
           RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
           ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          AUTHORIZATION_SNAPSHOT_SHA: ${{ steps.inputs.outputs.authorization_snapshot_sha }}
         run: |
           set -euo pipefail
           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
@@ -311,8 +350,15 @@ jobs:
           curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/health.json
           jq -e '.ok == true' /tmp/health.json >/dev/null
           manifest_args=()
+          recovery_authorization_args=()
           if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
             manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${AUTHORIZATION_SNAPSHOT_SHA}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
           fi
           python scripts/cd01/capacity_recovery_contract.py \
             --release-mode "${RELEASE_MODE}" \
@@ -321,6 +367,7 @@ jobs:
             --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
             --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
             --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
             "${manifest_args[@]}" \
             --verify-deployed-runtime \
             --deployed-service-json /tmp/final-service.json \

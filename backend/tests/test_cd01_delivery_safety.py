@@ -188,6 +188,7 @@ def _safe_live_task_definition() -> dict:
 
 def _accepted_recovery_manifest() -> dict:
     service = _service_baseline()["services"][0]
+    identity = _approved_release_identity()
     return {
         "schema_version": "pr06c-recovery-safety/v1",
         "status": "ACCEPTED",
@@ -196,16 +197,26 @@ def _accepted_recovery_manifest() -> dict:
             "environment": "isolated-non-production",
             "evidence_ref": "https://github.com/shnnzdx/Cadensy/actions/runs/1",
             "evidence_commit_sha": "d" * 40,
+            "evidence_content_sha256": "sha256:" + "e" * 64,
+            "verification": "INDEPENDENT_HUMAN_REVIEW",
             "rollback_outcome_observed": True,
         },
         "old_runtime_forward_schema": {
             "status": "COMPATIBLE",
             "evidence_ref": "https://github.com/shnnzdx/Cadensy/pull/1#issuecomment-1",
+            "evidence_commit_sha": "d" * 40,
+            "evidence_content_sha256": "sha256:" + "f" * 64,
+            "verification": "INDEPENDENT_HUMAN_REVIEW",
         },
         "approval": {
             "status": "APPROVED",
             "evidence_ref": "https://github.com/shnnzdx/Cadensy/pull/1#pullrequestreview-1",
+            "evidence_commit_sha": "d" * 40,
+            "evidence_content_sha256": "sha256:" + "1" * 64,
+            "verification": "INDEPENDENT_HUMAN_REVIEW",
+            "approved_release": copy.deepcopy(identity),
         },
+        "approved_release": copy.deepcopy(identity),
         "approved_service_baseline": {
             "task_definition_arn": service["taskDefinition"],
             "network_configuration": service["networkConfiguration"],
@@ -216,6 +227,31 @@ def _accepted_recovery_manifest() -> dict:
             "health_check_grace_period_seconds": 30,
         },
     }
+
+
+def _approved_release_identity(**overrides: object) -> dict:
+    values: dict[str, object] = {
+        "source_sha": "b" * 40,
+        "runtime_image_digest": "sha256:" + "c" * 64,
+        "migration_runner_digest": "sha256:" + "d" * 64,
+        "expected_current_task_definition": _recovery_inputs()["expected_current_task_definition"],
+        "expected_current_image_digest": _recovery_inputs()["expected_current_image_digest"],
+        "expected_current_desired_count": 0,
+    }
+    values.update(overrides)
+    return values
+
+
+def _release_identity(**overrides: str):
+    request = capacity.validate_recovery_inputs(_recovery_inputs())
+    values = _approved_release_identity()
+    values.update(overrides)
+    return capacity.release_identity_from_inputs(
+        request,
+        values["source_sha"],
+        values["runtime_image_digest"],
+        values["migration_runner_digest"],
+    )
 
 
 def _deployed_service(task_definition: str, count: int = 1, rollout_state: str = "COMPLETED") -> dict:
@@ -279,18 +315,42 @@ def test_zero_capacity_recovery_requires_explicit_mode_and_exactly_one_task():
             capacity.validate_recovery_inputs(_recovery_inputs(**overrides))
 
 
+def test_zero_capacity_recovery_rejects_an_accepted_snapshot_after_main_revokes_it():
+    accepted_snapshot = "d" * 40
+    current_main_snapshot = "e" * 40
+
+    assert (
+        capacity.validate_current_recovery_authorization(
+            accepted_snapshot, accepted_snapshot
+        )
+        == accepted_snapshot
+    )
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_current_recovery_authorization(
+            accepted_snapshot, current_main_snapshot
+        )
+
+    revoked_manifest = _accepted_recovery_manifest()
+    revoked_manifest["status"] = "REVOKED"
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(
+            revoked_manifest, capacity.validate_recovery_inputs(_recovery_inputs()), _release_identity()
+        )
+
+
 def test_zero_capacity_recovery_rejects_pending_manifest_and_threat_model_only_evidence():
     current_manifest = json.loads(RECOVERY_ACCEPTANCE_MANIFEST.read_text(encoding="utf-8"))
 
     with pytest.raises(capacity.CapacityRecoveryContractError):
         capacity.validate_recovery_safety_manifest(
-            current_manifest, _recovery_inputs()["rollback_evidence_sha"]
+            current_manifest, capacity.validate_recovery_inputs(_recovery_inputs()), _release_identity()
         )
 
     with pytest.raises(capacity.CapacityRecoveryContractError):
         capacity.validate_recovery_safety_manifest(
             {"schema_version": "pr06c-recovery-safety/v1", "status": "ACCEPTED"},
-            _recovery_inputs()["rollback_evidence_sha"],
+            capacity.validate_recovery_inputs(_recovery_inputs()),
+            _release_identity(),
         )
 
 
@@ -325,7 +385,7 @@ def test_zero_capacity_recovery_requires_accepted_experiment_schema_and_approval
     manifest = _accepted_recovery_manifest()
 
     capacity.validate_recovery_safety_manifest(
-        manifest, _recovery_inputs()["rollback_evidence_sha"]
+        manifest, capacity.validate_recovery_inputs(_recovery_inputs()), _release_identity()
     )
 
     for path, value in (
@@ -338,8 +398,39 @@ def test_zero_capacity_recovery_requires_accepted_experiment_schema_and_approval
         invalid[path[0]][path[1]] = value
         with pytest.raises(capacity.CapacityRecoveryContractError):
             capacity.validate_recovery_safety_manifest(
-                invalid, _recovery_inputs()["rollback_evidence_sha"]
+                invalid, capacity.validate_recovery_inputs(_recovery_inputs()), _release_identity()
             )
+
+
+def test_recovery_manifest_rejects_unverified_evidence_and_release_identity_mismatch():
+    request = capacity.validate_recovery_inputs(_recovery_inputs())
+    identity = _release_identity()
+    manifest = _accepted_recovery_manifest()
+
+    invalid_evidence = copy.deepcopy(manifest)
+    del invalid_evidence["isolated_experiment"]["evidence_content_sha256"]
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(invalid_evidence, request, identity)
+
+    malformed_evidence = copy.deepcopy(manifest)
+    malformed_evidence["old_runtime_forward_schema"]["evidence_ref"] = "not-a-url"
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(malformed_evidence, request, identity)
+
+    url_only_evidence = copy.deepcopy(manifest)
+    url_only_evidence["approval"]["verification"] = "URL_PREFIX_ONLY"
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(url_only_evidence, request, identity)
+
+    wrong_release = copy.deepcopy(manifest)
+    wrong_release["approved_release"]["source_sha"] = "9" * 40
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(wrong_release, request, identity)
+
+    wrong_approval = copy.deepcopy(manifest)
+    wrong_approval["approval"]["approved_release"]["runtime_image_digest"] = "sha256:" + "9" * 64
+    with pytest.raises(capacity.CapacityRecoveryContractError):
+        capacity.validate_recovery_safety_manifest(wrong_approval, request, identity)
 
 
 def test_capacity_contract_cli_outputs_only_the_derived_recovery_count(capsys):
@@ -522,6 +613,12 @@ def test_cd01_zero_capacity_recovery_is_explicit_and_rechecks_before_service_upd
     assert "rollback evidence" in release_script
     assert "08_pr06c_recovery_safety_acceptance_manifest.json" in release_script
     assert "git show" in release_script
+    assert 'authorization_snapshot_sha="$(git rev-parse origin/main)"' in release_text
+    assert 'test "${GITHUB_SHA}" = "${authorization_snapshot_sha}"' in release_text
+    assert 'test "${ROLLBACK_EVIDENCE_SHA}" = "${authorization_snapshot_sha}"' in release_text
+    assert 'test "${AUTHORIZATION_SNAPSHOT_SHA}" = "$(git rev-parse origin/main)"' in release_text
+    assert "--authorization-snapshot-sha" in release_script
+    assert "--migration-runner-digest" in release_script
     assert "required_reviewers" in release_script
     assert "jq -e 'any(.protection_rules[]?; .type == \"required_reviewers\")'" in release_text
     assert release_text.index("Run read-only schema-head preflight") < release_text.index(
