@@ -156,3 +156,94 @@ full-suite process did not complete within the local command-window available
 for this run, and the required independent multi-session race matrix still
 needs dedicated evidence. Neither limitation is waived by the passing focused
 tests.
+
+## Final acceptance remediation appendix
+
+### Recovery replay and fence identity
+
+`recover_submission()` now returns two distinct facts for a replayed Recovery
+record: the current parent Submission `attempt_number`/`fence`, and that
+Recovery key's immutable `recovery_accepted_attempt_number` /
+`recovery_accepted_fence` / `recovery_state`. A replay of Recovery A after B
+has claimed a later fence cannot claim B's authority. When B is accepted, any
+earlier running Recovery record becomes `failed`: this means its lease/fence is
+no longer execution authority, while retaining its original accepted identity
+as audit evidence. It neither changes user text nor creates an assistant row.
+
+### Completion atomicity and failure lease enforcement
+
+The completion service now validates *all* option projections before adding the
+Assistant Message: title and summary bounds, JSON-safe allowlisted patch,
+same-Trip target, and nonnegative integer revision fields. Therefore a caller
+that catches a validation exception without rolling back cannot retain an
+orphan assistant row. Once validation passes, the caller must own one database
+transaction; assistant/options, terminal Submission state, recovery state, and
+qualifying-retention update are flushed together and are rolled back together
+by the normal Session transaction owner.
+
+`fail_submission()` now requires a live lease as well as running state and an
+exact current attempt/fence. It remains categorical-only, never extends
+retention, and does not create a Message. Deleted/expired Conversation or
+removed/quarantined owner checks happen before any terminal write.
+
+### Independent PostgreSQL race evidence
+
+`backend/tests/test_pr06b2_conversation_concurrency_postgres.py` uses a
+barrier, bounded futures, and distinct Session/connection per worker. It
+verifies committed state for same-natural-key creation, same/conflicting/new
+submission keys, recovery-key reclaim, old completion/failure after a newer
+fence, quarantine/removal races, two purge workers, and purge/history races.
+The tested order is exactly:
+
+```text
+Trip -> AccountSession or GuestSession -> TripMembership -> Conversation
+     -> ConversationSubmission -> ConversationSubmissionRecovery
+```
+
+Conversation deletion and purge retain the original Membership root and never
+resurrect a deleted Conversation. `SKIP LOCKED` permits only one concurrent
+purge worker to claim the due root.
+
+Because those tests deliberately commit from independent Sessions, their
+autouse teardown removes only their recorded private graph in child-to-root
+order. This prevents test-fixture leakage into the repository's later demo
+seed idempotency tests; that full-suite contamination was reproduced and fixed
+as part of this remediation.
+
+### Retention/purge operations
+
+The 180-day clock remains confined to accepted user input and a committed
+assistant reply. Read/history/replay/failure paths do not set it. Expiry gates
+access independently of a worker. The 30-day deletion deadline is represented
+by `purge_due_at`; the purge counter reports `overdue`, but production must
+configure a single job owner/leader and alert when this counter is nonzero.
+No scheduler was activated in tests; no content is logged by the worker.
+
+### Final verification and disposition
+
+The remediation was committed as `e5d64c7` (`fix: remediate PR-06B.2 lifecycle
+acceptance`). Full verification used only the disposable local database
+`tripsync_pr06b2_final_test`, with `MOCK_AI=1` and `DISABLE_SCHEDULER=1`:
+
+```text
+python -m pytest -q --tb=short
+1172 passed, 10 warnings in 119.04s
+
+python -m compileall -q app tests/test_pr06b2_conversation_api.py \
+  tests/test_pr06b2_conversation_concurrency_postgres.py
+passed
+
+git diff --check
+passed
+```
+
+The ten warnings are pre-existing Alembic `path_separator` deprecations from
+`test_trip_bound_phase1_migration.py`; none are test failures. The original
+full-suite run exposed fixture leakage from the new committed concurrency test;
+the scoped teardown described above fixed it, and the rerun completed without
+excluded tests.
+
+**Final recommendation: PASS for PR-06B.2 final acceptance.** This does not
+authorize PR-06B.3: Provider invocation, bounded server-owned runtime context,
+frontend durable-history migration, and any infrastructure deployment remain
+separate future work.
