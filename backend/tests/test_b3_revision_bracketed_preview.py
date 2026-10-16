@@ -285,6 +285,8 @@ def test_preview_runtime_degradation_has_a_structured_degraded_terminal(test_eng
         )
     )
 
+    assert preview.runtime_failure_category == "provider_timeout"
+
     assert preview.telemetry_terminal is TerminalCategory.DEGRADED_FALLBACK
     assert preview.candidate is None
     assert preview.candidate_options == ()

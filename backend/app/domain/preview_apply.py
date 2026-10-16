@@ -125,6 +125,10 @@ class PreviewResult:
     authoritative: bool = False
     # Internal request-observability fact.  The HTTP DTO remains unchanged.
     telemetry_terminal: TerminalCategory = TerminalCategory.SUCCEEDED
+    # Durable Conversation callers persist a categorical Submission failure
+    # instead of an invented assistant reply when Runtime execution failed.
+    # The HTTP Preview DTO deliberately does not expose this internal fact.
+    runtime_failure_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +348,10 @@ class RevisionBracketedPreview:
             candidate=candidate,
             candidate_options=candidate_options,
             telemetry_terminal=_preview_terminal(runtime_result),
+            runtime_failure_category=(
+                runtime_result.observation.failure.normalized_kind
+                if runtime_result.observation.failure is not None else None
+            ),
         )
 
     def _capture(self, request: PreviewRequest) -> _CapturedRevisions:
