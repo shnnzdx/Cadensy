@@ -138,3 +138,21 @@ cutover. Before a final PR-06B.2 PASS, the full backend suite and dedicated
 multi-session PostgreSQL race cases (simultaneous creation/submission/recovery,
 quarantine/removal versus completion, and purge versus read) must be reviewed
 against the final committed worktree.
+
+## Local checkpoints and gate
+
+- `4442973` — owner API, durable submission/idempotency, recovery, and internal
+  completion/failure boundary (PR-06B.2A/B combined because these functions
+  share one lifecycle module and one regression suite).
+- `0546025` — retention purge and optional scheduler gate (PR-06B.2C).
+
+The working tree was clean after these commits. No push, merge, AWS action,
+production database access, paid Provider call, frontend change, or PR-06B.3
+work occurred.
+
+**Recommendation: CHANGES REQUIRED before PR-06B.2 final acceptance.** The
+focused PostgreSQL lifecycle and selected existing regressions pass, but the
+full-suite process did not complete within the local command-window available
+for this run, and the required independent multi-session race matrix still
+needs dedicated evidence. Neither limitation is waived by the passing focused
+tests.
