@@ -33,6 +33,12 @@ CONVERSATION_TABLES = {
 }
 
 
+def _normalized_catalog_predicate(value: str) -> str:
+    """Compare PostgreSQL predicates without depending on implicit text casts."""
+
+    return "".join(value.split()).replace("::text", "")
+
+
 def _migration_database_url() -> URL:
     source_url = make_url(os.environ["TEST_DATABASE_URL"])
     if source_url.get_backend_name() != "postgresql" or not source_url.database:
@@ -163,11 +169,15 @@ def test_pr06b1b_postgresql_migration_and_private_ownership_contract() -> None:
 
         indexes = {index["name"]: index for index in inspector.get_indexes("conversation")}
         assert indexes["ux_conversation_active_natural_identity"]["unique"] is True
-        assert "status = 'active'" in indexes["ux_conversation_active_natural_identity"]["dialect_options"]["postgresql_where"]
+        assert _normalized_catalog_predicate(
+            indexes["ux_conversation_active_natural_identity"]["dialect_options"]["postgresql_where"]
+        ) in {"((status)='active')", "(status='active')"}
         assert {"ix_conversation_retention_expiry_active", "ix_conversation_purge_due"} <= set(indexes)
         submission_indexes = {index["name"]: index for index in inspector.get_indexes("conversation_submission")}
         assert submission_indexes["ux_conversation_submission_one_running"]["unique"] is True
-        assert "state = 'running'" in submission_indexes["ux_conversation_submission_one_running"]["dialect_options"]["postgresql_where"]
+        assert _normalized_catalog_predicate(
+            submission_indexes["ux_conversation_submission_one_running"]["dialect_options"]["postgresql_where"]
+        ) in {"((state)='running')", "(state='running')"}
 
         # An empty schema may roll back and upgrade again without data loss.
         _run_alembic(url, "downgrade", PARENT_REVISION)
@@ -282,7 +292,7 @@ def test_pr06b1b_postgresql_migration_and_private_ownership_contract() -> None:
             )
         _expect_integrity(engine, "INSERT INTO conversation_submission (id, conversation_id, trip_id, owner_membership_id, idempotency_key, canonical_request_hmac, fingerprint_version, hmac_key_version, user_message_id, state, attempt_number, fence, lease_expires_at, response_metadata) VALUES ('p1b_cross_message', 'p1b_conversation_plan', 'p1b_trip', 'p1b_member_b', 'key-a', repeat('a', 64), 1, 'v1', 'p1b_user_message', 'running', 1, 1, now() + interval '1 minute', '{}'::jsonb)")
         with engine.begin() as connection:
-            connection.execute(text("INSERT INTO conversation_submission (id, conversation_id, trip_id, owner_membership_id, idempotency_key, canonical_request_hmac, fingerprint_version, hmac_key_version, user_message_id, assistant_message_id, state, attempt_number, fence, response_metadata) VALUES ('p1b_submission_other_conversation', 'p1b_conversation_plan', 'p1b_trip', 'p1b_member_b', 'key-a', repeat('a', 64), 1, 'v1', 'p1b_plan_message', 'p1b_plan_assistant_message', 'completed', 1, 1, '{}'::jsonb)"))
+            connection.execute(text("INSERT INTO conversation_submission (id, conversation_id, trip_id, owner_membership_id, idempotency_key, canonical_request_hmac, fingerprint_version, hmac_key_version, user_message_id, assistant_message_id, state, attempt_number, fence, response_metadata) VALUES ('p1b_submission_other_conv', 'p1b_conversation_plan', 'p1b_trip', 'p1b_member_b', 'key-a', repeat('a', 64), 1, 'v1', 'p1b_plan_message', 'p1b_plan_assistant_message', 'completed', 1, 1, '{}'::jsonb)"))
         with engine.begin() as connection:
             connection.execute(text("INSERT INTO conversation_submission (id, conversation_id, trip_id, owner_membership_id, idempotency_key, canonical_request_hmac, fingerprint_version, hmac_key_version, user_message_id, state, attempt_number, fence, lease_expires_at, response_metadata) VALUES ('p1b_submission_running', 'p1b_conversation_new', 'p1b_trip', 'p1b_member_a', 'key-b', repeat('b', 64), 1, 'v1', 'p1b_second_user_message', 'running', 1, 1, now() + interval '1 minute', '{}'::jsonb)"))
         _expect_integrity(engine, "INSERT INTO conversation_submission (id, conversation_id, trip_id, owner_membership_id, idempotency_key, canonical_request_hmac, fingerprint_version, hmac_key_version, user_message_id, state, attempt_number, fence, lease_expires_at, response_metadata) VALUES ('p1b_submission_running_again', 'p1b_conversation_new', 'p1b_trip', 'p1b_member_a', 'key-c', repeat('c', 64), 1, 'v1', 'p1b_third_user_message', 'running', 1, 1, now() + interval '1 minute', '{}'::jsonb)")

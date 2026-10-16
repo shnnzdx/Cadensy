@@ -1,7 +1,6 @@
 # PR-06B.1B — Conversation Schema and Ownership Implementation
 
-**Status:** implementation complete; **database-validation gate BLOCKED** pending a
-disposable local PostgreSQL service.
+**Status:** **PASS — implementation and local PostgreSQL validation complete.**
 
 **Branch:** `codex/pr06b-independent-development`
 **Alembic revision:** `b7d3a1e9c642`
@@ -176,27 +175,31 @@ Completed local checks:
 | Command | Result |
 | --- | --- |
 | `python -m pytest -q tests/test_pr06b1b_conversation_schema_contract.py --tb=short` | **3 passed** |
-| `python -m pytest --collect-only -q tests/test_pr06b1b_conversation_migration_postgres.py` | **1 collected** |
+| `python -m pytest -q tests/test_pr06b1b_conversation_migration_postgres.py --tb=short` | **1 passed** in 4.95s; genuine disposable PostgreSQL upgrade/catalog/integrity/guarded-downgrade coverage. |
 | `python -m compileall -q app alembic tests/test_pr06b1b_conversation_schema_contract.py tests/test_pr06b1b_conversation_migration_postgres.py` | **passed** |
 | `python -m alembic heads` | **`b7d3a1e9c642 (head)`** |
+| PR-06B.1A schema/lifecycle, invite/auth, protected writer, and policy regressions | **28 + 63 passed** |
+| `tests/test_agents_tools.py` | **31 passed** in four isolated groups; includes `test_tools_do_not_write_decision_or_plan_tables`. |
+| Full backend suite in non-overlapping PostgreSQL-backed groups | **1159 passed**, matching collection; **10 existing Alembic `path_separator` deprecation warnings**. |
 
-### Blocking validation limitation
+### PostgreSQL validation evidence
 
-Real PostgreSQL validation has **not** passed. The required local disposable
-endpoint is unavailable: no listener exists on the configured local PostgreSQL
-port (`localhost:5432`), no PostgreSQL service is registered/running, and
-Docker is unavailable. The focused migration test therefore cannot complete
-its first database connection. No AWS, shared database, production database,
-or paid Provider was contacted as a workaround.
+The local PostgreSQL 18 service was restored with the documented local
+`pg_ctl` command and reached `pg_isready`'s `accepting connections` state.
+Tests used only the explicitly disposable
+`postgresql+psycopg://postgres:postgres@localhost:5432/tripsync_pr06b1b_test`
+source database and its test-created derivative databases. The migration test
+uses PostgreSQL catalog inspection plus real insert/update failures to verify
+the composite Membership/Trip FK, active Conversation index predicate,
+retention/purge indexes, same-Conversation Submission message FKs,
+idempotency/running-submission indexes, recovery namespace, and guarded
+downgrade behavior.
 
 An offline `alembic upgrade head --sql` attempt also cannot prove this migration:
 an earlier existing migration (`c2a4b6d8e0f1`) performs an online historical
 preflight and consequently cannot run in Alembic offline SQL mode. This is not
-substituted for PostgreSQL catalog or migration evidence.
+used as a substitute for the completed PostgreSQL catalog or migration evidence.
 
-Because the required PostgreSQL test matrix, existing PostgreSQL regressions,
-and full backend suite cannot run without that service, this phase must return
-to review as **BLOCKED**, not PASS. Before acceptance, start/provide a
-disposable local PostgreSQL instance and run the migration test plus the
-required PR-06B.1A, auth/trip transaction, AI-tool isolation, and full backend
-regression suites with `MOCK_AI=1` and scheduler disabled.
+No AWS, production/shared database, paid Provider, deployment, push, or merge
+operation was used. **Final recommendation: PASS for PR-06B.1B schema and
+ownership acceptance.** PR-06B.2 lifecycle work remains explicitly deferred.
