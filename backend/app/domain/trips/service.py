@@ -40,10 +40,6 @@ class InviteNotFound(Exception):
     """Invalid, expired, or revoked invite token."""
 
 
-class GuestJoinAccountIdentityRejected(Exception):
-    """Email is never sufficient evidence of authenticated Account ownership."""
-
-
 MAX_COVER_FETCHES_PER_DASHBOARD_REQUEST = 4
 
 
@@ -321,36 +317,6 @@ class JoinedInvite:
     membership: TripMembership
     trip_id: str
     guest_session: auth_service.GuestSessionResult | None = None
-
-
-def join_invite(
-    db: Session,
-    token: str,
-    *,
-    display_name: str,
-    email: str | None = None,
-) -> JoinedInvite:
-    if email is not None:
-        raise GuestJoinAccountIdentityRejected(
-            "Guest Join cannot establish an Account identity from email"
-        )
-    invite = _valid_invite(db, token)
-    name = display_name.strip()
-    membership = TripMembership(
-        trip_id=invite.trip_id,
-        user_id=None,
-        guest_display_name=name,
-        role="participant",
-        join_method="invite_guest",
-        status="joined",
-    )
-    db.add(membership)
-    db.flush()
-    return JoinedInvite(
-        membership=membership,
-        trip_id=invite.trip_id,
-        guest_session=auth_service.start_guest_session(db, membership),
-    )
 
 
 def revoke_invite(db: Session, invite_id: str, organizer: TripMembership) -> None:

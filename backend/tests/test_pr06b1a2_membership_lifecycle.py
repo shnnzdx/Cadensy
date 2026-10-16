@@ -317,6 +317,12 @@ def test_account_join_rejects_legacy_identity_and_guest_email_identity(test_engi
         )
 
 
+def test_trip_service_exposes_no_direct_guest_membership_writer():
+    """Guest joins have one public domain writer: the Trip-root transaction."""
+
+    assert not hasattr(trip_service, "join_invite")
+
+
 def test_decision_window_rejects_normal_join_and_removal_without_effect(test_engine):
     seed = _seed(test_engine)
     factory = _factory(test_engine)

@@ -31,6 +31,10 @@ from ..constraints.types import (
     ProposedChange,
     Settledness,
 )
+from ..membership_policy import (
+    current_participant_membership_clause,
+    is_current_participant,
+)
 from ..places import service as place_service
 from ..places.service import normalize_destination
 
@@ -167,7 +171,11 @@ def generate_plan(db: Session, trip_id: str, organizer: TripMembership) -> Gener
     trip = db.get(Trip, trip_id)
     if trip is None:
         raise TripNotFound("Trip not found")
-    if organizer.trip_id != trip_id or organizer.role != "organizer":
+    if (
+        organizer.trip_id != trip_id
+        or organizer.role != "organizer"
+        or not is_current_participant(organizer)
+    ):
         raise OrganizerRequired("Only the organizer can generate a plan")
     if not _organizer_has_submitted_preferences(db, organizer):
         raise OrganizerPreferencesRequired(
@@ -359,7 +367,10 @@ def _trip_membership_count(db: Session, trip_id: str) -> int:
     return db.scalar(
         select(func.count())
         .select_from(TripMembership)
-        .where(TripMembership.trip_id == trip_id)
+        .where(
+            TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
+        )
     ) or 0
 
 
@@ -371,6 +382,7 @@ def _load_required_constraints(
         .join(TripMembership, TripMembership.id == MemberConstraint.trip_membership_id)
         .where(
             TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
             MemberConstraint.importance == Importance.REQUIRED.value,
         )
         .order_by(MemberConstraint.created_at)
@@ -392,7 +404,10 @@ def _load_interests(db: Session, trip_id: str) -> tuple[str, ...]:
     prefs = db.scalars(
         select(Preference)
         .join(TripMembership, TripMembership.id == Preference.trip_membership_id)
-        .where(TripMembership.trip_id == trip_id)
+        .where(
+            TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
+        )
         .order_by(Preference.submitted_at)
     ).all()
     interests: list[str] = []
@@ -412,6 +427,7 @@ def _load_meal_budget_cap(db: Session, trip_id: str) -> float | None:
         .join(TripMembership, TripMembership.id == Preference.trip_membership_id)
         .where(
             TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
             Preference.submitted_at.is_not(None),
             Preference.maximum_budget.is_not(None),
         )
@@ -433,6 +449,7 @@ def _load_availability_by_date(
         .join(TripMembership, TripMembership.id == Preference.trip_membership_id)
         .where(
             TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
             Preference.submitted_at.is_not(None),
         )
     ).all()

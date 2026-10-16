@@ -7,19 +7,21 @@ const finalAppUrl = new URL("../../trip/src/final/FinalApp.jsx", import.meta.url
 const tripAppStateUrl = new URL("../../trip/src/final/TripAppState.jsx", import.meta.url);
 const previewContractUrl = new URL("../../shared/tripsync-preview-contract.js", import.meta.url);
 const backendTripServiceUrl = new URL("../../backend/app/domain/trips/service.py", import.meta.url);
+const backendMembershipJoinUrl = new URL("../../backend/app/domain/transactions/membership_join.py", import.meta.url);
 const tripPageUrl = new URL("../app/trip/page.tsx", import.meta.url);
 
 async function loadSources() {
-  const [loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService] = await Promise.all([
+  const [loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService, backendMembershipJoin] = await Promise.all([
     readFile(loginPageUrl, "utf8"),
     readFile(finalAppUrl, "utf8"),
     readFile(tripAppStateUrl, "utf8"),
     readFile(previewContractUrl, "utf8"),
     readFile(tripPageUrl, "utf8"),
     readFile(backendTripServiceUrl, "utf8"),
+    readFile(backendMembershipJoinUrl, "utf8"),
   ]);
 
-  return { loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService };
+  return { loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService, backendMembershipJoin };
 }
 
 test("characterizes current login redirect and session persistence behavior", async () => {
@@ -55,7 +57,7 @@ test("characterizes current restored-trip session behavior in TripAppState", asy
 });
 
 test("characterizes current invite fact availability and policy-driven join destinations", async () => {
-  const { finalApp, tripAppState, backendTripService } = await loadSources();
+  const { finalApp, tripAppState, backendTripService, backendMembershipJoin } = await loadSources();
 
   assert.match(finalApp, /const savedInviteSession = useMemo\(\(\) => app\.readInviteAdoption\(token\), \[app, token\]\)/);
   assert.match(finalApp, /app\.getInvite\(token\)/);
@@ -70,7 +72,10 @@ test("characterizes current invite fact availability and policy-driven join dest
   assert.match(tripAppState, /sessionRuntime\.adoptTechnicalTripContext\(\{/);
   assert.match(backendTripService, /def invite_preview\(db: Session, token: str\) -> dict:/);
   assert.doesNotMatch(backendTripService, /"trip_id": invite\.trip_id/);
-  assert.match(backendTripService, /return JoinedInvite\(\s*membership=membership,\s*trip_id=invite\.trip_id,/s);
+  assert.doesNotMatch(backendTripService, /def join_invite\(/);
+  assert.match(backendMembershipJoin, /def join_guest_invite_under_trip_root\(/);
+  assert.match(backendMembershipJoin, /trip = _locked_trip\(session, trip_id\)/);
+  assert.match(backendMembershipJoin, /require_no_decision_window\(session, trip\.id\)/);
 });
 
 test("characterizes current centralized workspace route guarding and guest presentation split", async () => {

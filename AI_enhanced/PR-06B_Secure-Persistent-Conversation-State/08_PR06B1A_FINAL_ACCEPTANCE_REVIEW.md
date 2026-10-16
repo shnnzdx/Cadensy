@@ -222,3 +222,105 @@ later-order lifecycle-test cleanup issue
    suite/build, `git diff --check`, and a clean-worktree check.
 5. Re-submit PR-06B.1A for final acceptance. Until then, the correct status
    is **CHANGES REQUIRED**, and PR-06B.1B remains blocked.
+
+## Remediation appendix — 2026-10-16
+
+**Remediation result:** both original P1 findings are **resolved**. This
+appendix preserves the original findings above and records the follow-up
+implementation and fresh evidence. The final gate is now **PASS**, with the
+release limitations stated below.
+
+### P1-01 resolved — active planning facts only
+
+The following Membership-dependent planning reads now use the centralized
+`current_participant_membership_clause()` rather than `trip_id` alone:
+
+| Source | Protected current-planning reads |
+| --- | --- |
+| `backend/app/domain/plans/generator.py` | Synchronous generator organizer admission, membership count, required constraints, interests/travel styles, meal-budget cap, and submitted availability. |
+| `backend/app/domain/plans/generator_lifecycle.py` | Detached/durable snapshot organizer admission, membership count, required constraints, and every frozen preference field that derives interests, budget, availability, and day slots. |
+
+`generator_commit._validate_current_generation()` already re-captures the full
+snapshot under the final Trip-root lock and compares it to the detached
+snapshot (`backend/app/domain/plans/generator_commit.py:97-115`). No new
+generation architecture was added. A removal or quarantine advances planning
+facts/Plan revisions; the final compare consequently rejects stale provider
+work before a PlanItem, PlanChange, or generation ledger can commit.
+
+New real-PostgreSQL coverage:
+
+- `test_generation_uses_only_current_participants_and_preserves_inactive_history`
+  creates active Account A and Guest B plus removed Account C and quarantined
+  Account D. C/D carry distinctive interests, a $1 budget cap, constraints,
+  and limited availability. It proves the B.2D1 detached snapshot has count
+  two, only A/B constraints, active-only interests/budget/two-day availability,
+  and that the synchronous public generator produces an active plan. It also
+  proves C/D Membership and Preference rows remain intact.
+- `test_real_protected_membership_quarantine_during_detached_generator_work_stales_draft`
+  pauses provider work, performs an actual protected quarantine, and proves
+  the generated draft is rejected as `StaleGeneratorPreconditions` with no
+  PlanItems or `plan.generate.v1` idempotency record. The existing removal
+  counterpart remains green. Frozen Round behavior is unchanged and continues
+  to be covered by the protected decision suites.
+
+### P1-02 resolved — one Guest Join writer
+
+`backend/app/domain/trips/service.py` no longer exports `join_invite` or its
+legacy email-identity exception. It retains only shared value types and
+non-join service functions. The sole Guest writer is
+`join_guest_invite_under_trip_root` in
+`backend/app/domain/transactions/membership_join.py:119-148`; it locks the
+Trip root, rechecks the invite, locks Memberships/Plan, applies the decision
+window, creates the Guest credential, and advances Trip/Plan revisions in one
+transaction. `join_invite_under_trip_root` remains only as a safe
+email-rejecting compatibility entry point that delegates to that writer.
+
+The new `test_trip_service_exposes_no_direct_guest_membership_writer` verifies
+the retired service symbol is not importable. Existing PostgreSQL lifecycle
+coverage remains green for protected Guest Join, expired/revoked invite denial,
+open Round/pending Proposal denial, concurrent join serialization,
+exact-once revisions, Account Join, and Guest credential revocation. The
+frontend source characterization was updated to assert the canonical writer
+instead of expecting the removed unsafe one.
+
+### Fresh regression evidence
+
+All backend commands used the disposable `TEST_DATABASE_URL` harness with
+`DEV_ALLOW_MEMBERSHIP_HEADER=0`, `MOCK_AI=1`, and `DISABLE_SCHEDULER=1`.
+No provider, AWS, production database, deployment, push, or merge operation
+occurred.
+
+| Command group | Actual result |
+| --- | --- |
+| Generator lifecycle/commit/external/protected HTTP and plan generation | 148 passed in 8.78s |
+| Invite, PR-06B lifecycle/schema/migration/policy, protected transaction writers, and Trip kernel | 208 passed in 30.13s |
+| Backend regression segment A1 | 201 passed in 47.84s |
+| Backend regression segment A2 | 201 passed in 9.70s |
+| Backend regression segment B1 | 217 passed, 10 Alembic `path_separator` deprecation warnings, in 14.70s |
+| Backend regression segment B2 | 147 passed in 23.21s |
+| Previously omitted planner-variety and provider-smoke files | 33 passed in 4.04s |
+| `pytest --collect-only -q` after the three new tests | 1155 collected in 3.73s |
+| Aggregate of the seven completed non-overlapping backend segments | **1155 passed**, **10 known Alembic deprecation warnings** |
+| `frontend/node --test tests/session-runtime*.test.mjs tests/trip-navigation*.test.mjs tests/trip-preview-integration.test.mjs tests/pr06b1a3-invite-join.test.mjs` | 131 passed |
+| `frontend/npm test` | 13 passed; existing chunk-size advisory only |
+| `frontend/npm run build:trip-preview` | passed; embedded CSS/JS hashes unchanged |
+
+One initial frontend characterization command failed because it asserted that
+the intentionally removed direct writer still returned `JoinedInvite`. The
+test was updated to assert its absence and the canonical root writer, then the
+same 131-test command passed. A first oversized backend segment was stopped by
+the local 60-second command-runner limit and is deliberately excluded from the
+aggregate; every file in it was re-run in completed smaller segments.
+
+### Remaining limitations and final recommendation
+
+- No browser-driven E2E suite was executed. The frontend evidence is Node
+  integration/characterization plus real builds, not a claim of browser E2E.
+- Existing repository-wide lint debt remains outside this narrowly scoped
+  remediation and was not hidden or changed.
+- No Conversation persistence, Guest-to-Account historical adoption, PR-06C
+  change, or production infrastructure operation was introduced.
+
+**Final recommendation: PASS.** The two P1 acceptance blockers are remediated
+with source-level and real PostgreSQL evidence. PR-06B.1A may be accepted;
+PR-06B.1B may begin only under separate explicit authorization.

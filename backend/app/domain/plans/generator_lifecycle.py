@@ -22,6 +22,7 @@ from ...agents import planner
 from ...db.models import MemberConstraint, Plan, PlanItem, Preference, Trip, TripMembership
 from ..constraints.types import Constraint, ConstraintKind, Importance
 from ..idempotency import canonical_request_json
+from ..membership_policy import current_participant_membership_clause
 from ..places.service import PlannerPlace, normalize_destination
 from ..transactions.kernel import DuplicatePlans
 from . import generator
@@ -213,6 +214,7 @@ def capture_generation_snapshot(
         select(TripMembership).where(
             TripMembership.id == organizer_membership_id,
             TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
         )
     )
     if organizer is None or organizer.role != "organizer":
@@ -247,7 +249,12 @@ def capture_generation_snapshot(
     ) or 0
 
     membership_count = session.scalar(
-        select(func.count()).select_from(TripMembership).where(TripMembership.trip_id == trip_id)
+        select(func.count())
+        .select_from(TripMembership)
+        .where(
+            TripMembership.trip_id == trip_id,
+            current_participant_membership_clause(),
+        )
     ) or 0
     constraint_rows = tuple(
         session.scalars(
@@ -255,6 +262,7 @@ def capture_generation_snapshot(
             .join(TripMembership, TripMembership.id == MemberConstraint.trip_membership_id)
             .where(
                 TripMembership.trip_id == trip_id,
+                current_participant_membership_clause(),
                 MemberConstraint.importance == Importance.REQUIRED.value,
             )
             .order_by(MemberConstraint.created_at)
@@ -276,7 +284,10 @@ def capture_generation_snapshot(
         session.scalars(
             select(Preference)
             .join(TripMembership, TripMembership.id == Preference.trip_membership_id)
-            .where(TripMembership.trip_id == trip_id)
+            .where(
+                TripMembership.trip_id == trip_id,
+                current_participant_membership_clause(),
+            )
             .order_by(Preference.submitted_at)
         ).all()
     )
