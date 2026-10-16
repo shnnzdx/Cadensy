@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -84,13 +84,14 @@ class ConversationContext:
     """Detached common source for deterministic and runtime projections."""
 
     current_user_message: str
+    selected_plan_item_id: str | None
     deterministic_history: tuple[DeterministicHistoryTurn, ...]
     runtime_history: tuple[RuntimeHistoryTurn, ...]
     metadata: ContextMetadata
 
 
 def _aware(value: datetime) -> datetime:
-    return value.replace(tzinfo=lifecycle.timezone.utc) if value.tzinfo is None else value
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def _turn_cost(message: ConversationMessage) -> int:
@@ -165,14 +166,33 @@ def build_context(
             .order_by(ConversationMessage.sequence.desc())
         ).all()
     )
+    # A persisted User row is created at admission, before the corresponding
+    # Submission finishes. Historical failed/running attempts are not valid
+    # conversational turns and must not be replayed as if an Assistant had
+    # answered them. The current running User row is handled separately above.
+    historical_user_ids = [row.id for row in messages if row.role == "user"]
+    user_submission_state = {
+        row.user_message_id: row.state
+        for row in db.scalars(
+            select(ConversationSubmission).where(
+                ConversationSubmission.conversation_id == conversation.id,
+                ConversationSubmission.user_message_id.in_(historical_user_ids),
+            )
+        ).all()
+    }
     remaining = budget.max_chars - mandatory
     selected_newest: list[ConversationMessage] = []
     excluded = 0
-    for message in messages:
-        cost = _turn_cost(message)
-        if cost > remaining:
+    for index, message in enumerate(messages):
+        if message.role == "user" and user_submission_state.get(message.id) != "completed":
             excluded += 1
             continue
+        cost = _turn_cost(message)
+        if cost > remaining:
+            # Keep a contiguous newest suffix. Once the next eligible turn
+            # cannot fit, older text is less relevant and must not leapfrog it.
+            excluded += len(messages) - index
+            break
         selected_newest.append(message)
         remaining -= cost
     selected = list(reversed(selected_newest))
@@ -205,6 +225,7 @@ def build_context(
         )
     return ConversationContext(
         current_user_message=current.content,
+        selected_plan_item_id=current.selected_plan_item_id,
         deterministic_history=tuple(deterministic),
         runtime_history=tuple(RuntimeHistoryTurn(role=turn.role, text=turn.text) for turn in deterministic),
         metadata=ContextMetadata(
