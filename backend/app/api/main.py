@@ -13,7 +13,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
@@ -26,6 +26,10 @@ from ..agents import tools as agent_tools
 from ..agents.tools import DAY_END_HOUR, DAY_START_HOUR
 from ..db.models import (
     ChangeProposal,
+    Conversation,
+    ConversationMessage,
+    ConversationMessageOption,
+    ConversationSubmission,
     DecisionRound,
     InviteLink,
     Plan,
@@ -43,6 +47,7 @@ from ..domain.access import ForeignTripAccess, ScopedResourceNotFound, for_membe
 from ..domain import auth as auth_service
 from ..domain.membership_policy import current_participant_membership_clause
 from ..domain.chat import service as chat_service
+from ..domain.conversations import service as conversation_service
 from ..domain.decisions import orchestrator as orch
 from ..domain.preview_apply import (
     PreviewAccessDenied,
@@ -424,6 +429,56 @@ def _b3_preview_apply_gate_state() -> str:
 # -------------------- Request and response shapes --------------------
 
 
+class ConversationCreateRequest(BaseModel):
+    scope: str = Field(pattern="^(personal|plan_assistant)$")
+    context_key: str = Field(min_length=1, max_length=80)
+
+
+class ConversationSubmitRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=12_000)
+    selected_plan_item_id: str | None = Field(default=None, max_length=32)
+
+
+def _conversation_metadata(conversation: Conversation) -> dict:
+    return {
+        "id": conversation.id,
+        "scope": conversation.scope,
+        "context_key": conversation.context_key,
+        "status": conversation.status,
+        "created_at": conversation.created_at,
+        "last_qualifying_activity_at": conversation.last_qualifying_activity_at,
+        "retention_expires_at": conversation.retention_expires_at,
+    }
+
+
+def _conversation_submission_result(result: conversation_service.SubmissionResult) -> dict:
+    return {
+        "submission_id": result.submission_id,
+        "state": result.state,
+        "attempt_number": result.attempt_number,
+        "fence": result.fence,
+        "lease_expires_at": result.lease_expires_at,
+        "assistant_message_id": result.assistant_message_id,
+        "replayed": result.replayed,
+    }
+
+
+def _raise_conversation_error(error: conversation_service.ConversationError) -> None:
+    # "not found" is deliberately used for owner, Trip, deletion, expiry and
+    # revocation failures so these routes do not disclose private metadata.
+    if isinstance(error, conversation_service.ConversationUnavailable):
+        raise HTTPException(404, "Conversation not found") from error
+    if isinstance(error, conversation_service.IdempotencyConflict):
+        raise HTTPException(409, "idempotency_key_conflict") from error
+    if isinstance(error, conversation_service.ConversationBusy):
+        raise HTTPException(409, "conversation_busy") from error
+    if isinstance(error, conversation_service.StaleFence):
+        raise HTTPException(409, "stale_submission_fence") from error
+    if isinstance(error, conversation_service.ConversationValidationError):
+        raise HTTPException(422, "invalid_conversation_request") from error
+    raise HTTPException(503, "conversation_state_unavailable") from error
+
+
 class ChangeOptionIn(BaseModel):
     item_id: str
     label: str | None = None
@@ -801,6 +856,208 @@ def _proposal_out(db: Session, proposal: ChangeProposal, me: TripMembership | No
 
 
 # -------------------- Reads --------------------
+
+
+@app.post("/api/trips/{trip_id}/conversations", status_code=201)
+def create_conversation(
+    trip_id: str,
+    body: ConversationCreateRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation = conversation_service.create_or_discover(
+            db, trip_id=trip_id, membership_id=me.id, scope=body.scope, context_key=body.context_key,
+            bearer_token=_bearer_token(authorization)
+        )
+        db.commit()
+        return _conversation_metadata(conversation)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations")
+def discover_conversations(
+    trip_id: str,
+    scope: str | None = None,
+    context_key: str | None = None,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        if scope is not None and scope not in {"personal", "plan_assistant"}:
+            raise conversation_service.ConversationValidationError()
+        rows = conversation_service.list_conversations(
+            db, trip_id=trip_id, membership_id=me.id, scope=scope, context_key=context_key,
+            bearer_token=_bearer_token(authorization)
+        )
+        return {"conversations": [_conversation_metadata(row) for row in rows]}
+    except conversation_service.ConversationError as error:
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations/{conversation_id}")
+def get_conversation(
+    trip_id: str,
+    conversation_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation = conversation_service.get_conversation(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+            bearer_token=_bearer_token(authorization)
+        )
+        db.commit()
+        return _conversation_metadata(conversation)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations/{conversation_id}/messages")
+def conversation_messages(
+    trip_id: str,
+    conversation_id: str,
+    before: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        rows = conversation_service.history(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id, before=before, limit=limit,
+            bearer_token=_bearer_token(authorization)
+        )
+        output = []
+        for row in rows:
+            options = []
+            if row.role == "assistant":
+                option_rows = db.scalars(
+                    select(ConversationMessageOption)
+                    .where(ConversationMessageOption.assistant_message_id == row.id)
+                    .order_by(ConversationMessageOption.ordinal)
+                ).all()
+                options = [{"id": option.id, "ordinal": option.ordinal, "title": option.title,
+                            "summary": option.summary, "target_plan_item_id": option.target_plan_item_id,
+                            "safe_patch": option.safe_patch, "plan_revision": option.plan_revision,
+                            "planning_facts_revision": option.planning_facts_revision} for option in option_rows]
+            output.append({"id": row.id, "sequence": row.sequence, "role": row.role, "content": row.content,
+                           "created_at": row.created_at, "selected_plan_item_id": row.selected_plan_item_id,
+                           "options": options})
+        db.commit()
+        return {"messages": output, "next_before": rows[0].sequence if rows else None}
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission_id}")
+def get_conversation_submission(
+    trip_id: str,
+    conversation_id: str,
+    submission_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation_service.get_conversation(db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+                                              bearer_token=_bearer_token(authorization))
+        submission = db.scalar(select(ConversationSubmission).where(
+            ConversationSubmission.id == submission_id, ConversationSubmission.conversation_id == conversation_id,
+            ConversationSubmission.owner_membership_id == me.id, ConversationSubmission.trip_id == trip_id,
+        ))
+        if submission is None:
+            raise conversation_service.ConversationUnavailable()
+        db.commit()
+        return _conversation_submission_result(conversation_service.SubmissionResult(
+            submission.id, submission.state, submission.attempt_number, submission.fence,
+            submission.lease_expires_at, True, submission.assistant_message_id
+        ))
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.post("/api/trips/{trip_id}/conversations/{conversation_id}/messages", status_code=202)
+def submit_conversation_message(
+    trip_id: str,
+    conversation_id: str,
+    body: ConversationSubmitRequest,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    if idempotency_key is None:
+        raise HTTPException(428, "Idempotency-Key is required")
+    try:
+        result = conversation_service.submit_message(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+            idempotency_key=idempotency_key, text=body.text, selected_plan_item_id=body.selected_plan_item_id,
+            bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        return _conversation_submission_result(result)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.post("/api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission_id}/recover", status_code=202)
+def recover_conversation_submission(
+    trip_id: str,
+    conversation_id: str,
+    submission_id: str,
+    authorization: str | None = Header(default=None),
+    recovery_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    if recovery_key is None:
+        raise HTTPException(428, "Idempotency-Key is required")
+    try:
+        result = conversation_service.recover_submission(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+            submission_id=submission_id, recovery_key=recovery_key, bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        return _conversation_submission_result(result)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.delete("/api/trips/{trip_id}/conversations/{conversation_id}", status_code=204)
+def delete_conversation(
+    trip_id: str,
+    conversation_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> Response:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation_service.delete_conversation(db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+                                                bearer_token=_bearer_token(authorization))
+        db.commit()
+        return Response(status_code=204)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
 
 
 @app.get("/api/health")
