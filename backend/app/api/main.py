@@ -449,6 +449,21 @@ def _conversation_metadata(conversation: Conversation) -> dict:
         "created_at": conversation.created_at,
         "last_qualifying_activity_at": conversation.last_qualifying_activity_at,
         "retention_expires_at": conversation.retention_expires_at,
+        # This is a capability declaration, not a client-controlled feature
+        # flag. A durable submission is intentionally unavailable unless the
+        # request-bound Runtime has been explicitly admitted in non-production.
+        "runtime_available": _durable_conversation_runtime_enabled(),
+    }
+
+
+def _conversation_submission_metadata(submission: ConversationSubmission) -> dict:
+    """Owner-safe status projection used to restore a pending browser tab."""
+    return {
+        "submission_id": submission.id,
+        "state": submission.state,
+        "attempt_number": submission.attempt_number,
+        "lease_expires_at": submission.lease_expires_at,
+        "assistant_message_id": submission.assistant_message_id,
     }
 
 
@@ -988,6 +1003,24 @@ def conversation_messages(
             db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id, before=before, limit=limit,
             bearer_token=_bearer_token(authorization)
         )
+        # ``history`` is already owner-authorized. Bind a Submission only to
+        # its own persisted User Message and repeat the Trip/Membership scope
+        # in the query so an Organizer or another membership cannot discover a
+        # private pending submission through this projection.
+        user_ids = [row.id for row in rows if row.role == "user"]
+        submissions_by_user = {}
+        if user_ids:
+            submissions_by_user = {
+                submission.user_message_id: submission
+                for submission in db.scalars(
+                    select(ConversationSubmission).where(
+                        ConversationSubmission.conversation_id == conversation_id,
+                        ConversationSubmission.trip_id == trip_id,
+                        ConversationSubmission.owner_membership_id == me.id,
+                        ConversationSubmission.user_message_id.in_(user_ids),
+                    )
+                ).all()
+            }
         output = []
         for row in rows:
             options = []
@@ -1003,7 +1036,9 @@ def conversation_messages(
                             "planning_facts_revision": option.planning_facts_revision} for option in option_rows]
             output.append({"id": row.id, "sequence": row.sequence, "role": row.role, "content": row.content,
                            "created_at": row.created_at, "selected_plan_item_id": row.selected_plan_item_id,
-                           "options": options})
+                           "options": options,
+                           "submission": _conversation_submission_metadata(submissions_by_user[row.id])
+                           if row.role == "user" and row.id in submissions_by_user else None})
         db.commit()
         return {"messages": output, "next_before": rows[0].sequence if rows else None}
     except conversation_service.ConversationError as error:

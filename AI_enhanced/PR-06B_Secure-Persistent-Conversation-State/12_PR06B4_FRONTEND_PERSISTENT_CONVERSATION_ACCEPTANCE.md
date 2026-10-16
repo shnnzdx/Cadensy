@@ -127,3 +127,55 @@ documentation commit is recorded with this file.
 the required full backend, browser E2E, and production-readiness evidence is not yet
 complete. The frontend implementation itself is ready for the next local acceptance
 test pass; do not enable Runtime delivery or deploy it from this recommendation.
+
+## Final acceptance remediation — runtime capability and pending recovery
+
+The focused final review found two real gaps in the original frontend integration:
+the default-off Runtime still allowed the UI to submit a message that could remain
+pending, and a refreshed browser had no server-issued Submission ID from which to
+read status. Both are remediated locally.
+
+- `_conversation_metadata` now returns the server-calculated `runtime_available`
+  capability. It is true only for the explicitly admitted, non-production
+  request-bound Runtime. Personal and Plan composers show saved history but disable
+  new sends when it is false; they neither call legacy `/chat` nor enable the gate.
+- The owner-authorized history response now attaches a minimal Submission projection
+  only to its persisted User Message: ID, state, attempt, lease expiry, and assistant
+  ID. The query repeats conversation, Trip, and membership ownership predicates.
+  Another member gets the existing non-disclosing 404 rather than this projection.
+- On hydration, `useDurableConversation` derives pending state only from that
+  server-issued projection and immediately reads the authoritative status. A restored
+  pending operation has no client text or original idempotency key, so it cannot be
+  replayed as a new send. After lease expiry it can use a newly scoped recovery key
+  through the existing recovery route; the server alone owns attempt/fence.
+
+The new HTTP lifecycle test simulates admission, browser loss, owner history reload,
+lease expiry, recovery, and one durable completion: `1 passed in 1.44s`. The updated
+durable frontend/client, option, and Plan tests report `17 passed`; the synchronized
+Trip build completed with 60 Vite modules.
+
+### Historical Option call-path review
+
+The server supplies Options only under their assistant message in
+`conversation_messages`. `advisoryCandidatesFromPersisted` retains server option ID,
+ordinal, target, captured revisions, and safe display patch without an Apply method.
+`useAssistantChangeRequestFlow.selectCandidateOption` requires the current target in
+the active plan and invokes `app.classify`; `TripAppState.classify` reaches the
+existing classification/Preview contract. Only `applyProposal` invokes the existing
+protected `submitChange` path after user action. Deleted targets refuse; there is no
+cross-conversation lookup or direct Plan mutation.
+
+### Browser matrix and final status
+
+Playwright Chromium is installed, but the repository contains only
+`frontend/tests/aws-public-e2e.mjs`, an AWS-public test. There is no local browser
+fixture/server harness for Account sessions, disposable PostgreSQL, or the explicitly
+enabled fake Runtime required by Journeys 1–10. It was not run because this review
+forbids AWS/production access. Browser acceptance therefore remains **pending**, not
+claimed from component or Node tests.
+
+**PR-06B.4 Local Product Acceptance: CHANGES REQUIRED** — focused source, API,
+PostgreSQL and frontend checks pass, but browser Journey evidence and an end-to-end
+full backend-suite terminal record remain required. **Production Readiness: NOT
+ASSESSED / NOT APPROVED** — no Provider, AWS, deployment, or production database was
+used. This remediation is recorded in the subsequent local commit.

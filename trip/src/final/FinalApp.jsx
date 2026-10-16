@@ -766,9 +766,10 @@ function PersonalThread() {
       {messages.map((message, index) => <ChatBubble from={message.from} key={message.id || `${message.from}-${index}`}>{message.text}</ChatBubble>)}
       {sending && <ChatBubble from="tripSync">Request saved. Waiting for Cadensy…</ChatBubble>}
       {durable.error && <div className="assistantError"><p>{durable.error.text}</p>{durable.error.retryable && <button type="button" className="changeCancelAction" onClick={durable.retryPending}>Retry saved request</button>}{durable.pending?.submissionId && <button type="button" className="changeCancelAction" onClick={durable.recoverPending}>Recover expired request</button>}</div>}
+      {!durable.loading && !durable.runtimeAvailable && <p className="assistantOptionNote">Assistant delivery is unavailable here. You can review saved history, but new messages cannot be sent.</p>}
       {!durable.loading && !sending && messages.length === 0 && <p className="assistantOptionNote">No saved messages yet.</p>}
     </div>
-    <div className="chatComposer"><button>＋</button><input value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => event.key === 'Enter' && send()} placeholder="Message Cadensy..."/><button className="sendBtn" disabled={sending || !draft.trim()} onClick={send}>{sending ? '…' : '↑'}</button></div>
+    <div className="chatComposer"><button>＋</button><input value={draft} disabled={!durable.runtimeAvailable} onChange={event => setDraft(event.target.value)} onKeyDown={event => event.key === 'Enter' && send()} placeholder="Message Cadensy..."/><button className="sendBtn" disabled={sending || !durable.runtimeAvailable || !draft.trim()} onClick={send}>{sending ? '…' : '↑'}</button></div>
   </section>
 }
 

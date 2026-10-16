@@ -24,8 +24,32 @@ export const normalizeConversationMessages = payload => (
       text: message.content,
       options: message.options || [],
       selectedPlanItemId: message.selected_plan_item_id || null,
+      submission: message.submission ? normalizeSubmission(message.submission) : null,
     }))
 )
+
+export const normalizeSubmission = payload => ({
+  submissionId: payload.submission_id,
+  state: payload.state,
+  attemptNumber: payload.attempt_number,
+  leaseExpiresAt: payload.lease_expires_at || null,
+  assistantMessageId: payload.assistant_message_id || null,
+  replayed: Boolean(payload.replayed),
+  recoveryAcceptedAttemptNumber: payload.recovery_accepted_attempt_number ?? null,
+  recoveryAcceptedFence: payload.recovery_accepted_fence ?? null,
+  recoveryState: payload.recovery_state ?? null,
+})
+
+export const pendingSubmissionFromMessages = (messages, conversationId) => {
+  const pending = [...messages].reverse().find(message => message.submission?.state === 'running')
+  return pending ? {
+    conversationId,
+    submissionId: pending.submission.submissionId,
+    leaseExpiresAt: pending.submission.leaseExpiresAt,
+    recoveryKey: createIdempotencyKey(),
+    restored: true,
+  } : null
+}
 
 export const createDurableConversationClient = ({ requestJson, tripId }) => {
   const root = `/api/trips/${encodeURIComponent(tripId)}/conversations`
@@ -43,18 +67,18 @@ export const createDurableConversationClient = ({ requestJson, tripId }) => {
     }).toString()}`),
     get: conversationId => requestJson(`${root}/${encodeURIComponent(conversationId)}`),
     messages,
-    status: (conversationId, submissionId) => requestJson(`${root}/${encodeURIComponent(conversationId)}/submissions/${encodeURIComponent(submissionId)}`),
-    submit: (conversationId, { text, selectedPlanItemId = null, idempotencyKey }) => requestJson(
+    status: async (conversationId, submissionId) => normalizeSubmission(await requestJson(`${root}/${encodeURIComponent(conversationId)}/submissions/${encodeURIComponent(submissionId)}`)),
+    submit: async (conversationId, { text, selectedPlanItemId = null, idempotencyKey }) => normalizeSubmission(await requestJson(
       `${root}/${encodeURIComponent(conversationId)}/messages`, {
         method: 'POST', headers: { 'Idempotency-Key': idempotencyKey },
         body: JSON.stringify({ text, ...(selectedPlanItemId ? { selected_plan_item_id: selectedPlanItemId } : {}) }),
       },
-    ),
-    recover: (conversationId, submissionId, recoveryKey) => requestJson(
+    )),
+    recover: async (conversationId, submissionId, recoveryKey) => normalizeSubmission(await requestJson(
       `${root}/${encodeURIComponent(conversationId)}/submissions/${encodeURIComponent(submissionId)}/recover`, {
         method: 'POST', headers: { 'Idempotency-Key': recoveryKey },
       },
-    ),
+    )),
     delete: conversationId => requestJson(`${root}/${encodeURIComponent(conversationId)}`, { method: 'DELETE' }),
   }
 }

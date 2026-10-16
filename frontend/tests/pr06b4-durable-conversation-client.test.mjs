@@ -5,6 +5,7 @@ import {
   conversationIdentityFor,
   createDurableConversationClient,
   normalizeConversationMessages,
+  pendingSubmissionFromMessages,
 } from '../../trip/src/final/durableConversationClient.js'
 
 test('durable conversation client selects only approved server-owned context keys', () => {
@@ -47,7 +48,23 @@ test('durable history is presented in ascending server sequence order', () => {
     { id: 'b', sequence: 2, role: 'assistant', content: 'second', options: [] },
     { id: 'a', sequence: 1, role: 'user', content: 'first', options: [] },
   ] }), [
-    { id: 'a', sequence: 1, role: 'user', text: 'first', options: [], selectedPlanItemId: null },
-    { id: 'b', sequence: 2, role: 'assistant', text: 'second', options: [], selectedPlanItemId: null },
+    { id: 'a', sequence: 1, role: 'user', text: 'first', options: [], selectedPlanItemId: null, submission: null },
+    { id: 'b', sequence: 2, role: 'assistant', text: 'second', options: [], selectedPlanItemId: null, submission: null },
   ])
+})
+
+test('refreshed history restores only the server-issued pending submission identity', () => {
+  const messages = normalizeConversationMessages({ messages: [{
+    id: 'user-1', sequence: 4, role: 'user', content: 'saved once', options: [],
+    submission: {
+      submission_id: 'submission-1', state: 'running', attempt_number: 1,
+      lease_expires_at: '2030-01-01T00:00:00Z', assistant_message_id: null,
+    },
+  }] })
+  const pending = pendingSubmissionFromMessages(messages, 'conversation-1')
+  assert.equal(pending.conversationId, 'conversation-1')
+  assert.equal(pending.submissionId, 'submission-1')
+  assert.equal(pending.restored, true)
+  assert.equal('text' in pending, false)
+  assert.equal('idempotencyKey' in pending, false)
 })

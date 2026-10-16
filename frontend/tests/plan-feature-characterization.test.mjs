@@ -189,8 +189,8 @@ test("phase 4 AssistantDrawer consumes a coherent assistant-flow view and action
   assert.match(source, /onApply=\{\(\) => actions\.applyProposal\(message, message\.proposedChange\)\}/);
   assert.match(source, /onDismiss=\{\(\) => actions\.dismissProposal\(message\.id\)\}/);
   assert.match(source, /view\.pendingRedirect && <p className="redirectHint">\{view\.pendingRedirect\}<\/p>/);
-  assert.match(source, /ref=\{view\.inputRef\} value=\{view\.draft\} onChange=\{event => actions\.updateDraft\(event\.target\.value\)\}/);
-  assert.match(source, /disabled=\{view\.sending \|\| !view\.draft\.trim\(\)\} onClick=\{actions\.sendMessage\}/);
+  assert.match(source, /ref=\{view\.inputRef\} value=\{view\.draft\} disabled=\{!view\.durable\.runtimeAvailable\} onChange=\{event => actions\.updateDraft\(event\.target\.value\)\}/);
+  assert.match(source, /disabled=\{view\.sending \|\| !view\.durable\.runtimeAvailable \|\| !view\.draft\.trim\(\)\} onClick=\{actions\.sendMessage\}/);
 });
 
 test("phase 4 plan page currently owns loading, error, decision, and empty-created-plan notices", async () => {

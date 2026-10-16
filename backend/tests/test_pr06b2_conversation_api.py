@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -57,6 +57,76 @@ def test_owner_scoped_creation_history_and_idempotent_submission(db: Session, tr
         assert accepted.status_code == replay.status_code == 202
         assert replay.json()["replayed"] is True
         assert conflict.status_code == 409 and conflict.json()["detail"] == "idempotency_key_conflict"
+
+
+def test_history_recovers_owner_pending_submission_after_refresh_without_disclosing_it_to_another_member(
+    db: Session, trip_setup: dict
+):
+    """A new browser runtime can discover a pending owner Submission safely."""
+    trip_id = trip_setup["trip"].id
+    with _client(db) as client:
+        owner_headers = _headers(client, db, trip_setup["organizer"], trip_id)
+        other_headers = _headers(client, db, trip_setup["participant"], trip_id)
+        created = client.post(
+            f"/api/trips/{trip_id}/conversations", headers=owner_headers,
+            json={"scope": "personal", "context_key": "personal"},
+        )
+        assert created.status_code == 201
+        # Default-off Runtime means a browser must not offer a send that can
+        # remain indefinitely pending without an explicitly enabled local gate.
+        assert created.json()["runtime_available"] is False
+        conversation_id = created.json()["id"]
+        accepted = client.post(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages",
+            headers={**owner_headers, "Idempotency-Key": "refresh-pending"}, json={"text": "saved once"},
+        )
+        assert accepted.status_code == 202
+
+        history = client.get(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages", headers=owner_headers,
+        )
+        assert history.status_code == 200
+        [message] = history.json()["messages"]
+        assert message["content"] == "saved once"
+        assert message["submission"]["submission_id"] == accepted.json()["submission_id"]
+        assert message["submission"]["state"] == "running"
+        assert message["submission"]["attempt_number"] == 1
+        assert message["submission"]["assistant_message_id"] is None
+        assert datetime.fromisoformat(message["submission"]["lease_expires_at"]).timestamp() == pytest.approx(
+            datetime.fromisoformat(accepted.json()["lease_expires_at"]).timestamp()
+        )
+
+        # Simulate the original browser disappearing after admission. A later
+        # Account session discovers the server ID above, waits for expiry, and
+        # recovers without submitting replacement user text.
+        submission = db.get(ConversationSubmission, accepted.json()["submission_id"])
+        assert submission is not None
+        submission.lease_expires_at = service.utcnow() - timedelta(seconds=1)
+        db.commit()
+        recovered = client.post(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission.id}/recover",
+            headers={**owner_headers, "Idempotency-Key": "refresh-recovery"},
+        )
+        assert recovered.status_code == 202
+        assert recovered.json()["attempt_number"] == 2
+        assert recovered.json()["replayed"] is False
+        service.complete_submission(
+            db, trip_id=trip_id, membership_id=trip_setup["organizer"].id,
+            conversation_id=conversation_id, submission_id=submission.id,
+            attempt_number=2, fence=2, content="one durable answer",
+        )
+        db.commit()
+        completed_history = client.get(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages", headers=owner_headers,
+        )
+        assert [(row["role"], row["content"]) for row in completed_history.json()["messages"]] == [
+            ("user", "saved once"), ("assistant", "one durable answer"),
+        ]
+
+        denied = client.get(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages", headers=other_headers,
+        )
+        assert denied.status_code == 404
 
 
 def test_request_bound_runtime_runs_once_for_a_new_claim_not_a_replay(

@@ -4,6 +4,7 @@ import {
   createIdempotencyKey,
   durableConversationError,
   normalizeConversationMessages,
+  pendingSubmissionFromMessages,
 } from './durableConversationClient.js'
 
 const POLL_INTERVAL_MS = 2500
@@ -51,7 +52,25 @@ export function useDurableConversation({ app, scope, itemId = null }) {
         const resolved = await client.resolve(identity)
         if (cancelled || generation.current !== thisGeneration) return
         setConversation(resolved)
-        await readMessages(resolved.id, null, true, thisGeneration)
+        const hydrated = await readMessages(resolved.id, null, true, thisGeneration)
+        const restored = pendingSubmissionFromMessages(hydrated, resolved.id)
+        if (restored && !cancelled && generation.current === thisGeneration) {
+          pendingRef.current = restored
+          setPending(restored)
+          // A refresh has no original request key/text to replay. It first
+          // reads the authorized durable status; recovery remains a separate,
+          // owner-authorized action after the server lease expires.
+          const status = await client.status(resolved.id, restored.submissionId)
+          if (cancelled || generation.current !== thisGeneration) return
+          const current = { ...restored, ...status }
+          pendingRef.current = current
+          setPending(current)
+          if (status.state !== 'running') {
+            await readMessages(resolved.id, null, true, thisGeneration)
+            pendingRef.current = null
+            setPending(null)
+          }
+        }
       } catch (cause) {
         if (!cancelled && generation.current === thisGeneration) setError(durableConversationError(cause))
       } finally {
@@ -104,6 +123,13 @@ export function useDurableConversation({ app, scope, itemId = null }) {
 
   const send = useCallback(async ({ text, selectedPlanItemId = null }) => {
     if (!conversation || pendingRef.current || !text?.trim()) return null
+    if (conversation.runtime_available !== true) {
+      setError({
+        terminal: true,
+        text: 'Cadensy assistant delivery is unavailable in this environment. Your message was not sent.',
+      })
+      return null
+    }
     const request = {
       conversationId: conversation.id,
       text: text.trim(),
@@ -124,13 +150,21 @@ export function useDurableConversation({ app, scope, itemId = null }) {
   const retryPending = useCallback(async () => {
     const request = pendingRef.current
     if (!request) return null
+    if (request.restored || !request.text || !request.idempotencyKey) {
+      try {
+        return await checkStatus(request)
+      } catch (cause) {
+        setError(durableConversationError(cause))
+        return null
+      }
+    }
     try {
       return await submitRequest(request)
     } catch (cause) {
       setError(durableConversationError(cause))
       return null
     }
-  }, [submitRequest])
+  }, [checkStatus, submitRequest])
 
   const recoverPending = useCallback(async () => {
     const request = pendingRef.current
@@ -176,6 +210,7 @@ export function useDurableConversation({ app, scope, itemId = null }) {
     loading,
     pending,
     error,
+    runtimeAvailable: conversation?.runtime_available === true,
     send,
     retryPending,
     recoverPending,
