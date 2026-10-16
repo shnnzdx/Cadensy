@@ -4,6 +4,7 @@ import { restoreTripAppBootstrapState } from './technicalSessionBootstrap.js'
 import { createSessionRuntime, SESSION_RUNTIME_CODES } from '../../../shared/session-runtime/index.js'
 import { classifyTechnicalSessionInvalidation } from './technicalSessionInvalidation.js'
 import { guestJoinPayload, validateInviteJoinResult } from './invite-join-flow.js'
+import { createDurableConversationClient } from './durableConversationClient.js'
 
 const TripAppContext = createContext(null)
 
@@ -379,7 +380,7 @@ export function TripAppProvider({ children }) {
       error.status = response.status
       throw error
     }
-    return response.json()
+    return response.status === 204 ? null : response.json()
   }, [])
 
   const identityHeadersFor = useCallback(scope => {
@@ -446,7 +447,7 @@ export function TripAppProvider({ children }) {
       }
       throw error
     }
-    return response.json()
+    return response.status === 204 ? null : response.json()
   }, [applyTechnicalSessionInvalidation, identityHeadersFor, technicalSessionFacts])
 
   const accountRequestJson = useCallback(async (path, options = {}) => {
@@ -468,6 +469,11 @@ export function TripAppProvider({ children }) {
   const requestJson = useCallback(async (path, options = {}) => {
     return sessionRequestJson('trip', path, options)
   }, [sessionRequestJson])
+
+  const durableConversationClient = useCallback(() => {
+    const tripId = resolveActiveTripId()
+    return createDurableConversationClient({ requestJson, tripId })
+  }, [requestJson, resolveActiveTripId])
 
   const refreshTrip = useCallback(async () => {
     if (!activeTripId) throw new Error('Missing trip session')
@@ -1236,6 +1242,7 @@ export function TripAppProvider({ children }) {
     conflictCreated: activeProposals.some(proposal => ['waiting_affected_members', 'escalated'].includes(proposal.status)),
     classify,
     chatWithTrip,
+    durableConversationClient,
     logout,
     submitChange,
     searchReplacementPlaces,
@@ -1285,7 +1292,7 @@ export function TripAppProvider({ children }) {
     preferencesSubmittedFor,
     submitPreferencesFor: tripId => setPreferencesSubmittedFor(current => current.includes(tripId) ? current : [...current, tripId]),
     notify,
-  }), [createTrip, activeProposal, activeProposals, activeRound, activeRounds, activeTripId, addPlanItem, adoptTechnicalTripContext, baseUpdates, castVote, chatWithTrip, classify, createInvite, currentUser, days, decisionResolved, error, getAccountProfile, getInvite, hasAccountSession, inviteCopied, joinAccountInvite, joinInvite, loading, logout, membershipId, notices, objectToNotice, personalUpdates, planBlockedReason, planNeedsRefresh, planId, loadMembers, loadComments, loadChangeLog, addComment, readInviteAdoption, setItemBooked, generatePlan, remindMember, extendRound, escalateProposal, resolveDeadlock, loadMyPreferences, preferences, preferencesSubmittedFor, refreshAll, restoredTripId, saveMyPreferences, addConstraint, updateConstraint, deleteConstraint, resetDemo, resolveProposal, revokeInvite, searchReplacementPlaces, submitChange, trip, trips, tripSummaries, tripSummariesStatus, updateFilter, withdrawProposal])
+  }), [createTrip, activeProposal, activeProposals, activeRound, activeRounds, activeTripId, addPlanItem, adoptTechnicalTripContext, baseUpdates, castVote, chatWithTrip, classify, createInvite, currentUser, days, decisionResolved, durableConversationClient, error, getAccountProfile, getInvite, hasAccountSession, inviteCopied, joinAccountInvite, joinInvite, loading, logout, membershipId, notices, objectToNotice, personalUpdates, planBlockedReason, planNeedsRefresh, planId, loadMembers, loadComments, loadChangeLog, addComment, readInviteAdoption, setItemBooked, generatePlan, remindMember, extendRound, escalateProposal, resolveDeadlock, loadMyPreferences, preferences, preferencesSubmittedFor, refreshAll, restoredTripId, saveMyPreferences, addConstraint, updateConstraint, deleteConstraint, resetDemo, resolveProposal, revokeInvite, searchReplacementPlaces, submitChange, trip, trips, tripSummaries, tripSummariesStatus, updateFilter, withdrawProposal])
 
   if (!currentUser) {
     const isJoinRoute = window.location.hash.startsWith('#/join/')
