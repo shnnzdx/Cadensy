@@ -759,7 +759,7 @@ function PersonalThread() {
     if (window.confirm('Delete this private conversation? It will no longer be available.')) await durable.deleteConversation()
   }
   return <section className="chatPanel">
-    <header><div><span className="aiAvatar">C</span><div><h2>Cadensy</h2><p>Just for you · not shared with the group</p></div></div><div><button type="button" className="changeCancelAction" onClick={deleteThread} disabled={!durable.conversation || sending}>Delete</button><Badge>My AI</Badge></div></header>
+    <header><div><span className="aiAvatar">C</span><div><h2>Cadensy</h2><p>Just for you · not shared with the group</p></div></div><div><button type="button" className="changeCancelAction" aria-label="Delete personal Cadensy conversation" onClick={deleteThread} disabled={!durable.conversation || sending}>Delete chat</button><Badge>My AI</Badge></div></header>
     <div className="messages">
       <ChatBubble from="tripSync">This conversation is just between us. Ask about the plan, flag fatigue or weather, or request a change — nothing reaches the group until I have checked what it affects.</ChatBubble>
       {durable.nextBefore !== null && <button type="button" className="changeCancelAction" onClick={durable.loadOlder}>Load earlier messages</button>}

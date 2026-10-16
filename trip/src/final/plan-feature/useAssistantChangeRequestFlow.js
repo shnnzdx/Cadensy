@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTripApp } from '../TripAppState.jsx'
 import { useDurableConversation } from '../useDurableConversation.js'
+import { advisoryCandidatesFromPersisted } from '../durablePlanOption.js'
 import { trip } from '../tripContent.js'
 import { serializeWorkspaceRoute } from '../../../../shared/trip-navigation-route/index.js'
 
@@ -48,20 +49,6 @@ const removeRequestPatch = () => ({ remove: true })
 
 const isRemoveRequest = text => /\b(remove|delete|clear)\b/i.test(text || '')
 
-const candidateOptionsFromPersisted = options => (options || []).map(option => ({
-  id: option.id,
-  label: option.title || '',
-  title: option.title || '',
-  body: option.summary || '',
-  tradeoff: '',
-  item_id: option.target_plan_item_id,
-  patch: option.safe_patch || {},
-  // Persisted options are advisory display data. Selecting one always invokes
-  // the existing fresh Classify/Preview seam below before Apply is available.
-  capturedPlanRevision: option.plan_revision,
-  capturedPlanningFactsRevision: option.planning_facts_revision,
-}))
-
 export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolvedOutcome }) {
   const app = useTripApp()
   const [pendingRedirect, setPendingRedirect] = useState('')
@@ -95,7 +82,7 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
         id: message.id,
         from: message.role === 'user' ? 'you' : 'tripSync',
         text: message.text,
-        candidateOptions: candidateOptionsFromPersisted(message.options),
+        candidateOptions: advisoryCandidatesFromPersisted(message.options),
         request: message.role === 'assistant' ? mostRecentUserText : '',
         ...messageDetails[message.id],
       }

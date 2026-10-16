@@ -148,7 +148,7 @@ test("PR-06B.4 assistant flow delegates history and submission identity to the d
   assert.match(source, /const \[draft, setDraft\] = useState\(''\)/);
   assert.match(source, /import \{ useDurableConversation \} from '\.\.\/useDurableConversation\.js'/);
   assert.match(source, /const durable = useDurableConversation\(\{ app, scope: 'plan_assistant', itemId \}\)/);
-  assert.match(source, /const messages = useMemo\(\(\) => durable\.messages\.map/);
+  assert.match(source, /const messages = useMemo\(\(\) => \{\s*let mostRecentUserText = ''\s*return durable\.messages\.map/s);
   assert.match(source, /const sending = Boolean\(durable\.pending\)/);
   assert.match(source, /setDraft\(promptExamples\[mode\] \|\| ''\)/);
   assert.match(source, /setMessageDetails\(\{\}\)/);
@@ -157,7 +157,7 @@ test("PR-06B.4 assistant flow delegates history and submission identity to the d
   assert.match(source, /thread\.scrollTo\(\{ top: thread\.scrollHeight, behavior: 'smooth' \}\)/);
   assert.match(source, /window\.setTimeout\(\(\) => inputRef\.current\?\.focus\(\{ preventScroll: true \}\), 80\)/);
   assert.match(source, /await durable\.send\(\{ text, selectedPlanItemId: itemId \}\)/);
-  assert.match(source, /candidateOptionsFromPersisted/);
+  assert.match(source, /advisoryCandidatesFromPersisted/);
   assert.doesNotMatch(source, /chatWithTrip\(/);
   assert.doesNotMatch(source, /historyTurnFromMessage/);
 });
