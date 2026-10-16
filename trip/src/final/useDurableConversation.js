@@ -27,8 +27,9 @@ export function useDurableConversation({ app, scope, itemId = null }) {
   const client = useMemo(() => app.durableConversationClient(), [app.durableConversationClient])
   const identityKey = `${app.activeTripId || ''}:${app.membershipId || app.currentUser?.membershipId || ''}:${identity.scope}:${identity.contextKey}`
 
-  const readMessages = useCallback(async (conversationId, before = null, replace = true) => {
+  const readMessages = useCallback(async (conversationId, before = null, replace = true, expectedGeneration = generation.current) => {
     const page = await client.messages(conversationId, before)
+    if (expectedGeneration !== generation.current) return []
     const normalized = normalizeConversationMessages(page)
     setMessages(current => replace ? normalized : [...normalized, ...current])
     setNextBefore(page.next_before ?? null)
@@ -50,7 +51,7 @@ export function useDurableConversation({ app, scope, itemId = null }) {
         const resolved = await client.resolve(identity)
         if (cancelled || generation.current !== thisGeneration) return
         setConversation(resolved)
-        await readMessages(resolved.id)
+        await readMessages(resolved.id, null, true, thisGeneration)
       } catch (cause) {
         if (!cancelled && generation.current === thisGeneration) setError(durableConversationError(cause))
       } finally {
@@ -71,12 +72,18 @@ export function useDurableConversation({ app, scope, itemId = null }) {
       pendingRef.current = latest
       setPending(latest)
       if (status.state !== 'running') {
-        await readMessages(request.conversationId)
+        await readMessages(request.conversationId, null, true, currentGeneration)
         pendingRef.current = null
         setPending(null)
         return status
       }
       await new Promise(resolve => window.setTimeout(resolve, POLL_INTERVAL_MS))
+    }
+    if (generation.current === currentGeneration) {
+      setError({
+        retryable: true,
+        text: 'Your message is saved, but assistant delivery is still pending. This environment may have durable Runtime delivery disabled.',
+      })
     }
     return latest
   }, [client, readMessages])

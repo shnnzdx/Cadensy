@@ -141,31 +141,25 @@ test("phase 3 interaction runtime currently owns drawer lifecycle state without 
   assert.match(featureSource, /function AssistantDrawer\(\{ item, mode, onClose, onCommand, onResolvedOutcome, inline = false \}\)/);
 });
 
-test("phase 4 assistant flow currently owns drawer-local lifecycle, Cadensy conversation state, and backend error mapping", async () => {
+test("PR-06B.4 assistant flow delegates history and submission identity to the durable server conversation seam", async () => {
   const source = await loadAssistantFlowSource();
 
   assert.match(source, /const \[pendingRedirect, setPendingRedirect\] = useState\(''\)/);
   assert.match(source, /const \[draft, setDraft\] = useState\(''\)/);
-  assert.match(source, /const \[messages, setMessages\] = useState\(\[\]\)/);
-  assert.match(source, /const \[sending, setSending\] = useState\(false\)/);
+  assert.match(source, /import \{ useDurableConversation \} from '\.\.\/useDurableConversation\.js'/);
+  assert.match(source, /const durable = useDurableConversation\(\{ app, scope: 'plan_assistant', itemId \}\)/);
+  assert.match(source, /const messages = useMemo\(\(\) => durable\.messages\.map/);
+  assert.match(source, /const sending = Boolean\(durable\.pending\)/);
   assert.match(source, /setDraft\(promptExamples\[mode\] \|\| ''\)/);
-  assert.match(source, /setMessages\(\[\]\)/);
+  assert.match(source, /setMessageDetails\(\{\}\)/);
   assert.match(source, /setPendingRedirect\(''\)/);
-  assert.match(source, /setSending\(false\)/);
   assert.match(source, /const placeholder = mode === 'global'\s*\? 'Ask Cadensy or request a change\.\.\.'\s*: 'Ask about this item or request a change\.\.\.'/s);
   assert.match(source, /thread\.scrollTo\(\{ top: thread\.scrollHeight, behavior: 'smooth' \}\)/);
   assert.match(source, /window\.setTimeout\(\(\) => inputRef\.current\?\.focus\(\{ preventScroll: true \}\), 80\)/);
-  assert.match(source, /const loadingId = `ai-loading-\$\{Date\.now\(\)\}`/);
-  assert.match(source, /const userMessage = \{ id: `user-\$\{Date\.now\(\)\}`, from: 'you', text \}/);
-  assert.match(source, /setMessages\(current => \[\.\.\.current, userMessage, \{ id: loadingId, from: 'tripSync', text: ASSISTANT_LOADING_MESSAGES\[0\], loading: true \}\]\)/);
-  assert.match(source, /const assistantErrorText = err => \(/);
-  assert.match(source, /const historyTurnFromMessage = message => \{/);
-  assert.match(source, /turn\.candidate_options = message\.candidateOptions\.map\(option => \(\{/);
-  assert.match(source, /const history = messages\s*\.filter\(message => !message\.loading && message\.text\)\s*\.map\(historyTurnFromMessage\)/s);
-  assert.match(source, /const result = await app\.chatWithTrip\(\{ message: text, itemId, history \}\)/);
-  assert.match(source, /text: result\.reply,\s*proposedChange: result\.proposed_change,\s*candidateOptions,\s*selectedCandidateId: '',\s*request: text,\s*applyError: '',\s*selectionNote: '',\s*classifyingCandidate: false,/s);
-  assert.match(source, /const text = assistantErrorText\(err\)/);
-  assert.match(source, /setMessages\(current => current\.map\(message => message\.id === loadingId \? \{ \.\.\.message, text, loading: false, error: true \} : message\)\)/);
+  assert.match(source, /await durable\.send\(\{ text, selectedPlanItemId: itemId \}\)/);
+  assert.match(source, /candidateOptionsFromPersisted/);
+  assert.doesNotMatch(source, /chatWithTrip\(/);
+  assert.doesNotMatch(source, /historyTurnFromMessage/);
 });
 
 test("phase 4 assistant flow currently owns proposal apply state, submitChange branching, and confirm redirect command generation", async () => {
@@ -176,10 +170,10 @@ test("phase 4 assistant flow currently owns proposal apply state, submitChange b
   assert.match(source, /updateMessage\(message\.id, \{ applying: true, applyError: '' \}\)/);
   assert.match(source, /const outcome = await app\.submitChange\(\{\s*item: targetItem,\s*actionType: mode,\s*request: message\.request,\s*verdict: proposedChange\.verdict,\s*patch: proposedChange\.patch,\s*options: roundAlternativesFrom\(message\.candidateOptions, targetItem\.id\),\s*\}\)/s);
   assert.match(source, /updateMessage\(message\.id, \{ applying: false, applied: true \}\)/);
-  assert.match(source, /if \(outcome\.path === 'notice'\) \{\s*app\.notify\('Updated'\)\s*onResolvedOutcome\?\.\(\{ kind: 'focus-item', itemId: targetItem\.id, outcome, targetItem \}\)\s*\}/s);
+  assert.match(source, /if \(outcome\.applied\) \{\s*app\.notify\('Updated'\)\s*onResolvedOutcome\?\.\(\{ kind: 'focus-item', itemId: targetItem\.id, outcome, targetItem \}\)\s*\}/s);
   assert.match(source, /else if \(outcome\.path === 'round' \|\| outcome\.path === 'reopen_round'\) \{\s*app\.notify\('Vote opened'\)\s*onResolvedOutcome\?\.\(\{ kind: 'focus-round', itemId: targetItem\.id, outcome, targetItem \}\)\s*\}/s);
   assert.match(source, /const tripId = app\.activeTripId \|\| app\.trip\?\.id \|\| trip\?\.id/);
-  assert.match(source, /else \{\s*setPendingRedirect\('Affected members need to confirm\. Opening the conversation\.\.\.'\)\s*const tripId = app\.activeTripId \|\| app\.trip\?\.id \|\| trip\?\.id\s*if \(tripId\) onCommand\?\.\(\{ type: 'navigate', to: tripHref\(tripId, 'conflict'\), delayMs: 850 \}\)\s*\}/s);
+  assert.match(source, /else \{\s*app\.setUpdateFilter\?\.\('actions'\)\s*setPendingRedirect\('Affected members need to confirm\. Opening trip notes\.\.\.'\)\s*const tripId = app\.activeTripId \|\| app\.trip\?\.id \|\| trip\?\.id\s*if \(tripId\) onCommand\?\.\(\{ type: 'navigate', to: tripHref\(tripId, 'updates'\), delayMs: 850 \}\)\s*\}/s);
   assert.match(source, /const applyError = assistantErrorText\(err\)/);
 });
 
@@ -189,11 +183,9 @@ test("phase 4 AssistantDrawer consumes a coherent assistant-flow view and action
   assert.match(source, /const \{\s*view,\s*actions,\s*\} = useAssistantChangeRequestFlow\(\{/s);
   assert.match(source, /onResolvedOutcome,\s*\}\)/s);
   assert.match(source, /ref=\{view\.threadRef\}/);
-  assert.match(source, /const focusItemId = message\.proposedChange\?\.item_id \|\| message\.candidateOptions\?\.find\(option => option\.id === message\.selectedCandidateId\)\?\.item_id/);
-  assert.match(source, /const currentItem = focusItemId \? \(view\.itemById\[focusItemId\] \|\| \(item\.id === focusItemId \? item : null\)\) : null/);
-  assert.match(source, /\(message\.proposedChange \|\| message\.candidateOptions\?\.length\) && <ChangeConfirmCard/);
-  assert.match(source, /disabled=\{message\.applied \|\| message\.applying \|\| message\.classifyingCandidate\}/);
-  assert.match(source, /patch\.duration_min !== undefined\s*\? \{ label: 'Duration', before: before\.duration, after: after\.duration \}/s);
+  assert.match(source, /view\.durable\.nextBefore !== null/);
+  assert.match(source, /actions\.loadOlderMessages/);
+  assert.match(source, /view\.durable\.error/);
   assert.match(source, /onApply=\{\(\) => actions\.applyProposal\(message, message\.proposedChange\)\}/);
   assert.match(source, /onDismiss=\{\(\) => actions\.dismissProposal\(message\.id\)\}/);
   assert.match(source, /view\.pendingRedirect && <p className="redirectHint">\{view\.pendingRedirect\}<\/p>/);

@@ -809,11 +809,14 @@ function AssistantDrawer({ item, mode, onClose, onCommand, onResolvedOutcome, in
           />}
           <CandidateOptionList message={message} onSelect={actions.selectCandidateOption} />
         </div>)}
+        {view.durable.nextBefore !== null && <button type="button" className="changeCancelAction" onClick={actions.loadOlderMessages}>Load earlier messages</button>}
+        {view.sending && <PlanChatBubble from="tripSync">Request saved. Waiting for Cadensy…</PlanChatBubble>}
+        {view.durable.error && <div className="assistantError"><p>{view.durable.error.text}</p>{view.durable.error.retryable && <button type="button" className="changeCancelAction" onClick={actions.retrySavedRequest}>Retry saved request</button>}{view.durable.pending?.submissionId && <button type="button" className="changeCancelAction" onClick={actions.recoverSavedRequest}>Recover expired request</button>}</div>}
         {mode === 'details' && <div className="detailSheet">{detailSections.map(group => <section key={group.section}><h3>{group.section}</h3><dl>{group.rows.map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl></section>)}</div>}
         {mode === 'replacePlace' && <ReplacePlacePanel item={item} onCommand={onCommand} onResolvedOutcome={onResolvedOutcome}/>}
         {view.pendingRedirect && <p className="redirectHint">{view.pendingRedirect}</p>}
       </div>
-      {mode !== 'details' && mode !== 'replacePlace' && <div className="drawerComposer"><input ref={view.inputRef} value={view.draft} onChange={event => actions.updateDraft(event.target.value)} onKeyDown={event => event.key === 'Enter' && actions.sendMessage()} placeholder={view.placeholder}/><button aria-label="Send message" disabled={view.sending || !view.draft.trim()} onClick={actions.sendMessage}>{view.sending ? '...' : '↑'}</button></div>}
+      {mode !== 'details' && mode !== 'replacePlace' && <div className="drawerComposer"><input ref={view.inputRef} value={view.draft} onChange={event => actions.updateDraft(event.target.value)} onKeyDown={event => event.key === 'Enter' && actions.sendMessage()} placeholder={view.placeholder}/><button type="button" className="changeCancelAction" disabled={!view.durable.conversation || view.sending} onClick={() => { if (window.confirm('Delete this private conversation? It will no longer be available.')) actions.deleteConversation() }}>Delete</button><button aria-label="Send message" disabled={view.sending || !view.draft.trim()} onClick={actions.sendMessage}>{view.sending ? '...' : '↑'}</button></div>}
     </aside>
   if (inline) return drawer
   return <div className="drawerOverlay" onClick={onClose}>{drawer}</div>

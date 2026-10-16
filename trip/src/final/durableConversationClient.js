@@ -37,8 +37,12 @@ export const createDurableConversationClient = ({ requestJson, tripId }) => {
   )
   return {
     resolve,
+    list: ({ scope, contextKey } = {}) => requestJson(`${root}?${new URLSearchParams({
+      ...(scope ? { scope } : {}),
+      ...(contextKey ? { context_key: contextKey } : {}),
+    }).toString()}`),
+    get: conversationId => requestJson(`${root}/${encodeURIComponent(conversationId)}`),
     messages,
-    submission: conversationId => requestJson(`${root}/${encodeURIComponent(conversationId)}`),
     status: (conversationId, submissionId) => requestJson(`${root}/${encodeURIComponent(conversationId)}/submissions/${encodeURIComponent(submissionId)}`),
     submit: (conversationId, { text, selectedPlanItemId = null, idempotencyKey }) => requestJson(
       `${root}/${encodeURIComponent(conversationId)}/messages`, {

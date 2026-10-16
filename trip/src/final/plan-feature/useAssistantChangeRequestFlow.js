@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTripApp } from '../TripAppState.jsx'
+import { useDurableConversation } from '../useDurableConversation.js'
 import { trip } from '../tripContent.js'
 import { serializeWorkspaceRoute } from '../../../../shared/trip-navigation-route/index.js'
 
@@ -47,32 +48,25 @@ const removeRequestPatch = () => ({ remove: true })
 
 const isRemoveRequest = text => /\b(remove|delete|clear)\b/i.test(text || '')
 
-const historyTurnFromMessage = message => {
-  const turn = {
-    role: message.from === 'you' ? 'user' : 'assistant',
-    text: message.text,
-  }
-  if (message.from !== 'you' && Array.isArray(message.candidateOptions) && message.candidateOptions.length) {
-    turn.candidate_options = message.candidateOptions.map(option => ({
-      id: option.id,
-      label: option.label || '',
-      title: option.title || '',
-      body: option.body || '',
-      tradeoff: option.tradeoff || '',
-      item_id: option.item_id,
-      patch: option.patch || {},
-    }))
-  }
-  return turn
-}
+const candidateOptionsFromPersisted = options => (options || []).map(option => ({
+  id: option.id,
+  label: option.title || '',
+  title: option.title || '',
+  body: option.summary || '',
+  tradeoff: '',
+  item_id: option.target_plan_item_id,
+  patch: option.safe_patch || {},
+  // Persisted options are advisory display data. Selecting one always invokes
+  // the existing fresh Classify/Preview seam below before Apply is available.
+  capturedPlanRevision: option.plan_revision,
+  capturedPlanningFactsRevision: option.planning_facts_revision,
+}))
 
 export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolvedOutcome }) {
   const app = useTripApp()
   const [pendingRedirect, setPendingRedirect] = useState('')
   const [draft, setDraft] = useState('')
-  const [messages, setMessages] = useState([])
-  const [sending, setSending] = useState(false)
-  const [loadingStep, setLoadingStep] = useState(0)
+  const [messageDetails, setMessageDetails] = useState({})
   const threadRef = useRef(null)
   const inputRef = useRef(null)
 
@@ -91,30 +85,29 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
     : 'Ask about this item or request a change...'
 
   const itemId = mode === 'global' ? null : item.id
+  const durable = useDurableConversation({ app, scope: 'plan_assistant', itemId })
   const itemById = useMemo(() => Object.fromEntries((app.days || []).flatMap(day => day.items.map(planItem => [planItem.id, planItem]))), [app.days])
+  const messages = useMemo(() => {
+    let mostRecentUserText = ''
+    return durable.messages.map(message => {
+      if (message.role === 'user') mostRecentUserText = message.text
+      return {
+        id: message.id,
+        from: message.role === 'user' ? 'you' : 'tripSync',
+        text: message.text,
+        candidateOptions: candidateOptionsFromPersisted(message.options),
+        request: message.role === 'assistant' ? mostRecentUserText : '',
+        ...messageDetails[message.id],
+      }
+    })
+  }, [durable.messages, messageDetails])
+  const sending = Boolean(durable.pending)
 
   useEffect(() => {
     setDraft(promptExamples[mode] || '')
-    setMessages([])
+    setMessageDetails({})
     setPendingRedirect('')
-    setSending(false)
-    setLoadingStep(0)
   }, [item.id, mode])
-
-  useEffect(() => {
-    if (!sending) return undefined
-    // Local placeholder rotation only. Real progress events need a later SSE/API stream.
-    const interval = window.setInterval(() => {
-      setLoadingStep(step => step + 1)
-    }, 2600)
-    return () => window.clearInterval(interval)
-  }, [sending])
-
-  useEffect(() => {
-    setMessages(current => current.map(message => message.loading
-      ? { ...message, text: ASSISTANT_LOADING_MESSAGES[loadingStep % ASSISTANT_LOADING_MESSAGES.length] }
-      : message))
-  }, [loadingStep])
 
   useEffect(() => {
     const thread = threadRef.current
@@ -126,72 +119,18 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
   }, [item.id, mode])
 
   const updateMessage = (id, patch) => {
-    setMessages(current => current.map(message => message.id === id ? { ...message, ...patch } : message))
+    setMessageDetails(current => ({ ...current, [id]: { ...current[id], ...patch } }))
   }
 
   const sendMessage = async () => {
     const text = draft.trim()
     if (!text || sending) return
-    const loadingId = `ai-loading-${Date.now()}`
-    const userMessage = { id: `user-${Date.now()}`, from: 'you', text }
-    setLoadingStep(0)
-    setMessages(current => [...current, userMessage, { id: loadingId, from: 'tripSync', text: ASSISTANT_LOADING_MESSAGES[0], loading: true }])
     setDraft('')
-    setSending(true)
     try {
-      if (mode === 'removePlan' || (itemId && isRemoveRequest(text))) {
-        const patch = removeRequestPatch(item)
-        const verdict = await app.classify({
-          item,
-          actionType: 'removePlan',
-          request: text,
-          patch,
-        })
-        setMessages(current => current.map(message => message.id === loadingId ? {
-          ...message,
-          loading: false,
-          from: 'tripSync',
-          text: verdict.path === 'reopen_round'
-            ? `Removing ${item.title} would reopen a settled block. Click Apply to start the group round.`
-            : `I can remove ${item.title} from this block. Click Apply to submit it; the Current Plan has not changed yet.`,
-          proposedChange: {
-            item_id: item.id,
-            item_title: item.title,
-            patch,
-            verdict,
-          },
-          candidateOptions: [],
-          selectedCandidateId: '',
-          request: text,
-          applyError: '',
-          selectionNote: '',
-          classifyingCandidate: false,
-        } : message))
-        return
-      }
-      const history = messages
-        .filter(message => !message.loading && message.text)
-        .map(historyTurnFromMessage)
-      const result = await app.chatWithTrip({ message: text, itemId, history })
-      const candidateOptions = Array.isArray(result.candidate_options) ? result.candidate_options : []
-      setMessages(current => current.map(message => message.id === loadingId ? {
-        ...message,
-        loading: false,
-        from: 'tripSync',
-        text: result.reply,
-        proposedChange: result.proposed_change,
-        candidateOptions,
-        selectedCandidateId: '',
-        request: text,
-        applyError: '',
-        selectionNote: '',
-        classifyingCandidate: false,
-      } : message))
+      await durable.send({ text, selectedPlanItemId: itemId })
     } catch (err) {
-      const text = assistantErrorText(err)
-      setMessages(current => current.map(message => message.id === loadingId ? { ...message, text, loading: false, error: true } : message))
-    } finally {
-      setSending(false)
+      // The hook preserves the original idempotency key and presents a
+      // retryable status; it never fabricates an Assistant completion.
     }
   }
 
@@ -293,6 +232,7 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
       draft,
       messages,
       sending,
+      durable,
       placeholder,
       itemById,
       threadRef,
@@ -304,6 +244,10 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
       dismissProposal,
       selectCandidateOption,
       applyProposal,
+      retrySavedRequest: durable.retryPending,
+      recoverSavedRequest: durable.recoverPending,
+      loadOlderMessages: durable.loadOlder,
+      deleteConversation: durable.deleteConversation,
     },
   }
 }

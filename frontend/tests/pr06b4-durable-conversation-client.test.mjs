@@ -23,6 +23,8 @@ test('durable conversation client submits one message with an idempotency key an
     requestJson: async (path, options = {}) => { calls.push({ path, options }); return { ok: true } },
   })
   await client.resolve({ scope: 'personal', contextKey: 'personal' })
+  await client.list({ scope: 'personal', contextKey: 'personal' })
+  await client.get('conversation id')
   await client.messages('conversation id', 9)
   await client.submit('conversation id', { text: 'hello', selectedPlanItemId: 'f'.repeat(32), idempotencyKey: 'submission-key' })
   await client.recover('conversation id', 'submission id', 'recovery-key')
@@ -30,12 +32,14 @@ test('durable conversation client submits one message with an idempotency key an
 
   assert.equal(calls[0].path, '/api/trips/trip%20id/conversations')
   assert.deepEqual(JSON.parse(calls[0].options.body), { scope: 'personal', context_key: 'personal' })
-  assert.equal(calls[1].path, '/api/trips/trip%20id/conversations/conversation%20id/messages?limit=50&before=9')
-  assert.equal(calls[2].options.headers['Idempotency-Key'], 'submission-key')
-  assert.deepEqual(JSON.parse(calls[2].options.body), { text: 'hello', selected_plan_item_id: 'f'.repeat(32) })
-  assert.equal(calls[2].options.body.includes('history'), false)
-  assert.equal(calls[3].options.headers['Idempotency-Key'], 'recovery-key')
-  assert.equal(calls[4].options.method, 'DELETE')
+  assert.equal(calls[1].path, '/api/trips/trip%20id/conversations?scope=personal&context_key=personal')
+  assert.equal(calls[2].path, '/api/trips/trip%20id/conversations/conversation%20id')
+  assert.equal(calls[3].path, '/api/trips/trip%20id/conversations/conversation%20id/messages?limit=50&before=9')
+  assert.equal(calls[4].options.headers['Idempotency-Key'], 'submission-key')
+  assert.deepEqual(JSON.parse(calls[4].options.body), { text: 'hello', selected_plan_item_id: 'f'.repeat(32) })
+  assert.equal(calls[4].options.body.includes('history'), false)
+  assert.equal(calls[5].options.headers['Idempotency-Key'], 'recovery-key')
+  assert.equal(calls[6].options.method, 'DELETE')
 })
 
 test('durable history is presented in ascending server sequence order', () => {
