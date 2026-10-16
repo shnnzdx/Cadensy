@@ -125,3 +125,91 @@ def test_purge_deletes_private_children_but_not_membership_history(db: Session, 
     assert db.get(ConversationSubmission, accepted.submission_id) is None
     assert db.query(ConversationMessage).filter(ConversationMessage.conversation_id == conversation.id).count() == 0
     assert db.get(TripMembership, organizer.id) is not None
+
+
+def test_recovery_replay_keeps_its_accepted_fence_after_newer_reclaim(db: Session, trip_setup: dict):
+    organizer = trip_setup["organizer"]
+    organizer.status = "joined"
+    now = service.utcnow()
+    conversation = service.create_or_discover(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                              scope="personal", context_key="personal", now=now)
+    original = service.submit_message(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                      conversation_id=conversation.id, idempotency_key="original", text="one",
+                                      selected_plan_item_id=None, now=now)
+    recovery_a = service.recover_submission(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                             conversation_id=conversation.id, submission_id=original.submission_id,
+                                             recovery_key="A", now=now + timedelta(minutes=6))
+    recovery_b = service.recover_submission(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                             conversation_id=conversation.id, submission_id=original.submission_id,
+                                             recovery_key="B", now=now + timedelta(minutes=12))
+    replay_a = service.recover_submission(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                           conversation_id=conversation.id, submission_id=original.submission_id,
+                                           recovery_key="A", now=now + timedelta(minutes=13))
+    assert recovery_a.fence == 2 and recovery_b.fence == 3
+    assert replay_a.recovery_accepted_fence == 2
+    assert replay_a.recovery_accepted_attempt_number == 2
+    assert replay_a.fence == 3
+
+
+def test_completion_validates_all_options_before_writing_assistant_message(db: Session, trip_setup: dict):
+    organizer = trip_setup["organizer"]
+    organizer.status = "joined"
+    now = service.utcnow()
+    conversation = service.create_or_discover(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                              scope="personal", context_key="personal", now=now)
+    accepted = service.submit_message(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                      conversation_id=conversation.id, idempotency_key="completion", text="one",
+                                      selected_plan_item_id=None, now=now)
+    with pytest.raises(service.ConversationValidationError):
+        service.complete_submission(
+            db, trip_id=trip_setup["trip"].id, membership_id=organizer.id, conversation_id=conversation.id,
+            submission_id=accepted.submission_id, attempt_number=1, fence=1, content="answer",
+            options=({"title": "good", "safe_patch": {}}, {"title": "bad", "safe_patch": {"forbidden": 1}}),
+            now=now + timedelta(minutes=1),
+        )
+    assert db.query(ConversationMessage).filter(
+        ConversationMessage.conversation_id == conversation.id, ConversationMessage.role == "assistant"
+    ).count() == 0
+
+
+def test_failure_requires_live_lease_and_does_not_refresh_retention(db: Session, trip_setup: dict):
+    organizer = trip_setup["organizer"]
+    organizer.status = "joined"
+    now = service.utcnow()
+    conversation = service.create_or_discover(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                              scope="personal", context_key="personal", now=now)
+    accepted = service.submit_message(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                      conversation_id=conversation.id, idempotency_key="failure", text="one",
+                                      selected_plan_item_id=None, now=now)
+    retained_until = conversation.retention_expires_at
+    with pytest.raises(service.StaleFence):
+        service.fail_submission(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                conversation_id=conversation.id, submission_id=accepted.submission_id,
+                                attempt_number=1, fence=1, category="provider_timeout", now=now + timedelta(minutes=6))
+    assert conversation.retention_expires_at == retained_until
+
+
+def test_failure_rejects_deleted_and_quarantined_owner(db: Session, trip_setup: dict):
+    organizer = trip_setup["organizer"]
+    organizer.status = "joined"
+    now = service.utcnow()
+    conversation = service.create_or_discover(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                              scope="personal", context_key="personal", now=now)
+    accepted = service.submit_message(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                      conversation_id=conversation.id, idempotency_key="deleted-failure", text="one",
+                                      selected_plan_item_id=None, now=now)
+    service.delete_conversation(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                conversation_id=conversation.id, now=now + timedelta(minutes=1))
+    with pytest.raises(service.ConversationUnavailable):
+        service.fail_submission(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                conversation_id=conversation.id, submission_id=accepted.submission_id,
+                                attempt_number=1, fence=1, category="late", now=now + timedelta(minutes=1))
+
+    organizer.status = "joined"
+    organizer.quarantined_at = now
+    organizer.quarantine_reason = "security_incident"
+    organizer.quarantined_by_membership_id = organizer.id
+    with pytest.raises(service.ConversationUnavailable):
+        service.fail_submission(db, trip_id=trip_setup["trip"].id, membership_id=organizer.id,
+                                conversation_id=conversation.id, submission_id=accepted.submission_id,
+                                attempt_number=1, fence=1, category="late", now=now + timedelta(minutes=1))

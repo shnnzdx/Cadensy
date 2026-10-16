@@ -82,6 +82,12 @@ class SubmissionResult:
     lease_expires_at: datetime | None
     replayed: bool
     assistant_message_id: str | None
+    # A recovery replay never becomes authority for a newer parent attempt.
+    # These immutable fields expose the recovery operation's own identity while
+    # attempt_number/fence above continue to describe current parent state.
+    recovery_accepted_attempt_number: int | None = None
+    recovery_accepted_fence: int | None = None
+    recovery_state: str | None = None
 
 
 def utcnow() -> datetime:
@@ -188,6 +194,48 @@ def _validate_trip_item(db: Session, *, trip_id: str, item_id: str | None) -> No
     item = db.scalar(select(PlanItem).join(Plan).where(PlanItem.id == item_id, Plan.trip_id == trip_id))
     if item is None:
         raise ConversationValidationError("plan item does not belong to trip")
+
+
+def _validated_completion_options(
+    db: Session, *, trip_id: str, options: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Validate all safe projections before any Assistant row is added.
+
+    The returned detached dictionaries are safe to persist only after every
+    candidate has passed.  This protects callers that catch validation errors
+    without rolling their Session back: no orphan assistant row can exist.
+    """
+    result = list(options)
+    if len(result) > MAX_OPTIONS or any(not isinstance(option, dict) for option in result):
+        raise ConversationValidationError("invalid option projection")
+    normalized: list[dict[str, Any]] = []
+    for option in result:
+        title = option.get("title")
+        summary = option.get("summary")
+        patch = option.get("safe_patch", {})
+        target = option.get("target_plan_item_id")
+        plan_revision = option.get("plan_revision")
+        facts_revision = option.get("planning_facts_revision")
+        if (
+            not isinstance(title, str) or not title.strip() or len(title.strip()) > 300
+            or summary is not None and (not isinstance(summary, str) or len(summary) > 4_000)
+            or not isinstance(patch, dict) or not set(patch).issubset(SAFE_OPTION_PATCH_KEYS)
+            or target is not None and (not isinstance(target, str) or len(target) > 32)
+            or plan_revision is not None and (isinstance(plan_revision, bool) or not isinstance(plan_revision, int) or plan_revision < 0)
+            or facts_revision is not None and (isinstance(facts_revision, bool) or not isinstance(facts_revision, int) or facts_revision < 0)
+        ):
+            raise ConversationValidationError("invalid option projection")
+        try:
+            json.dumps(patch, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ConversationValidationError("invalid option projection") from exc
+        _validate_trip_item(db, trip_id=trip_id, item_id=target)
+        normalized.append({
+            "title": title.strip(), "summary": summary, "safe_patch": patch,
+            "target_plan_item_id": target, "plan_revision": plan_revision,
+            "planning_facts_revision": facts_revision,
+        })
+    return normalized
 
 
 def _locked_owned_conversation(
@@ -331,9 +379,15 @@ def submit_message(
     return _result(submission, replayed=False)
 
 
-def _result(submission: ConversationSubmission, *, replayed: bool) -> SubmissionResult:
+def _result(
+    submission: ConversationSubmission, *, replayed: bool,
+    recovery: ConversationSubmissionRecovery | None = None,
+) -> SubmissionResult:
     return SubmissionResult(submission.id, submission.state, submission.attempt_number, submission.fence,
-                            submission.lease_expires_at, replayed, submission.assistant_message_id)
+                            submission.lease_expires_at, replayed, submission.assistant_message_id,
+                            recovery.accepted_attempt_number if recovery is not None else None,
+                            recovery.accepted_fence if recovery is not None else None,
+                            recovery.state if recovery is not None else None)
 
 
 def recover_submission(
@@ -352,17 +406,28 @@ def recover_submission(
     recovery = db.scalar(select(ConversationSubmissionRecovery).where(ConversationSubmissionRecovery.submission_id == submission.id,
                                                                         ConversationSubmissionRecovery.recovery_key == recovery_key).with_for_update())
     if recovery is not None:
-        return _result(submission, replayed=True)
+        return _result(submission, replayed=True, recovery=recovery)
     if submission.state != "running" or submission.lease_expires_at is None or _aware(submission.lease_expires_at) > now:
         raise ConversationBusy()
+    # The older recovery's external attempt is no longer current once a newer
+    # fenced attempt is granted.  Its immutable accepted fence remains audit
+    # evidence; ``failed`` means its execution authority expired/revoked, not
+    # that the original user submission was replaced or failed.
+    db.query(ConversationSubmissionRecovery).filter(
+        ConversationSubmissionRecovery.submission_id == submission.id,
+        ConversationSubmissionRecovery.state == "running",
+    ).update({ConversationSubmissionRecovery.state: "failed"}, synchronize_session=False)
     submission.attempt_number += 1
     submission.fence += 1
     submission.lease_expires_at = now + LEASE
-    db.add(ConversationSubmissionRecovery(submission_id=submission.id, recovery_key=recovery_key,
-                                           operation_version=OPERATION_VERSION, accepted_attempt_number=submission.attempt_number,
-                                           accepted_fence=submission.fence, state="running", accepted_at=now))
+    accepted_recovery = ConversationSubmissionRecovery(
+        submission_id=submission.id, recovery_key=recovery_key,
+        operation_version=OPERATION_VERSION, accepted_attempt_number=submission.attempt_number,
+        accepted_fence=submission.fence, state="running", accepted_at=now,
+    )
+    db.add(accepted_recovery)
     db.flush()
-    return _result(submission, replayed=False)
+    return _result(submission, replayed=False, recovery=accepted_recovery)
 
 
 def complete_submission(
@@ -374,9 +439,9 @@ def complete_submission(
     content = content.strip()
     if not content or len(content) > MAX_MESSAGE_CHARS:
         raise ConversationValidationError("invalid assistant completion")
-    safe_options = list(options)
-    if len(safe_options) > MAX_OPTIONS or any(not isinstance(option, dict) for option in safe_options):
-        raise ConversationValidationError("invalid option projection")
+    # Must finish all input validation before the first persistent Assistant
+    # write. See _validated_completion_options for rollback-independent safety.
+    safe_options = _validated_completion_options(db, trip_id=trip_id, options=options)
     conversation = _locked_owned_conversation(db, trip_id=trip_id, membership_id=membership_id, conversation_id=conversation_id, now=now)
     submission = db.scalar(select(ConversationSubmission).where(ConversationSubmission.id == submission_id,
                                                                    ConversationSubmission.conversation_id == conversation.id).with_for_update())
@@ -391,18 +456,11 @@ def complete_submission(
     db.add(assistant)
     db.flush()
     for ordinal, option in enumerate(safe_options):
-        title = option.get("title")
-        patch = option.get("safe_patch", {})
-        target = option.get("target_plan_item_id")
-        if (not isinstance(title, str) or not title.strip() or not isinstance(patch, dict)
-                or not set(patch).issubset(SAFE_OPTION_PATCH_KEYS)):
-            raise ConversationValidationError("invalid option projection")
-        _validate_trip_item(db, trip_id=trip_id, item_id=target)
-        db.add(ConversationMessageOption(assistant_message_id=assistant.id, ordinal=ordinal, title=title.strip(),
-                                         summary=option.get("summary") if isinstance(option.get("summary"), str) else None,
-                                         safe_patch=patch, target_plan_item_id=target,
-                                         plan_revision=option.get("plan_revision"),
-                                         planning_facts_revision=option.get("planning_facts_revision")))
+        db.add(ConversationMessageOption(assistant_message_id=assistant.id, ordinal=ordinal, title=option["title"],
+                                         summary=option["summary"], safe_patch=option["safe_patch"],
+                                         target_plan_item_id=option["target_plan_item_id"],
+                                         plan_revision=option["plan_revision"],
+                                         planning_facts_revision=option["planning_facts_revision"]))
     submission.assistant_message_id = assistant.id
     submission.state = "completed"
     submission.lease_expires_at = None
@@ -434,7 +492,9 @@ def fail_submission(
     ).with_for_update())
     if submission is None:
         raise ConversationUnavailable()
-    if submission.state != "running" or submission.attempt_number != attempt_number or submission.fence != fence:
+    if (submission.state != "running" or submission.lease_expires_at is None
+            or _aware(submission.lease_expires_at) <= now
+            or submission.attempt_number != attempt_number or submission.fence != fence):
         raise StaleFence()
     submission.state = "failed"
     submission.lease_expires_at = None

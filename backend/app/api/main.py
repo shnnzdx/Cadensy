@@ -460,6 +460,9 @@ def _conversation_submission_result(result: conversation_service.SubmissionResul
         "lease_expires_at": result.lease_expires_at,
         "assistant_message_id": result.assistant_message_id,
         "replayed": result.replayed,
+        "recovery_accepted_attempt_number": result.recovery_accepted_attempt_number,
+        "recovery_accepted_fence": result.recovery_accepted_fence,
+        "recovery_state": result.recovery_state,
     }
 
 
