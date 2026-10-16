@@ -59,6 +59,43 @@ def test_owner_scoped_creation_history_and_idempotent_submission(db: Session, tr
         assert conflict.status_code == 409 and conflict.json()["detail"] == "idempotency_key_conflict"
 
 
+def test_request_bound_runtime_runs_once_for_a_new_claim_not_a_replay(
+    db: Session, trip_setup: dict, monkeypatch: pytest.MonkeyPatch
+):
+    """PR-06B.3 keeps 202 admission semantics while preventing double runs."""
+    calls = []
+
+    class _Coordinator:
+        def execute(self, *, identity, now):
+            calls.append(identity)
+
+    monkeypatch.setattr(api, "_durable_conversation_runtime_enabled", lambda: True)
+    monkeypatch.setattr(
+        api.chat_service, "build_durable_conversation_runtime_coordinator",
+        lambda *, session_factory: _Coordinator(),
+    )
+    trip_id = trip_setup["trip"].id
+    with _client(db) as client:
+        headers = _headers(client, db, trip_setup["organizer"], trip_id)
+        created = client.post(
+            f"/api/trips/{trip_id}/conversations", headers=headers,
+            json={"scope": "personal", "context_key": "personal"},
+        )
+        conversation_id = created.json()["id"]
+        accepted = client.post(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages",
+            headers={**headers, "Idempotency-Key": "runtime-once"}, json={"text": "hello"},
+        )
+        replay = client.post(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages",
+            headers={**headers, "Idempotency-Key": "runtime-once"}, json={"text": "hello"},
+        )
+
+    assert accepted.status_code == replay.status_code == 202
+    assert len(calls) == 1
+    assert calls[0].submission_id == accepted.json()["submission_id"]
+
+
 def test_owner_isolation_and_internal_recovery_fence_expiry(db: Session, trip_setup: dict):
     trip = trip_setup["trip"]
     trip_id = trip.id

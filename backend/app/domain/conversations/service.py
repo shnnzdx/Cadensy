@@ -88,6 +88,9 @@ class SubmissionResult:
     recovery_accepted_attempt_number: int | None = None
     recovery_accepted_fence: int | None = None
     recovery_state: str | None = None
+    # Internal-only admission fact for the request-bound Runtime bridge.  It
+    # is never true for an active idempotency replay or a status read.
+    execution_claimed: bool = False
 
 
 def utcnow() -> datetime:
@@ -349,16 +352,17 @@ def submit_message(
             raise IdempotencyConflict()
         # The original key is itself a durable recovery namespace.  It may
         # reclaim only its own expired lease and never creates another message.
-        if (
+        execution_claimed = (
             same_key.state == "running"
             and same_key.lease_expires_at is not None
             and _aware(same_key.lease_expires_at) <= now
-        ):
+        )
+        if execution_claimed:
             same_key.attempt_number += 1
             same_key.fence += 1
             same_key.lease_expires_at = now + LEASE
             db.flush()
-        return _result(same_key, replayed=True)
+        return _result(same_key, replayed=True, execution_claimed=execution_claimed)
     running = db.scalar(select(ConversationSubmission).where(ConversationSubmission.conversation_id == conversation.id,
                                                                ConversationSubmission.state == "running").with_for_update())
     if running is not None:
@@ -376,18 +380,20 @@ def submit_message(
     conversation.last_qualifying_activity_at = now
     conversation.retention_expires_at = now + RETENTION
     db.flush()
-    return _result(submission, replayed=False)
+    return _result(submission, replayed=False, execution_claimed=True)
 
 
 def _result(
     submission: ConversationSubmission, *, replayed: bool,
     recovery: ConversationSubmissionRecovery | None = None,
+    execution_claimed: bool = False,
 ) -> SubmissionResult:
     return SubmissionResult(submission.id, submission.state, submission.attempt_number, submission.fence,
                             submission.lease_expires_at, replayed, submission.assistant_message_id,
                             recovery.accepted_attempt_number if recovery is not None else None,
                             recovery.accepted_fence if recovery is not None else None,
-                            recovery.state if recovery is not None else None)
+                            recovery.state if recovery is not None else None,
+                            execution_claimed)
 
 
 def recover_submission(
@@ -427,7 +433,7 @@ def recover_submission(
     )
     db.add(accepted_recovery)
     db.flush()
-    return _result(submission, replayed=False, recovery=accepted_recovery)
+    return _result(submission, replayed=False, recovery=accepted_recovery, execution_claimed=True)
 
 
 def complete_submission(

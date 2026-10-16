@@ -151,6 +151,7 @@ _B2E_ORGANIZER_GATE = "CADENSY_B2E_PROTECTED_ORGANIZER_WRITES"
 _B2E_MEMBERSHIP_GATE = "CADENSY_B2E_PROTECTED_MEMBERSHIP_WRITES"
 _B2E_SCHEDULER_GATE = "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES"
 _B3_PREVIEW_APPLY_GATE = "CADENSY_B3_PROTECTED_PREVIEW_APPLY"
+_DURABLE_CONVERSATION_RUNTIME_GATE = "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED"
 _B2D_NON_PRODUCTION_ENVIRONMENTS = frozenset(
     {"development", "dev", "local", "test", "testing", "ci", "staging"}
 )
@@ -464,6 +465,52 @@ def _conversation_submission_result(result: conversation_service.SubmissionResul
         "recovery_accepted_fence": result.recovery_accepted_fence,
         "recovery_state": result.recovery_state,
     }
+
+
+def _durable_conversation_runtime_enabled() -> bool:
+    """Allow only an explicit, non-production request-bound Runtime call."""
+    requested = os.getenv(_DURABLE_CONVERSATION_RUNTIME_GATE, "0").strip().lower()
+    return (
+        requested in _TRUE_GATE_VALUES
+        and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+    )
+
+
+def _execute_durable_conversation_claim_after_commit(
+    result: conversation_service.SubmissionResult,
+    *,
+    trip_id: str,
+    membership_id: str,
+    conversation_id: str,
+) -> None:
+    """Synchronously deliver one committed claim without creating a queue.
+
+    The 202 contract remains an admission response: clients poll the frozen
+    submission status resource. Only a newly accepted claim may invoke the
+    Runtime, and the coordinator itself writes only fenced durable outcomes.
+    """
+    if not result.execution_claimed or not _durable_conversation_runtime_enabled():
+        return
+    try:
+        from ..domain.conversations.context import ExecutionIdentity
+
+        chat_service.build_durable_conversation_runtime_coordinator(
+            session_factory=SessionLocal
+        ).execute(
+            identity=ExecutionIdentity(
+                trip_id=trip_id,
+                owner_membership_id=membership_id,
+                conversation_id=conversation_id,
+                submission_id=result.submission_id,
+                attempt_number=result.attempt_number,
+                fence=result.fence,
+            ),
+            now=conversation_service.utcnow(),
+        )
+    except Exception:
+        # Admission was already committed. Do not turn it into a false runtime
+        # success or expose a Provider/composition exception through the API.
+        return
 
 
 def _raise_conversation_error(error: conversation_service.ConversationError) -> None:
@@ -1013,6 +1060,9 @@ def submit_conversation_message(
             bearer_token=_bearer_token(authorization),
         )
         db.commit()
+        _execute_durable_conversation_claim_after_commit(
+            result, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id
+        )
         return _conversation_submission_result(result)
     except conversation_service.ConversationError as error:
         db.rollback()
@@ -1038,6 +1088,9 @@ def recover_conversation_submission(
             submission_id=submission_id, recovery_key=recovery_key, bearer_token=_bearer_token(authorization),
         )
         db.commit()
+        _execute_durable_conversation_claim_after_commit(
+            result, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id
+        )
         return _conversation_submission_result(result)
     except conversation_service.ConversationError as error:
         db.rollback()
