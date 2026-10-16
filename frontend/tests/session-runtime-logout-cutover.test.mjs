@@ -9,7 +9,7 @@ test("phase 8 TripAppState delegates logout technical-session lifecycle to sessi
 
   assert.match(source, /const result = await sessionRuntime\.logoutTechnicalSession\(technicalSessionFacts, \{/);
   assert.match(source, /revoke: async \(\) => publicRequestJson\('\/api\/auth\/logout', \{/);
-  assert.match(source, /headers: identityHeadersFor\('account'\),/);
+  assert.match(source, /headers: identityHeadersFor\(technicalSessionFacts\.kind === 'guest' \? 'trip' : 'account'\),/);
   assert.doesNotMatch(source, /removeLocal\('tripsync:authToken'\)/);
   assert.doesNotMatch(source, /removeLocal\('tripsync:membershipId'\)/);
   assert.doesNotMatch(source, /removeLocal\('tripsync:tripId'\)/);

@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { createSessionRuntime, SESSION_RUNTIME_CODES } from "../../../shared/session-runtime/index.js";
+import { isSafeInternalReturnPath } from "../../../shared/trip-navigation-policy/invite-auth-return.js";
 import BrandLogo from "../BrandLogo";
 
 const API_BASE_URL =
@@ -42,13 +43,14 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [nextPath, setNextPath] = useState("/trip");
+  const nextPathRef = useRef("/trip");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const resolvedNext = params.get("next")?.startsWith("/") ? String(params.get("next")) : "/trip";
+    const requestedNext = params.get("next");
+    const resolvedNext = isSafeInternalReturnPath(requestedNext) ? requestedNext : "/trip";
     setAccountCreated(params.get("created") === "1");
-    setNextPath(resolvedNext);
+    nextPathRef.current = resolvedNext;
 
     let cancelled = false;
     const restored = sessionRuntime.restoreTechnicalSession();
@@ -131,7 +133,7 @@ export default function LoginPage() {
         setError("Could not reach the backend. Make sure the API is running.");
         return;
       }
-      window.location.href = nextPath;
+      window.location.href = nextPathRef.current;
     } catch {
       setError("Could not reach the backend. Make sure the API is running.");
     } finally {
@@ -189,7 +191,10 @@ export default function LoginPage() {
             </form>
             <div className="login-divider"><span>or</span></div>
             <button className="google-button" type="button"><span>G</span> Continue with Google</button>
-            <p className="signup-copy">New to CADENSY? <Link href="/signup">Create an account</Link></p>
+            <p className="signup-copy">New to CADENSY? <Link href="/signup" onClick={(event) => {
+              event.preventDefault();
+              window.location.href = `/signup?next=${encodeURIComponent(nextPathRef.current)}`;
+            }}>Create an account</Link></p>
           </div>
           <p className="login-legal">By continuing, you agree to our <Link href="/privacy">Privacy Policy</Link>.</p>
         </div>

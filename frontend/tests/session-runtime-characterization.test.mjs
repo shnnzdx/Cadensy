@@ -29,7 +29,7 @@ test("phase 1 current login persists auth token, membership id, and trip id befo
 
   assert.match(loginPage, /const membership = result\.default_membership \|\| result\.memberships\?\.\[0\];/);
   assert.match(loginPage, /const adoption = sessionRuntime\.adoptAccountAuth\(\{\s*token: result\.token,\s*\.\.\.\(membership \? \{/s);
-  assert.match(loginPage, /window\.location\.href = nextPath;/);
+  assert.match(loginPage, /window\.location\.href = nextPathRef\.current;/);
 });
 
 test("phase 1 current login treats storage exceptions as the same generic failure bucket as backend reachability", async () => {
@@ -93,12 +93,15 @@ test("phase 1 invite adoption cache remains a routing hint and cannot restore Gu
   assert.doesNotMatch(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: savedInviteSession\.membershipId/);
 });
 
-test("phase 1 current createTrip and invite join both adopt technical trip context through shared session-runtime adoption", async () => {
+test("invite join separates Guest payloads from Account bearer adoption", async () => {
   const { finalApp, tripAppState } = await loadSources();
 
   assert.match(tripAppState, /if \(created\.membership_id\) \{\s*adoptTechnicalTripContext\(\{\s*membershipId: created\.membership_id,\s*tripId: created\.id,\s*profile:/s);
-  assert.match(finalApp, /const joined = await app\.joinInvite\(token, \{/);
-  assert.match(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,\s*\.\.\.\(!withAccount \? \{ guestToken: joined\.guest_token \} : \{\}\),/s);
+  assert.match(finalApp, /const joined = await app\.joinInvite\(token, name\)/);
+  assert.match(finalApp, /const joined = await app\.joinAccountInvite\(token\)/);
+  assert.match(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,\s*\.\.\.\(isGuest \? \{ guestToken: joined\.guest_token \} : \{\}\),/s);
+  assert.match(tripAppState, /body: JSON\.stringify\(guestJoinPayload\(displayName\)\)/);
+  assert.match(tripAppState, /accountRequestJson\(`\/api\/invites\/\$\{token\}\/account-join`, \{/);
 });
 
 test("phase 1 current logout delegates technical-session clear to session-runtime, preserves invite adoption caches, and keeps outer reset/navigation in TripAppState", async () => {

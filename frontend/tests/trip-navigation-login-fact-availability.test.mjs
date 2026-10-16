@@ -103,14 +103,15 @@ test("phase 11 login source keeps current destination behavior without fake work
   assert.doesNotMatch(loginPage, /structured workspace return intent/i);
 });
 
-test("phase 11 login source still only supports host-level next and default session persistence before navigation", async () => {
+test("phase 11 login source preserves a validated same-origin return path before navigation", async () => {
   const loginPage = await readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8");
 
-  assert.match(loginPage, /const \[nextPath, setNextPath\] = useState\("\/trip"\);/);
-  assert.match(loginPage, /if \(next\?\.startsWith\("\/"\)\) setNextPath\(next\);/);
+  assert.match(loginPage, /const nextPathRef = useRef\("\/trip"\);/);
+  assert.match(loginPage, /const requestedNext = params\.get\("next"\);/);
+  assert.match(loginPage, /isSafeInternalReturnPath\(requestedNext\)/);
   assert.match(loginPage, /const membership = result\.default_membership \|\| result\.memberships\?\.\[0\];/);
   assert.match(loginPage, /const adoption = sessionRuntime\.adoptAccountAuth\(\{\s*token: result\.token,\s*\.\.\.\(membership \? \{/s);
   assert.match(loginPage, /if \(hasPersistenceWarning\(adoption\.warnings\)\) \{/);
-  assert.match(loginPage, /window\.location\.href = nextPath;/);
+  assert.match(loginPage, /window\.location\.href = nextPathRef\.current;/);
   assert.doesNotMatch(loginPage, /window\.location\.href = `\/trip\/\$\{.*\}\/.*/);
 });

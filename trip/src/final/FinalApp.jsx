@@ -5,6 +5,7 @@ import { trip, tripMembers, tripStyles } from './tripContent.js'
 import PlanFeature from './plan-feature/PlanFeature.jsx'
 import { serializeWorkspaceRoute } from '../../../shared/trip-navigation-route/index.js'
 import { buildTripPreviewAbsoluteUrl } from '../../../shared/tripsync-preview-contract.js'
+import { accountAuthenticationHref } from '../../../shared/trip-navigation-policy/invite-auth-return.js'
 import {
   buildWorkspaceNavigationModel,
   resolveCurrentWorkspaceRoute,
@@ -12,6 +13,7 @@ import {
   resolveRestoredWorkspaceDestination,
 } from './workspace-navigation-model.js'
 import { resolveTripCover, tripCoverImageUrlForVariant } from './trip-cover.js'
+import { describeInviteJoinError } from './invite-join-flow.js'
 
 const dayKey = date => date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : ''
 const sameDay = (a, b) => a && b && dayKey(a) === dayKey(b)
@@ -1347,13 +1349,16 @@ function JoinInvitePage() {
   const { token } = useParams()
   const [preview, setPreview] = useState(null)
   const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
+  const [accountProfile, setAccountProfile] = useState(null)
+  const [accountProfileLoading, setAccountProfileLoading] = useState(false)
   const [loadingInvite, setLoadingInvite] = useState(true)
   const [joining, setJoining] = useState(false)
   const [invalid, setInvalid] = useState(false)
   const [error, setError] = useState('')
   const savedInviteSession = useMemo(() => app.readInviteAdoption(token), [app, token])
   const dateText = preview ? [formatInviteDate(preview.preferred_start_date), formatInviteDate(preview.preferred_end_date)].filter(Boolean).join(' – ') : ''
+  const loginHref = useMemo(() => token ? accountAuthenticationHref('login', token) : '/login', [token])
+  const signupHref = useMemo(() => token ? accountAuthenticationHref('signup', token) : '/signup', [token])
   useEffect(() => {
     let cancelled = false
     setLoadingInvite(true)
@@ -1378,6 +1383,26 @@ function JoinInvitePage() {
       cancelled = true
     }
   }, [app.activeTripId, app.adoptTechnicalTripContext, app.getInvite, app.membershipId, savedInviteSession, token])
+  useEffect(() => {
+    if (!app.hasAccountSession) {
+      setAccountProfile(null)
+      setAccountProfileLoading(false)
+      return undefined
+    }
+    let cancelled = false
+    setAccountProfileLoading(true)
+    app.getAccountProfile()
+      .then(profile => {
+        if (!cancelled) setAccountProfile(profile)
+      })
+      .catch(err => {
+        if (!cancelled) setError(describeInviteJoinError(err).message)
+      })
+      .finally(() => {
+        if (!cancelled) setAccountProfileLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [app, app.getAccountProfile, app.hasAccountSession])
   const inviteOpenResolution = useMemo(() => {
     if (!token || (!preview && !invalid)) return null
     return resolveInviteJoinRoute({
@@ -1398,54 +1423,66 @@ function JoinInvitePage() {
       navigate(inviteOpenResolution.destinationHref, { replace: true })
     }
   }, [inviteOpenResolution, navigate])
-  const join = async withAccount => {
-    if (!name.trim()) {
-      setError('Enter your name to join this trip.')
+  const completeJoin = (joined, { isGuest, profile }) => {
+    app.adoptTechnicalTripContext({
+      membershipId: joined.membership_id,
+      tripId: joined.trip_id,
+      ...(isGuest ? { guestToken: joined.guest_token } : {}),
+      inviteToken: token,
+      profile: {
+        id: profile?.id,
+        name: profile?.name || (isGuest ? name.trim() : 'Account member'),
+        email: isGuest ? null : profile?.email || null,
+        role: joined.role || 'participant',
+        isGuest,
+      },
+    })
+    const completionResolution = resolveInviteJoinRoute({
+      currentRoutePath: joinHref(token),
+      currentUser: { tripId: joined.trip_id, role: joined.role || 'participant', isGuest },
+      activeTrip: { id: joined.trip_id },
+      activeTripId: joined.trip_id,
+      membershipId: joined.membership_id,
+      token,
+      step: 'complete',
+      joinResult: joined,
+    })
+    navigate(completionResolution.destinationHref, { replace: true })
+  }
+  const handleJoinError = err => {
+    const mapped = describeInviteJoinError(err)
+    if (mapped.kind === 'invite') setInvalid(true)
+    else setError(mapped.message)
+  }
+  const joinGuest = async () => {
+    if (app.hasAccountSession) {
+      setError('Your Account session is active. Join as that Account or use a separate browser for a Guest session.')
       return
     }
-    if (withAccount && !email.trim()) {
-      setError('Enter an email address to join with an account.')
+    if (!name.trim()) {
+      setError('Enter your name to join this trip.')
       return
     }
     setJoining(true)
     setError('')
     try {
-      const joined = await app.joinInvite(token, {
-        display_name: name.trim(),
-        ...(withAccount ? { email: email.trim() } : {}),
-      })
-      app.adoptTechnicalTripContext({
-        membershipId: joined.membership_id,
-        tripId: joined.trip_id,
-        ...(!withAccount ? { guestToken: joined.guest_token } : {}),
-        inviteToken: token,
-        profile: {
-          name: name.trim(),
-          email: withAccount ? email.trim() : null,
-          role: joined.role || 'participant',
-          isGuest: !withAccount,
-        },
-      })
-      const completionResolution = resolveInviteJoinRoute({
-        currentRoutePath: joinHref(token),
-        currentUser: {
-          tripId: joined.trip_id,
-          role: joined.role || 'participant',
-          isGuest: !withAccount,
-        },
-        activeTrip: {
-          id: joined.trip_id,
-        },
-        activeTripId: joined.trip_id,
-        membershipId: joined.membership_id,
-        token,
-        step: 'complete',
-        joinResult: joined,
-      })
-      navigate(completionResolution.destinationHref, { replace: true })
+      const joined = await app.joinInvite(token, name)
+      completeJoin(joined, { isGuest: true, profile: { name } })
     } catch (err) {
-      if (err.status === 404) setInvalid(true)
-      else setError(err.message || 'Could not join this trip')
+      handleJoinError(err)
+    } finally {
+      setJoining(false)
+    }
+  }
+  const joinAccount = async () => {
+    if (!app.hasAccountSession) return
+    setJoining(true)
+    setError('')
+    try {
+      const joined = await app.joinAccountInvite(token)
+      completeJoin(joined, { isGuest: false, profile: accountProfile })
+    } catch (err) {
+      handleJoinError(err)
     } finally {
       setJoining(false)
     }
@@ -1468,11 +1505,20 @@ function JoinInvitePage() {
       <section className="invitePanel">
         <span className="eyebrow">Join Cadensy</span><h2>{loadingInvite ? 'Loading invite' : preview?.name || 'You have been invited'}</h2>
         {preview && <p>{preview.destination} · {dateText || 'Dates to be confirmed'} · {preview.member_count} members · Organized by {preview.organizer_name}</p>}
-        <label>Your name<input value={name} onChange={event => setName(event.target.value)} placeholder="Name shown in this trip"/></label>
-        <Button disabled={joining || loadingInvite || !preview} onClick={() => join(false)}>{joining ? 'Joining...' : 'Continue as guest'}</Button>
-        <div className="dividerText">or</div>
-        <label>Email<input value={email} onChange={event => setEmail(event.target.value)} placeholder="you@example.com"/></label>
-        <Button secondary disabled={joining || loadingInvite || !preview} onClick={() => join(true)}>Join with an account</Button>
+        {app.hasAccountSession ? <>
+          <p>Your authenticated Account will be used to join. We never use an email field as Account identity.</p>
+          <Button secondary disabled={joining || loadingInvite || !preview || accountProfileLoading || !accountProfile} onClick={joinAccount}>
+            {joining ? 'Joining...' : accountProfileLoading ? 'Checking your Account...' : `Join as ${accountProfile?.name || 'Account'}`}
+          </Button>
+          <p className="inviteAccountHint">To join as a Guest instead, use a separate browser session so your Account session is not replaced.</p>
+        </> : <>
+          <label>Your name<input value={name} onChange={event => setName(event.target.value)} placeholder="Name shown in this trip"/></label>
+          <Button disabled={joining || loadingInvite || !preview} onClick={joinGuest}>{joining ? 'Joining...' : 'Continue as guest'}</Button>
+          <div className="dividerText">or</div>
+          <p>Join with an Account to keep this Membership tied to your authenticated session.</p>
+          <a className="btn btnSecondary" href={loginHref} target="_top">Sign in to join with an Account</a>
+          <a className="btn btnGhost" href={signupHref} target="_top">Create an Account</a>
+        </>}
         {error && <p className="formError">{error}</p>}
       </section>
     </main>
