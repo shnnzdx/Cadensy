@@ -114,6 +114,18 @@ def test_empty_selector_chooses_legacy(monkeypatch):
     assert isinstance(runtime, LegacyChatAgentRuntime)
 
 
+def test_local_e2e_runtime_is_explicit_and_refused_in_production(monkeypatch):
+    monkeypatch.setenv("CADENSY_E2E_FAKE_RUNTIME", "1")
+    monkeypatch.setenv("APP_ENV", "test")
+
+    runtime = build_chat_runtime(system_prompt="test prompt")
+
+    assert runtime.__class__.__name__ == "LocalE2ERuntime"
+    monkeypatch.setenv("APP_ENV", "production")
+    with pytest.raises(ChatRuntimeConfigurationError):
+        build_chat_runtime(system_prompt="test prompt")
+
+
 @pytest.mark.parametrize("selector", ["old", "pydantic_ai", "experimental", "nope"])
 def test_invalid_explicit_selector_fails_closed(monkeypatch, selector: str):
     monkeypatch.setenv("CHAT_AGENT_RUNTIME", selector)

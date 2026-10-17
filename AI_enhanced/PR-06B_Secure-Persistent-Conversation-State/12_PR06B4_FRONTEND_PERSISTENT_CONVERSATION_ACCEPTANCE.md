@@ -179,3 +179,82 @@ PostgreSQL and frontend checks pass, but browser Journey evidence and an end-to-
 full backend-suite terminal record remain required. **Production Readiness: NOT
 ASSESSED / NOT APPROVED** — no Provider, AWS, deployment, or production database was
 used. This remediation is recorded in the subsequent local commit.
+
+## PR-06B.4D.1 — local Browser E2E harness and execution attempt
+
+The former missing-harness finding is remediated in source.  The new harness is
+deliberately local-only:
+
+- `backend/scripts/run_pr06b4_local_e2e.ps1` accepts only a local host and an
+  explicitly named `cadensy_pr06b4_e2e_*_test` database. It validates TCP
+  reachability before its one database reset, runs Alembic to `head`, seeds a
+  synthetic Account/Trip/Membership/Plan fixture, starts hidden local FastAPI and
+  frontend processes, and tears them down.
+- `backend/scripts/pr06b4_e2e_fixture.py` provides fixture creation and database
+  assertions; it never creates or drops databases.
+- `backend/app/agents/e2e_runtime.py` is a deterministic implementation of the
+  existing `ChatAgentRuntime` interface. Its selection requires
+  `CADENSY_E2E_FAKE_RUNTIME=1` and the runtime factory refuses it in production.
+  It still crosses the real scoped capability, PR-06B context builder,
+  submission/coordinator, Preview, and fenced completion path. Its file barrier is
+  not a public HTTP control endpoint.
+- `frontend/tests/pr06b4-local-browser-e2e.mjs` opens installed Chromium, signs in
+  using the actual `/login` UI, drives the embedded Trip UI, records real HTTP
+  response evidence, and invokes only fixture-side SQL assertions for durable
+  effects. It contains J01, J02, J03, J06, J07, J09, J10 and the separate
+  runtime-off scenario; J04/J05/J08 are deliberately recorded as non-passing until
+  they can call protected lifecycle/Preview-Apply operations without direct-table
+  shortcuts.
+
+### Execution result
+
+The authorized local execution command was:
+
+```powershell
+& .\backend\scripts\run_pr06b4_local_e2e.ps1
+```
+
+It stopped before any database mutation with the exact result:
+
+```text
+Local PostgreSQL is not reachable at 127.0.0.1:5432; no database was changed.
+```
+
+`Test-NetConnection 127.0.0.1 -Port 5432` returned `False`. Therefore no browser
+journey is marked PASS, no Alembic migration was run by this harness, and no
+PostgreSQL catalog or durable-row evidence is claimed. This is a local-environment
+blocker, not an inference from unit tests. The independently recorded backend full
+suite terminal evidence remains `1181 passed, 10 warnings in 124.02s` with exit
+code 0 under `MOCK_AI=1`, `DISABLE_SCHEDULER=1`, and
+`DEV_ALLOW_MEMBERSHIP_HEADER=0`.
+
+### Browser acceptance matrix
+
+| Journey | Status | Evidence / next executable action |
+| --- | --- | --- |
+| J01 | BLOCKED | Start local PostgreSQL on `127.0.0.1:5432`, then run the harness command; the test performs real UI login, send, refresh and database assertion. |
+| J02 | BLOCKED | Included in the harness: product sign-out then UI re-login and history restore. |
+| J03 | BLOCKED | Included: second isolated Chromium context and authenticated history read. |
+| J04 | BLOCKED (design gap) | There is no organizer removal UI. The harness refuses to mutate Membership tables directly; add a test-only caller of the existing protected removal kernel or authorize a protected API test flow. |
+| J05 | BLOCKED (design gap) | The deterministic Runtime barrier exists, but quarantining must call the protected writer rather than a fixture SQL update. |
+| J06 | BLOCKED | Included: real durable HTTP idempotency replay from the browser context plus durable row count assertion. |
+| J07 | BLOCKED | Included: personal/global/item resolution and distinct Conversation IDs. |
+| J08 | BLOCKED (design gap) | The deterministic Runtime is reply-only. A fixture candidate option plus a real protected stale Preview/Apply route is needed before this can be a genuine browser journey. |
+| J09 | BLOCKED | Included: delete contract followed by authenticated non-restoration read. |
+| J10 | BLOCKED | Included: captured browser HTTP trace asserts no legacy `/api/chat` call. |
+| Runtime-off | BLOCKED | Included as a separately restarted backend process; it checks server history/readability, disabled composer, no running submission, and no legacy fallback. |
+
+### Local verification of the harness code
+
+| Command | Result |
+| --- | --- |
+| `cd backend; .\.venv\Scripts\python.exe -m compileall -q app\agents scripts\pr06b4_e2e_fixture.py` | passed |
+| `cd backend; .\.venv\Scripts\python.exe -c "... build_chat_runtime(...) ..."` with explicit E2E env | passed; selected `LocalE2ERuntime` |
+| `node --check frontend/tests/pr06b4-local-browser-e2e.mjs` | passed |
+| `& .\backend\scripts\run_pr06b4_local_e2e.ps1` | blocked safely before database creation because local PostgreSQL was unreachable |
+
+**Gate A: CHANGES REQUIRED.** The E2E harness now exists and fails closed, but its
+browser matrix cannot be executed until local PostgreSQL is running; J04/J05/J08
+also require a reviewed protected-operation test seam. **Gate B: NOT ASSESSED /
+NOT APPROVED.** No AWS, production database, Provider, deployment, push, or merge
+was used.
