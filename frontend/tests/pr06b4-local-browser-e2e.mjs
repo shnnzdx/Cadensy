@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { chromium } from '@playwright/test';
 
 const fixturePath = process.argv[2];
@@ -16,8 +17,13 @@ const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
 const root = new URL('../..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\');
 const python = `${root}backend\\.venv\\Scripts\\python.exe`;
 const base = 'http://127.0.0.1:8000';
-const web = 'http://127.0.0.1:3000';
+const web = process.env.CADENSY_E2E_FRONTEND_URL || 'http://localhost:4499';
 const evidence = [];
+const installedChromium = [
+  path.join(process.env.LOCALAPPDATA || '', 'ms-playwright', 'chromium-1223', 'chrome-win64', 'chrome.exe'),
+  path.join(process.env.LOCALAPPDATA || '', 'ms-playwright', 'chromium-1208', 'chrome-win64', 'chrome.exe'),
+].find(existsSync);
+if (!installedChromium) throw new Error('No preinstalled local Playwright Chromium executable was found');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitForHealth() {
@@ -26,6 +32,13 @@ async function waitForHealth() {
     await sleep(125);
   }
   throw new Error('local backend health check timed out');
+}
+async function waitForFrontend() {
+  for (let i = 0; i < 120; i += 1) {
+    try { if ((await fetch(`${web}/login`)).ok) return; } catch {}
+    await sleep(125);
+  }
+  throw new Error(`local frontend did not become reachable at ${web}`);
 }
 function dbAssert(membership, users, assistants) {
   const out = execFileSync(python, ['scripts/pr06b4_e2e_fixture.py', 'assert-counts', fixture.trip_id, membership, String(users), String(assistants)], {
@@ -71,7 +84,18 @@ async function login(browser, account) {
   return { context, page, frame, token, calls };
 }
 async function openPersonal(session) {
-  await session.frame.getByText('Cadensy', { exact: true }).first().click();
+  try {
+    // A post-login Account lands on the dashboard.  The conversation rail is
+    // intentionally inside the authorized Trip workspace, not the dashboard.
+    if (await session.frame.getByRole('link', { name: 'Chat', exact: true }).count() === 0) {
+      await session.frame.getByText('Review current plan', { exact: false }).first().click();
+      await session.frame.getByRole('link', { name: 'Chat', exact: true }).waitFor({ state: 'visible' });
+    }
+    await session.frame.getByRole('link', { name: 'Chat', exact: true }).click();
+  } catch (error) {
+    const visibleText = await session.frame.locator('body').innerText().catch(() => '<iframe body unavailable>');
+    throw new Error(`Personal chat navigation failed. iframe text: ${visibleText.slice(0, 1_500)}`, { cause: error });
+  }
   const input = session.frame.getByPlaceholder('Message Cadensy...');
   await input.waitFor({ state: 'visible', timeout: 20_000 });
   return input;
@@ -85,7 +109,8 @@ async function sendPersonal(session, text) {
 function report(id, status, detail) { console.log(JSON.stringify({ journey: id, status, detail })); }
 
 await waitForHealth();
-const browser = await chromium.launch({ headless: true });
+await waitForFrontend();
+const browser = await chromium.launch({ headless: true, executablePath: installedChromium });
 try {
   if (runtimeOff) {
     const session = await login(browser, fixture.organizer);
@@ -108,7 +133,7 @@ try {
     // J02: logout is driven through the product UI then a fresh real login restores history.
     await org.frame.getByRole('button', { name: 'Profile menu' }).click();
     await org.frame.locator('button.profileMenuSignOut').click();
-    await org.page.waitForURL(`${web}/login`, { timeout: 20_000 });
+    await org.page.waitForURL(/\/login(?:\?|$)/, { timeout: 20_000 });
     await org.page.goto(`${web}/login`, { waitUntil: 'networkidle' });
     await org.page.locator('#email').fill(fixture.organizer.email);
     await org.page.locator('#password').fill(fixture.organizer.password);

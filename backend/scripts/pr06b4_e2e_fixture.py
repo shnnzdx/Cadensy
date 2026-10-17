@@ -13,6 +13,12 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
+# This file is deliberately executable as ``python scripts/...`` by the
+# PowerShell runner, so Python's import root would otherwise be ``scripts``.
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
 from app.db.models import Conversation, ConversationMessage, ConversationSubmission, Plan, PlanItem, Trip, TripMembership, User
 from app.db.seed import seed
 from app.db.session import SessionLocal

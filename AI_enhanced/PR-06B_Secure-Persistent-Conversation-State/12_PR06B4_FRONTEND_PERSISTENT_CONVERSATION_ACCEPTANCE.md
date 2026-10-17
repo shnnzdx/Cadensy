@@ -258,3 +258,42 @@ browser matrix cannot be executed until local PostgreSQL is running; J04/J05/J08
 also require a reviewed protected-operation test seam. **Gate B: NOT ASSESSED /
 NOT APPROVED.** No AWS, production database, Provider, deployment, push, or merge
 was used.
+
+### Execution completion — local PostgreSQL recovered
+
+The machine-local PostgreSQL instance documented in `backend/LOCAL_DEV.md` was
+started with its documented `pg_ctl` command and reached `accepting connections`.
+The runner then recreated only `cadensy_pr06b4_e2e_local_test`, applied Alembic
+through `b7d3a1e9c642`, seeded its synthetic fixture, used the explicitly local
+Runtime adapter, and ran installed Chromium from the existing local Playwright
+cache. No AWS, Provider, production database, or application production setting was
+used.
+
+| Journey | Final local result | Evidence |
+| --- | --- | --- |
+| J01 | PASS | Real login UI → dashboard → Plan → Chat; send, fake-Runtime completion, refresh; PostgreSQL asserted 1 Conversation, 1 User Message, 1 Submission, 1 Assistant Message. |
+| J02 | PASS | Product sign-out followed by a fresh Account login restored the persisted history. |
+| J03 | PASS | A second isolated Chromium context with a separate Account bearer read the same authorized private history. |
+| J04 | BLOCKED | No current organizer removal UI and no approved protected test caller; direct Membership table mutation remains forbidden. |
+| J05 | BLOCKED | The deterministic Runtime barrier exists, but it still needs an approved protected quarantine caller. |
+| J06 | PASS | Browser-origin durable replay returned HTTP 202 twice for one idempotency key; database assertion remained 2 user messages, 2 submissions, 2 assistant messages total. |
+| J07 | PASS | Browser-origin resolves returned separate HTTP 201 Conversation identities for personal, Plan global, and item contexts. |
+| J08 | BLOCKED | The deterministic Runtime deliberately returns reply-only output; a fixture advisory option plus a protected stale Preview/Apply caller is still required. |
+| J09 | PASS | Browser-origin DELETE returned 204 and subsequent authenticated GET returned the required non-disclosing 404. |
+| J10 | PASS | Captured browser/API trace contained no legacy `/api/chat` request. |
+| Runtime-off | PASS | Existing history rendered, composer was disabled, no legacy fallback appeared, and no fabricated assistant result was displayed. |
+
+Runner reliability corrections made during the execution: the fixture script now
+bootstraps the backend import root, the PowerShell runner fails on native command
+errors and terminates its spawned process tree, uses a dedicated local frontend
+port, and waits for both backend and frontend before Chromium begins. The browser
+harness now follows the actual UI path (dashboard `Review current plan`, then Trip
+`Chat`) and explicitly uses an already installed Chromium executable rather than
+downloading one.
+
+Artifacts from this execution are local test evidence only:
+`backend/test-results-pr06b4-local-e2e.stdout.log` and
+`backend/test-results-pr06b4-local-e2e.stderr.log`.
+
+**Gate A remains CHANGES REQUIRED** solely for J04, J05, and J08. **Gate B remains
+NOT ASSESSED / NOT APPROVED.**
