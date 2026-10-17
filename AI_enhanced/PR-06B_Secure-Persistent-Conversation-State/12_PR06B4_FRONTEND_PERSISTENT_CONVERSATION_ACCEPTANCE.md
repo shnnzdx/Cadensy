@@ -297,3 +297,136 @@ Artifacts from this execution are local test evidence only:
 
 **Gate A remains CHANGES REQUIRED** solely for J04, J05, and J08. **Gate B remains
 NOT ASSESSED / NOT APPROVED.**
+
+## PR-06B.4D.2 — Protected Lifecycle and Historical Option Final Acceptance
+
+### Scope and changed files
+
+This closure uses only the explicitly authorized local seams: an authenticated
+Organizer invokes existing protected Membership/Plan HTTP routes; affected
+Accounts use actual Chromium and the embedded Trip UI; fixture SQL is restricted
+to initial synthetic data and committed-state assertions. No test-only public
+route, direct lifecycle mutation, Provider, AWS, RDS, production secret, push, or
+merge was used.
+
+- `backend/app/agents/e2e_runtime.py` — local-only fake Runtime returns one
+  deterministic safe option only for the `[E2E-OPTION]` marker and otherwise
+  preserves the existing scoped capability, Preview, and coordinator path.
+- `backend/scripts/pr06b4_e2e_fixture.py` — synthetic Account A and unrelated
+  Trip setup plus read-only ownership, idempotency, option, quarantine and
+  revision assertions.
+- `backend/scripts/run_pr06b4_local_e2e.ps1` — local test-only protected booking
+  gate and HMAC material in the isolated process.
+- `frontend/tests/pr06b4-local-browser-e2e.mjs` — authenticated protected
+  lifecycle scenarios and strengthened browser evidence.
+
+### J04 — Removed A and rejoined B
+
+Chromium authenticated Account Owner A, created private history, then a separate
+Organizer bearer called `DELETE /api/trips/{trip_id}/members/{A}` with a valid
+idempotency key and `X-Expected-Trip-Facts-Revision: 0`. The writer returned 200
+and revision 1. A's old browser context immediately received a non-successful
+read (403). The Organizer created a real invite; A used
+`POST /api/invites/{token}/account-join`; the response returned a distinct B ID.
+After browser reload B's `/api/me` identity was B, B could not hydrate A's text,
+and B's attempted read of A's conversation returned the non-disclosing 404.
+
+The committed PostgreSQL assertion recorded: A `removed`, exactly one non-removed
+Account Membership for the same User/Trip, and the Conversation owner still A.
+This also proves no guest-to-account adoption or historical owner rewrite. The
+Account token itself remained valid until ordinary logout; removal only revoked
+Trip access.
+
+### J05 — Quarantine fencing a held Runtime completion
+
+The browser posted one durable user message, received committed admission, and the
+local Runtime reached its non-HTTP file barrier. Before release, the separate
+Organizer created a sentinel invite and invoked the existing protected quarantine
+route with its bearer, idempotency key, and current facts revision 2. The route
+returned 200 and facts revision 3. Only then did the harness release the Runtime.
+
+The ordered committed evidence is:
+
+```text
+Submission (one User Message) committed
+  -> Runtime barrier entered
+  -> protected quarantine committed
+  -> Runtime released
+  -> coordinator completion discarded
+```
+
+The database assertion found the target quarantined for `security_incident`, the
+sentinel Trip invitation revoked, zero applicable active bound Guest sessions,
+zero Assistant Messages and zero Options in that Conversation. The participant
+browser lost Trip-X Conversation access (403) after reload, while `/api/account`
+and a GET of the pre-authorized unrelated Trip both returned 200. Quarantine did
+not settle or apply a decision.
+
+### J08 — persisted historical option and fresh classification
+
+The participant used the real Plan item assistant drawer. `[E2E-OPTION]` crossed
+the existing coordinator and `RevisionBracketedPreview`, creating an Assistant
+Message with one persisted safe option. PostgreSQL confirmed its generated option
+ID, Assistant parent, target PlanItem, `{ "start_hour": 15.0 }` patch and captured
+`plan_revision=2` / `planning_facts_revision=2`; browser history returned it.
+
+The Organizer then used the existing protected booking API for that target with
+the option's captured plan revision and an idempotency key. It returned 200; the
+read-only database assertion proved the authoritative Plan revision advanced to
+3. On browser reload, selecting the historical option issued the existing
+`POST /api/plans/items/{item_id}/classify` call (200). No `/changes` request was
+issued and the Plan stayed at revision 3. Thus the stored option is advisory:
+selection performs fresh classification and cannot directly Apply.
+
+### Strengthened existing journeys
+
+- **J06:** fixture snapshots were taken for the exact conversation and
+  `e2e-network-replay-key`: 0 Submissions/User Messages before, then exactly 1
+  of each after two 202 requests with the same key.
+- **J07:** Personal, Plan Global, and Plan Item conversations received
+  distinguishable persisted messages, had three different server IDs, survived a
+  browser refresh, and each read-only assertion retained the same owner identity.
+- **J09:** the deletion 204 was followed by actual browser reload and a 404 read.
+- **J10:** the old client actually posted
+  `/api/trips/{trip_id}/chat` and received 200; the durable Conversation count
+  stayed 3 before and after. The durable browser trace itself made no legacy post.
+
+### Final local browser matrix
+
+| Journey | Result | Evidence |
+| --- | --- | --- |
+| J01 | PASS | Real login/UI send/refresh and committed owner/history assertion. |
+| J02 | PASS | Product logout and fresh Account login restore history. |
+| J03 | PASS | Separate Chromium context with separate bearer restores authorized history. |
+| J04 | PASS | Protected removal/rejoin creates B, preserves A ownership, denies B history. |
+| J05 | PASS | Held Runtime completion is fenced by protected quarantine; no assistant/option commits. |
+| J06 | PASS | Exact idempotency-key before/after assertion. |
+| J07 | PASS | Personal/global/item identities, messages, refresh, and owner isolation. |
+| J08 | PASS | Coordinator-persisted option, protected revision change, fresh classify, no direct Apply. |
+| J09 | PASS | Delete persists across browser reload. |
+| J10 | PASS | Actual legacy route works without a durable write; durable UI has no fallback. |
+| Runtime-off | PASS | Saved history loads; composer disabled; no legacy chat fallback. |
+
+### Local verification
+
+| Command | Result |
+| --- | --- |
+| `backend/scripts/run_pr06b4_local_e2e.ps1` | PASS. Local-only disposable DB `cadensy_pr06b4_e2e_local_test`; Alembic to `b7d3a1e9c642`; J01–J10 and Runtime-off all PASS. |
+| `cd frontend; npm test` | PASS — 13 tests. |
+| `cd trip; npm run build` | PASS — Vite build, 60 modules. |
+| Targeted Membership/Conversation/Runtime/Preview pytest selection | PASS — 59 tests. |
+| Full backend suite under local `cadensy_pr06b4_full_test` | PASS — 1182 passed, 10 warnings, exit 0, 110.19s. |
+| `python -m compileall -q backend/app/agents/e2e_runtime.py backend/scripts/pr06b4_e2e_fixture.py` | PASS. |
+| `node --check frontend/tests/pr06b4-local-browser-e2e.mjs` and `git diff --check` | PASS. |
+
+The lone test warning category is the established Alembic `path_separator`
+deprecation warning in `tests/test_trip_bound_phase1_migration.py`; no acceptance
+failure or external integration was observed. Raw browser logs, fixture JSON,
+control files, and full-pytest logs remain local untracked evidence and are not
+source-commit artifacts.
+
+**Gate A — Local Product Acceptance: PASS.** All required browser journeys and
+relevant local regressions now have genuine Chromium, protected HTTP, and/or
+committed PostgreSQL evidence. **Gate B — Production Readiness: NOT ASSESSED /
+NOT APPROVED.** This result does not validate production infrastructure, backup
+encryption, deployment, a live Provider, or runtime enablement.

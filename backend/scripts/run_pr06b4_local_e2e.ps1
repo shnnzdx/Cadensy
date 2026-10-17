@@ -34,6 +34,8 @@ $env:CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED = '1'
 $env:CADENSY_E2E_RUNTIME_CONTROL_DIR = $control
 $env:CADENSY_E2E_FRONTEND_URL = 'http://localhost:4499'
 $env:CORS_ORIGINS = $env:CADENSY_E2E_FRONTEND_URL
+$env:CADENSY_B2C_HMAC_KEY = 'cadensy-pr06b4-e2e-local-only'
+$env:CADENSY_B2C_PROTECTED_BOOKING_WRITES = '1'
 
 if (-not (Test-NetConnection $DatabaseHost -Port $DatabasePort -InformationLevel Quiet -WarningAction SilentlyContinue)) {
   throw "Local PostgreSQL is not reachable at $DatabaseHost`:$DatabasePort; no database was changed."

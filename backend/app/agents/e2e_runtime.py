@@ -13,7 +13,13 @@ import os
 import time
 from pathlib import Path
 
-from .runtime_contract import AgentReplyOnly, RuntimeObservation, RuntimeRequest, RuntimeResult
+from .runtime_contract import (
+    AgentCandidateOption,
+    AgentReplyOnly,
+    RuntimeObservation,
+    RuntimeRequest,
+    RuntimeResult,
+)
 
 
 class LocalE2ERuntime:
@@ -32,10 +38,26 @@ class LocalE2ERuntime:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("local E2E runtime barrier was not released")
                 time.sleep(0.02)
+        options: tuple[AgentCandidateOption, ...] = ()
+        if "[E2E-OPTION]" in request.message and request.selected_item_ref:
+            # This is deliberately suggestion syntax only.  The real
+            # RevisionBracketedPreview still validates the item, patch and
+            # captured revisions before the coordinator may persist it.
+            options = (
+                AgentCandidateOption(
+                    id="e2e-option-move-1500",
+                    label="Move to 3:00 PM",
+                    title="Move this activity to 3:00 PM",
+                    body="A local acceptance-only advisory option.",
+                    tradeoff="The current plan must be checked again before any Apply.",
+                    item_ref=request.selected_item_ref,
+                    safe_patch={"start_hour": 15.0},
+                ),
+            )
         return RuntimeResult(
             reply=f"E2E assistant completion: {request.message}",
             outcome=AgentReplyOnly(),
-            candidate_options=(),
+            candidate_options=options,
             observation=RuntimeObservation(
                 trace_id="local-e2e-runtime",
                 round_count=1,
