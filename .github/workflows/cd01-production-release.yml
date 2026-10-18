@@ -15,6 +15,36 @@ on:
         description: Migration-runner sha256 digest produced by the same build
         required: true
         type: string
+      release_mode:
+        description: Standard promotion, or the separately reviewed zero-to-one recovery mode
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - zero_capacity_recovery
+      expected_current_task_definition:
+        description: Exact live task-definition ARN approved as the baseline
+        required: true
+        type: string
+      expected_current_image_digest:
+        description: Exact sha256 digest expected in the live application container
+        required: true
+        type: string
+      expected_current_desired_count:
+        description: Exact non-negative live desired count approved as the baseline
+        required: true
+        type: string
+      recovery_desired_count:
+        description: Required only for zero_capacity_recovery; must be the reviewed value 1
+        required: false
+        default: ""
+        type: string
+      rollback_evidence_sha:
+        description: Exact current Main authorization snapshot containing the reviewed zero-capacity recovery acceptance manifest
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -78,6 +108,12 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
         run: |
           set -euo pipefail
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
@@ -85,8 +121,34 @@ jobs:
           [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          authorization_snapshot_sha="$(git rev-parse origin/main)"
+          manifest_args=()
+          recovery_authorization_args=()
+          if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
+            test "${GITHUB_SHA}" = "${authorization_snapshot_sha}"
+            test "${ROLLBACK_EVIDENCE_SHA}" = "${authorization_snapshot_sha}"
+            git show "${authorization_snapshot_sha}:AI_enhanced/PR-06C_Production-Telemetry-Validation/08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json" > /tmp/recovery-safety-manifest.json
+            manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${authorization_snapshot_sha}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
+          fi
+          release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
+            "${manifest_args[@]}")"
           echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "migration_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
+          echo "authorization_snapshot_sha=${authorization_snapshot_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Configure AWS credentials from the approved Main environment
         uses: aws-actions/configure-aws-credentials@v6
@@ -102,6 +164,13 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
+          AUTHORIZATION_SNAPSHOT_SHA: ${{ steps.inputs.outputs.authorization_snapshot_sha }}
         run: |
           set -euo pipefail
           test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
@@ -119,8 +188,31 @@ jobs:
           previous_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
           test -n "${previous_image}" && test "${previous_image}" != "null"
           jq -e '.services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .services[0].deploymentConfiguration.minimumHealthyPercent == 100 and .services[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
+          manifest_args=()
+          recovery_authorization_args=()
+          if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
+            manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${AUTHORIZATION_SNAPSHOT_SHA}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
+          fi
+          release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
+            "${manifest_args[@]}" \
+            --service-json /tmp/service.json \
+            --task-definition-json /tmp/current-task-definition.json)"
           echo "previous_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
           echo "previous_image=${previous_image}" >> "${GITHUB_OUTPUT}"
+          echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
 
       - name: Run read-only schema-head preflight in the dedicated runner
         id: schema
@@ -160,6 +252,53 @@ jobs:
           test -n "${task_definition}" && test "${task_definition}" != "None"
           echo "arn=${task_definition}" >> "${GITHUB_OUTPUT}"
 
+      - name: Re-check live baseline immediately before service mutation
+        id: pre_promote
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
+          AUTHORIZATION_SNAPSHOT_SHA: ${{ steps.inputs.outputs.authorization_snapshot_sha }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/pre-promote-service.json
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/pre-promote-service.json)"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/pre-promote-task-definition.json
+          manifest_args=()
+          recovery_authorization_args=()
+          if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
+            git fetch --no-tags origin main
+            test "${AUTHORIZATION_SNAPSHOT_SHA}" = "$(git rev-parse origin/main)"
+            test "${ROLLBACK_EVIDENCE_SHA}" = "${AUTHORIZATION_SNAPSHOT_SHA}"
+            git show "${AUTHORIZATION_SNAPSHOT_SHA}:AI_enhanced/PR-06C_Production-Telemetry-Validation/08_PR06C_RECOVERY_SAFETY_ACCEPTANCE_MANIFEST.json" > /tmp/recovery-safety-manifest.json
+            manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${AUTHORIZATION_SNAPSHOT_SHA}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
+          fi
+          release_desired_count="$(python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
+            "${manifest_args[@]}" \
+            --service-json /tmp/pre-promote-service.json \
+            --task-definition-json /tmp/pre-promote-task-definition.json)"
+          echo "release_desired_count=${release_desired_count}" >> "${GITHUB_OUTPUT}"
+
       - name: Promote task definition with circuit-breaker rollback
         shell: bash
         run: |
@@ -168,26 +307,78 @@ jobs:
             --cluster "${ECS_CLUSTER}" \
             --service "${ECS_SERVICE}" \
             --task-definition "${{ steps.taskdef.outputs.arn }}" \
+            --desired-count "${{ steps.pre_promote.outputs.release_desired_count }}" \
             --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null
           aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
 
       - name: Verify ECS deployment, ALB health, and read-only API smoke check
         id: verify
         shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          EXPECTED_CURRENT_TASK_DEFINITION: ${{ inputs.expected_current_task_definition }}
+          EXPECTED_CURRENT_IMAGE_DIGEST: ${{ inputs.expected_current_image_digest }}
+          EXPECTED_CURRENT_DESIRED_COUNT: ${{ inputs.expected_current_desired_count }}
+          RECOVERY_DESIRED_COUNT: ${{ inputs.recovery_desired_count }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          AUTHORIZATION_SNAPSHOT_SHA: ${{ steps.inputs.outputs.authorization_snapshot_sha }}
         run: |
           set -euo pipefail
           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
           test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${{ steps.taskdef.outputs.arn }}"
+          test "$(jq -r '.services[0].desiredCount' /tmp/final-service.json)" = "${{ steps.pre_promote.outputs.release_desired_count }}"
+          test "$(jq -r '.services[0].runningCount' /tmp/final-service.json)" = "${{ steps.pre_promote.outputs.release_desired_count }}"
+          test "$(jq -r '.services[0].pendingCount' /tmp/final-service.json)" = "0"
           jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/target-groups.txt
           test -s /tmp/target-groups.txt
+          target_health_args=()
+          target_group_index=0
           while read -r target_group; do
-            aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/target-health.json
-            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/target-health.json >/dev/null
+            target_health_json="/tmp/target-health-${target_group_index}.json"
+            aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > "${target_health_json}"
+            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' "${target_health_json}" >/dev/null
+            target_health_args+=(--target-health-json "${target_health_json}")
+            ((target_group_index+=1))
           done < /tmp/target-groups.txt
+          aws ecs list-tasks --cluster "${ECS_CLUSTER}" --service-name "${ECS_SERVICE}" --desired-status RUNNING --output json > /tmp/running-task-arns.json
+          mapfile -t running_task_arns < <(jq -r '.taskArns[]?' /tmp/running-task-arns.json)
+          test "${#running_task_arns[@]}" = "${{ steps.pre_promote.outputs.release_desired_count }}"
+          aws ecs describe-tasks --cluster "${ECS_CLUSTER}" --tasks "${running_task_arns[@]}" --output json > /tmp/running-tasks.json
           curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/health.json
           jq -e '.ok == true' /tmp/health.json >/dev/null
+          manifest_args=()
+          recovery_authorization_args=()
+          if [[ "${RELEASE_MODE}" = "zero_capacity_recovery" ]]; then
+            manifest_args=(--recovery-safety-manifest-json /tmp/recovery-safety-manifest.json)
+            recovery_authorization_args=(
+              --authorization-snapshot-sha "${AUTHORIZATION_SNAPSHOT_SHA}"
+              --source-sha "${SOURCE_SHA}"
+              --runtime-image-digest "${RUNTIME_DIGEST}"
+              --migration-runner-digest "${MIGRATION_DIGEST}"
+            )
+          fi
+          python scripts/cd01/capacity_recovery_contract.py \
+            --release-mode "${RELEASE_MODE}" \
+            --expected-current-task-definition "${EXPECTED_CURRENT_TASK_DEFINITION}" \
+            --expected-current-image-digest "${EXPECTED_CURRENT_IMAGE_DIGEST}" \
+            --expected-current-desired-count "${EXPECTED_CURRENT_DESIRED_COUNT}" \
+            --recovery-desired-count "${RECOVERY_DESIRED_COUNT}" \
+            --rollback-evidence-sha "${ROLLBACK_EVIDENCE_SHA}" \
+            "${recovery_authorization_args[@]}" \
+            "${manifest_args[@]}" \
+            --verify-deployed-runtime \
+            --deployed-service-json /tmp/final-service.json \
+            --running-tasks-json /tmp/running-tasks.json \
+            "${target_health_args[@]}" \
+            --expected-deployed-task-definition "${{ steps.taskdef.outputs.arn }}" \
+            --expected-deployed-runtime-image-digest "${RUNTIME_DIGEST}" \
+            --expected-deployed-running-count "${{ steps.pre_promote.outputs.release_desired_count }}" >/dev/null
           echo "alb_health=healthy" >> "${GITHUB_OUTPUT}"
           echo "api_smoke=passed" >> "${GITHUB_OUTPUT}"
+          echo "runtime_identity=verified" >> "${GITHUB_OUTPUT}"
 
       - name: Write release summary and rollback reference
         shell: bash
@@ -195,6 +386,8 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          ROLLBACK_EVIDENCE_SHA: ${{ inputs.rollback_evidence_sha }}
         run: |
           set -euo pipefail
           {
@@ -207,7 +400,10 @@ jobs:
             echo "- Previous task definition: ${{ steps.current.outputs.previous_task_definition }}"
             echo "- Previous image: ${{ steps.current.outputs.previous_image }}"
             echo "- New task definition: ${{ steps.taskdef.outputs.arn }}"
-            echo "- ECS deployment: stable with circuit-breaker rollback enabled"
+            echo "- Release mode: ${RELEASE_MODE}; desired count: ${{ steps.pre_promote.outputs.release_desired_count }}"
+            echo "- Zero-capacity rollback evidence: ${ROLLBACK_EVIDENCE_SHA:-not-applicable}"
+            echo "- ECS deployment: stable with circuit-breaker rollback and actual running-task identity verification"
+            echo "- Running task identity: ${{ steps.verify.outputs.runtime_identity }}"
             echo "- ALB health: ${{ steps.verify.outputs.alb_health }}"
             echo "- API smoke test: ${{ steps.verify.outputs.api_smoke }}"
             echo '- Feature-gate posture: APP_ENV=production; DEV_ALLOW_MEMBERSHIP_HEADER=0; all R5 protected gates explicitly 0.'
