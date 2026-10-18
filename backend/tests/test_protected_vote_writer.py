@@ -145,6 +145,7 @@ def _seed(engine, *, kind: str = "normal", extra_members: int = 0) -> Seed:
             reason="A verified reason" if kind == "reopen" else None,
             deadline=datetime.now(timezone.utc) + timedelta(hours=24),
             status="open",
+            electorate_count=2 + extra_members,
         )
         db.add(round_)
         db.flush()

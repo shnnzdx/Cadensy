@@ -43,6 +43,16 @@ def build_chat_runtime(
     that test seam; any failure is normalized and never falls back to Legacy.
     """
 
+    # This exists solely for the disposable local browser harness.  It is a
+    # real contract implementation, not an HTTP/API mock, and cannot be
+    # enabled in a production process.
+    if os.getenv("CADENSY_E2E_FAKE_RUNTIME") == "1":
+        if os.getenv("APP_ENV", "development").strip().lower() in {"production", "prod"}:
+            raise ChatRuntimeConfigurationError("local E2E runtime is unavailable in production")
+        from .e2e_runtime import LocalE2ERuntime
+
+        return LocalE2ERuntime()
+
     selector = os.getenv("CHAT_AGENT_RUNTIME", "").strip()
     if not selector or selector == "legacy":
         return LegacyChatAgentRuntime(system_prompt=system_prompt)

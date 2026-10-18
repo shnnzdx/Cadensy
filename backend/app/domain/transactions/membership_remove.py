@@ -13,6 +13,7 @@ from ...db.models import GuestSession, TripMembership
 from ..trips import service as trips
 from .durable import CommandResponse, HmacKeyring, OutcomeContract, StaticOutcomeContractRegistry
 from .kernel import CredentialProof, PreliminaryActorScope
+from .membership_lifecycle import require_no_decision_window
 from .trip_durable import TripDurableCommandKernel, TripDurableCommandResult, TripIdempotentCommand
 from .trip_kernel import LockedTripContext, TripTransactionKernel
 
@@ -54,9 +55,10 @@ def execute_protected_membership_remove(
         target = session.scalar(select(TripMembership).where(TripMembership.id == command.membership_id, TripMembership.trip_id == context.trip.id).execution_options(populate_existing=True).with_for_update())
         if actor is None or target is None:
             raise MembershipTargetMissing("Trip membership not found")
-        session.scalars(select(GuestSession).where(GuestSession.membership_id == target.id).order_by(GuestSession.id).execution_options(populate_existing=True).with_for_update()).all()
         if target.status == "removed":
             return CommandResponse(200, {"removed": True}, state_changed=False)
+        require_no_decision_window(session, context.trip.id)
+        session.scalars(select(GuestSession).where(GuestSession.membership_id == target.id).order_by(GuestSession.id).execution_options(populate_existing=True).with_for_update()).all()
         trips.remove_membership(session, trip_id=context.trip.id, organizer=actor, membership_id=target.id)
         return CommandResponse(200, {"removed": True})
 

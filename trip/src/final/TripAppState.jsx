@@ -3,6 +3,8 @@ import { baseUpdates as fallbackBaseUpdates, demoDataEnabled, initialDays as fal
 import { restoreTripAppBootstrapState } from './technicalSessionBootstrap.js'
 import { createSessionRuntime, SESSION_RUNTIME_CODES } from '../../../shared/session-runtime/index.js'
 import { classifyTechnicalSessionInvalidation } from './technicalSessionInvalidation.js'
+import { guestJoinPayload, validateInviteJoinResult } from './invite-join-flow.js'
+import { createDurableConversationClient } from './durableConversationClient.js'
 
 const TripAppContext = createContext(null)
 
@@ -378,7 +380,7 @@ export function TripAppProvider({ children }) {
       error.status = response.status
       throw error
     }
-    return response.json()
+    return response.status === 204 ? null : response.json()
   }, [])
 
   const identityHeadersFor = useCallback(scope => {
@@ -445,7 +447,7 @@ export function TripAppProvider({ children }) {
       }
       throw error
     }
-    return response.json()
+    return response.status === 204 ? null : response.json()
   }, [applyTechnicalSessionInvalidation, identityHeadersFor, technicalSessionFacts])
 
   const accountRequestJson = useCallback(async (path, options = {}) => {
@@ -458,9 +460,20 @@ export function TripAppProvider({ children }) {
     return raw
   }, [accountRequestJson])
 
+  // Account-scoped transport deliberately has no target-Trip Membership
+  // requirement. It is the only transport allowed to start Account Invite Join.
+  const getAccountProfile = useCallback(async () => {
+    return accountRequestJson('/api/account')
+  }, [accountRequestJson])
+
   const requestJson = useCallback(async (path, options = {}) => {
     return sessionRequestJson('trip', path, options)
   }, [sessionRequestJson])
+
+  const durableConversationClient = useCallback(() => {
+    const tripId = resolveActiveTripId()
+    return createDurableConversationClient({ requestJson, tripId })
+  }, [requestJson, resolveActiveTripId])
 
   const refreshTrip = useCallback(async () => {
     if (!activeTripId) throw new Error('Missing trip session')
@@ -640,7 +653,27 @@ export function TripAppProvider({ children }) {
     }
   }, [sessionRuntime])
 
+  const clearMembershipScopedState = useCallback(() => {
+    setTrip(null)
+    setDays([])
+    setPlanId(null)
+    setPlanBlockedReason('')
+    setPlanNeedsRefresh(false)
+    setNotices([])
+    setBaseUpdates([])
+    setActiveRounds([])
+    setActiveProposals([])
+    setMyVotes({})
+    setDecisionResolved(false)
+    setPreferencesSubmittedFor([])
+    setPreferences(emptyPreferences)
+    setCurrentUser(null)
+  }, [])
+
   const adoptTechnicalTripContext = useCallback(({ membershipId: nextMembershipId, tripId: nextTripId, guestToken, inviteToken, profile }) => {
+    // Membership IDs are incarnation-specific. Clear all Membership-scoped
+    // React data before moving from a removed A to a freshly joined B.
+    clearMembershipScopedState()
     const forceGuest = Boolean(profile?.isGuest)
     if (forceGuest) {
       sessionRuntime.adoptGuestAuth({
@@ -675,7 +708,7 @@ export function TripAppProvider({ children }) {
         isGuest: forceGuest,
       })
     }
-  }, [sessionRuntime])
+  }, [clearMembershipScopedState, sessionRuntime])
 
   const logout = useCallback(async () => {
     const result = await sessionRuntime.logoutTechnicalSession(technicalSessionFacts, {
@@ -758,12 +791,21 @@ export function TripAppProvider({ children }) {
     return publicRequestJson(`/api/invites/${token}`)
   }, [publicRequestJson])
 
-  const joinInvite = useCallback(async (token, body) => {
-    return publicRequestJson(`/api/invites/${token}/join`, {
+  const joinInvite = useCallback(async (token, displayName) => {
+    const joined = await publicRequestJson(`/api/invites/${token}/join`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify(guestJoinPayload(displayName)),
     })
+    return validateInviteJoinResult(joined, 'guest')
   }, [publicRequestJson])
+
+  const joinAccountInvite = useCallback(async token => {
+    const joined = await accountRequestJson(`/api/invites/${token}/account-join`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+    return validateInviteJoinResult(joined, 'account')
+  }, [accountRequestJson])
 
   const fetchRound = useCallback(async (roundId, fallback = {}) => {
     const raw = await requestJson(`/api/rounds/${roundId}`)
@@ -1200,6 +1242,7 @@ export function TripAppProvider({ children }) {
     conflictCreated: activeProposals.some(proposal => ['waiting_affected_members', 'escalated'].includes(proposal.status)),
     classify,
     chatWithTrip,
+    durableConversationClient,
     logout,
     submitChange,
     searchReplacementPlaces,
@@ -1220,6 +1263,8 @@ export function TripAppProvider({ children }) {
     revokeInvite,
     getInvite,
     joinInvite,
+    joinAccountInvite,
+    getAccountProfile,
     loading,
     error,
     clearError: () => setError(''),
@@ -1247,7 +1292,7 @@ export function TripAppProvider({ children }) {
     preferencesSubmittedFor,
     submitPreferencesFor: tripId => setPreferencesSubmittedFor(current => current.includes(tripId) ? current : [...current, tripId]),
     notify,
-  }), [createTrip, activeProposal, activeProposals, activeRound, activeRounds, activeTripId, addPlanItem, adoptTechnicalTripContext, baseUpdates, castVote, chatWithTrip, classify, createInvite, currentUser, days, decisionResolved, error, getInvite, hasAccountSession, inviteCopied, joinInvite, loading, logout, membershipId, notices, objectToNotice, personalUpdates, planBlockedReason, planNeedsRefresh, planId, loadMembers, loadComments, loadChangeLog, addComment, readInviteAdoption, setItemBooked, generatePlan, remindMember, extendRound, escalateProposal, resolveDeadlock, loadMyPreferences, preferences, preferencesSubmittedFor, refreshAll, restoredTripId, saveMyPreferences, addConstraint, updateConstraint, deleteConstraint, resetDemo, resolveProposal, revokeInvite, searchReplacementPlaces, submitChange, trip, trips, tripSummaries, tripSummariesStatus, updateFilter, withdrawProposal])
+  }), [createTrip, activeProposal, activeProposals, activeRound, activeRounds, activeTripId, addPlanItem, adoptTechnicalTripContext, baseUpdates, castVote, chatWithTrip, classify, createInvite, currentUser, days, decisionResolved, durableConversationClient, error, getAccountProfile, getInvite, hasAccountSession, inviteCopied, joinAccountInvite, joinInvite, loading, logout, membershipId, notices, objectToNotice, personalUpdates, planBlockedReason, planNeedsRefresh, planId, loadMembers, loadComments, loadChangeLog, addComment, readInviteAdoption, setItemBooked, generatePlan, remindMember, extendRound, escalateProposal, resolveDeadlock, loadMyPreferences, preferences, preferencesSubmittedFor, refreshAll, restoredTripId, saveMyPreferences, addConstraint, updateConstraint, deleteConstraint, resetDemo, resolveProposal, revokeInvite, searchReplacementPlaces, submitChange, trip, trips, tripSummaries, tripSummariesStatus, updateFilter, withdrawProposal])
 
   if (!currentUser) {
     const isJoinRoute = window.location.hash.startsWith('#/join/')

@@ -35,9 +35,10 @@ test("login source preserves token-only accounts and host redirect behavior", as
 
   assert.match(loginPage, /if \(!result\.token\) \{/);
   assert.doesNotMatch(loginPage, /This account is not connected to a trip yet/);
-  assert.match(loginPage, /const \[nextPath, setNextPath\] = useState\("\/trip"\);/);
-  assert.match(loginPage, /const resolvedNext = params\.get\("next"\)\?\.startsWith\("\/"\) \? String\(params\.get\("next"\)\) : "\/trip";/);
-  assert.match(loginPage, /window\.location\.href = nextPath;/);
+  assert.match(loginPage, /const nextPathRef = useRef\("\/trip"\);/);
+  assert.match(loginPage, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \? requestedNext : "\/trip";/);
+  assert.match(loginPage, /import \{ isSafeInternalReturnPath \} from "\.\.\/\.\.\/\.\.\/shared\/trip-navigation-policy\/invite-auth-return\.js";/);
+  assert.match(loginPage, /window\.location\.href = nextPathRef\.current;/);
 });
 
 test("login source verifies restored account session before redirecting from login", async () => {

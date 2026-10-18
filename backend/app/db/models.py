@@ -26,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -149,17 +150,42 @@ class TripMembership(Base, TimestampMixin):
     """角色挂在这张表上,不挂在账户上。
 
     同一个人可以在 A 旅行是组织者、B 旅行是普通成员。
-    guest 的 user_id 为空;以后绑定账户时**只更新这一行的 user_id**,不新建成员。
+    Guest 的 user_id 为空。PR-06B V1 不把 Guest 历史绑定/转移给账户；
+    移除后的账户重返会创建一个新的 Membership incarnation。
     """
 
     __tablename__ = "trip_membership"
     __table_args__ = (
+        CheckConstraint(
+            "(quarantined_at IS NULL AND quarantine_reason IS NULL "
+            "AND quarantined_by_membership_id IS NULL) OR "
+            "(quarantined_at IS NOT NULL AND quarantine_reason IS NOT NULL "
+            "AND quarantined_by_membership_id IS NOT NULL)",
+            name="ck_trip_membership_quarantine_audit_complete",
+        ),
+        CheckConstraint(
+            "quarantine_reason IS NULL OR quarantine_reason IN "
+            "('security_incident', 'abuse', 'unauthorized_access', 'organizer_emergency')",
+            name="ck_trip_membership_quarantine_reason",
+        ),
+        CheckConstraint(
+            "status IN ('invited', 'joined', 'preferences_submitted', 'removed')",
+            name="ck_trip_membership_status_supported",
+        ),
+        # The target's trip_id is part of the reference, so a quarantine
+        # audit actor can never be a membership from another Trip.
+        UniqueConstraint("id", "trip_id", name="uq_trip_membership_id_trip"),
+        ForeignKeyConstraint(
+            ["quarantined_by_membership_id", "trip_id"],
+            ["trip_membership.id", "trip_membership.trip_id"],
+            name="fk_trip_membership_quarantined_by_same_trip",
+        ),
         Index(
-            "one_membership_per_user_per_trip",
+            "ux_trip_membership_active_account",
             "trip_id",
             "user_id",
             unique=True,
-            postgresql_where="user_id IS NOT NULL",
+            postgresql_where="user_id IS NOT NULL AND status <> 'removed'",
         ),
     )
 
@@ -170,6 +196,11 @@ class TripMembership(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(20), default="participant")  # organizer | participant
     join_method: Mapped[str] = mapped_column(String(20), default="invite_guest")
     status: Mapped[str] = mapped_column(String(30), default="invited")
+    # Quarantine revokes Trip access without changing the historical Membership
+    # incarnation or turning an in-flight electorate into a live roster query.
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quarantine_reason: Mapped[str | None] = mapped_column(String(40))
+    quarantined_by_membership_id: Mapped[str | None] = mapped_column(String(32))
 
     trip: Mapped[Trip] = relationship(back_populates="memberships")
 
@@ -338,6 +369,292 @@ class MutationIdempotency(Base, TimestampMixin):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+# ————————————————————— 私密对话（PR-06B.1B：仅持久化契约） —————————————————————
+
+
+class Conversation(Base, TimestampMixin):
+    """A private conversation owned by one immutable Membership incarnation.
+
+    This model deliberately contains no access method or provider behavior.
+    The composite Membership/Trip FK is the durable ownership boundary; a
+    later Membership incarnation never inherits this row.
+    """
+
+    __tablename__ = "conversation"
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('personal', 'plan_assistant')",
+            name="ck_conversation_scope",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'deleted', 'expired')",
+            name="ck_conversation_status",
+        ),
+        CheckConstraint(
+            "(scope = 'personal' AND context_key = 'personal') OR "
+            "(scope = 'plan_assistant' AND "
+            "(context_key = 'global' OR context_key ~ '^item:[0-9a-f]{32}$'))",
+            name="ck_conversation_context_key",
+        ),
+        CheckConstraint(
+            "(last_qualifying_activity_at IS NULL AND retention_expires_at IS NULL) OR "
+            "(last_qualifying_activity_at IS NOT NULL AND retention_expires_at IS NOT NULL "
+            "AND retention_expires_at >= last_qualifying_activity_at)",
+            name="ck_conversation_retention_window",
+        ),
+        CheckConstraint(
+            "(status = 'active' AND deleted_at IS NULL AND purge_due_at IS NULL) OR "
+            "(status = 'expired' AND deleted_at IS NULL AND purge_due_at IS NOT NULL) OR "
+            "(status = 'deleted' AND deleted_at IS NOT NULL AND purge_due_at IS NOT NULL "
+            "AND purge_due_at <= deleted_at + INTERVAL '30 days')",
+            name="ck_conversation_deletion_lifecycle",
+        ),
+        ForeignKeyConstraint(
+            ["owner_membership_id", "trip_id"],
+            ["trip_membership.id", "trip_membership.trip_id"],
+            name="fk_conversation_owner_membership_same_trip",
+        ),
+        # This redundant unique key enables Submission to bind its denormalized
+        # owner tuple to the one Conversation row with an ordinary FK.
+        UniqueConstraint("id", "trip_id", "owner_membership_id", name="uq_conversation_id_trip_owner"),
+        Index(
+            "ux_conversation_active_natural_identity",
+            "trip_id",
+            "owner_membership_id",
+            "scope",
+            "context_key",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("ix_conversation_owner_created_at", "trip_id", "owner_membership_id", "created_at"),
+        Index(
+            "ix_conversation_retention_expiry_active",
+            "retention_expires_at",
+            postgresql_where=text("status = 'active' AND retention_expires_at IS NOT NULL"),
+        ),
+        Index(
+            "ix_conversation_purge_due",
+            "purge_due_at",
+            postgresql_where=text("purge_due_at IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trip.id"), nullable=False)
+    owner_membership_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str] = mapped_column(String(30), nullable=False)
+    context_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="active", server_default=text("'active'")
+    )
+    last_qualifying_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    purge_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConversationMessage(Base, TimestampMixin):
+    """One ordered private message; ordering is server-assigned in PR-06B.2."""
+
+    __tablename__ = "conversation_message"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "sequence", name="uq_conversation_message_sequence"),
+        # Enables composite Submission FKs that prohibit cross-Conversation
+        # user/assistant message references.
+        UniqueConstraint("conversation_id", "id", name="uq_conversation_message_id_conversation"),
+        CheckConstraint("sequence >= 0", name="ck_conversation_message_sequence_nonnegative"),
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_conversation_message_role"),
+        CheckConstraint(
+            "state IN ('pending', 'completed', 'failed')",
+            name="ck_conversation_message_state",
+        ),
+        CheckConstraint(
+            "plan_revision IS NULL OR plan_revision >= 0",
+            name="ck_conversation_message_plan_revision_nonnegative",
+        ),
+        CheckConstraint(
+            "planning_facts_revision IS NULL OR planning_facts_revision >= 0",
+            name="ck_conversation_message_facts_revision_nonnegative",
+        ),
+        Index("ix_conversation_message_conversation_sequence", "conversation_id", "sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversation.id"), nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    selected_plan_item_id: Mapped[str | None] = mapped_column(ForeignKey("plan_item.id"))
+    plan_revision: Mapped[int | None] = mapped_column(BigInteger)
+    planning_facts_revision: Mapped[int | None] = mapped_column(BigInteger)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConversationMessageOption(Base, TimestampMixin):
+    """A safe historical projection of one assistant candidate option."""
+
+    __tablename__ = "conversation_message_option"
+    __table_args__ = (
+        UniqueConstraint(
+            "assistant_message_id", "ordinal", name="uq_conversation_message_option_ordinal"
+        ),
+        CheckConstraint(
+            "ordinal >= 0", name="ck_conversation_message_option_ordinal_nonnegative"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(safe_patch) = 'object'",
+            name="ck_conversation_message_option_patch_object",
+        ),
+        CheckConstraint(
+            "plan_revision IS NULL OR plan_revision >= 0",
+            name="ck_conversation_message_option_plan_revision_nonnegative",
+        ),
+        CheckConstraint(
+            "planning_facts_revision IS NULL OR planning_facts_revision >= 0",
+            name="ck_conversation_message_option_facts_revision_nonnegative",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    assistant_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_message.id"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_plan_item_id: Mapped[str | None] = mapped_column(ForeignKey("plan_item.id"))
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    safe_patch: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    plan_revision: Mapped[int | None] = mapped_column(BigInteger)
+    planning_facts_revision: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class ConversationSubmission(Base, TimestampMixin):
+    """Durable state for one original user submission, separate from mutations."""
+
+    __tablename__ = "conversation_submission"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id", "idempotency_key", name="uq_conversation_submission_idempotency"
+        ),
+        UniqueConstraint("user_message_id", name="uq_conversation_submission_user_message"),
+        UniqueConstraint("assistant_message_id", name="uq_conversation_submission_assistant_message"),
+        ForeignKeyConstraint(
+            ["conversation_id", "trip_id", "owner_membership_id"],
+            ["conversation.id", "conversation.trip_id", "conversation.owner_membership_id"],
+            name="fk_conversation_submission_conversation_owner",
+        ),
+        ForeignKeyConstraint(
+            ["conversation_id", "user_message_id"],
+            ["conversation_message.conversation_id", "conversation_message.id"],
+            name="fk_conversation_submission_user_message_same_conversation",
+        ),
+        ForeignKeyConstraint(
+            ["conversation_id", "assistant_message_id"],
+            ["conversation_message.conversation_id", "conversation_message.id"],
+            name="fk_conversation_submission_assistant_message_same_conversation",
+        ),
+        CheckConstraint(
+            "state IN ('running', 'completed', 'failed')",
+            name="ck_conversation_submission_state",
+        ),
+        CheckConstraint(
+            "attempt_number >= 1", name="ck_conversation_submission_attempt_positive"
+        ),
+        CheckConstraint("fence >= 1", name="ck_conversation_submission_fence_positive"),
+        CheckConstraint(
+            "(state = 'running' AND lease_expires_at IS NOT NULL) OR "
+            "(state IN ('completed', 'failed') AND lease_expires_at IS NULL)",
+            name="ck_conversation_submission_lease_lifecycle",
+        ),
+        Index(
+            "ux_conversation_submission_one_running",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("state = 'running'"),
+        ),
+        Index("ix_conversation_submission_owner_created_at", "trip_id", "owner_membership_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    trip_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_membership_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_request_hmac: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    fingerprint_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    hmac_key_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_message_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    assistant_message_id: Mapped[str | None] = mapped_column(String(32))
+    state: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="running", server_default=text("'running'")
+    )
+    attempt_number: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=1, server_default=text("1")
+    )
+    failure_category: Mapped[str | None] = mapped_column(String(64))
+    response_metadata: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConversationSubmissionRecovery(Base, TimestampMixin):
+    """A recovery idempotency record; it never carries replacement user text."""
+
+    __tablename__ = "conversation_submission_recovery"
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "recovery_key", name="uq_conversation_submission_recovery_key"
+        ),
+        CheckConstraint(
+            "state IN ('running', 'completed', 'failed')",
+            name="ck_conversation_submission_recovery_state",
+        ),
+        CheckConstraint(
+            "operation_version >= 1",
+            name="ck_conversation_submission_recovery_operation_version_positive",
+        ),
+        CheckConstraint(
+            "accepted_attempt_number >= 1",
+            name="ck_conversation_submission_recovery_attempt_positive",
+        ),
+        CheckConstraint(
+            "accepted_fence >= 1",
+            name="ck_conversation_submission_recovery_fence_positive",
+        ),
+        Index("ix_conversation_submission_recovery_created_at", "submission_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_submission.id"), nullable=False
+    )
+    recovery_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    operation_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    accepted_attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    accepted_fence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class PlanItem(Base, TimestampMixin):
     """行程里的一个条目。settledness 就是那四档结实程度。"""
 
@@ -450,6 +767,10 @@ class DecisionRound(Base):
 
     __tablename__ = "decision_round"
     __table_args__ = (
+        CheckConstraint(
+            "electorate_count IS NULL OR electorate_count >= 0",
+            name="ck_decision_round_electorate_count_nonnegative",
+        ),
         Index(
             "one_open_round_per_item",
             "plan_item_id",
@@ -472,6 +793,9 @@ class DecisionRound(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # A round can be extended once. More time is fine; never settling is not.
     extended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # NULL is reserved for pre-PR-06B.1A historical rounds whose electorate
+    # cannot be reconstructed safely. New writers set this exactly once.
+    electorate_count: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class Vote(Base, TimestampMixin):

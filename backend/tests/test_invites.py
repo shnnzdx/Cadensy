@@ -42,7 +42,14 @@ def api_session(test_engine):
 
 
 @pytest.fixture
-def client(api_session: Session):
+def client(api_session: Session, monkeypatch):
+    factory = sessionmaker(
+        bind=api_session.connection(),
+        future=True,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    monkeypatch.setattr(api, "SessionLocal", factory)
     api.app.dependency_overrides[api.get_session] = lambda: api_session
     with TestClient(api.app) as test_client:
         test_client.app_state["cadensy_test_db"] = api_session
@@ -250,9 +257,16 @@ def test_account_join_reuses_existing_user(client: TestClient, api_session: Sess
     invite = _create_invite(client, organizer, trip)
     before = api_session.scalar(select(func.count()).select_from(User))
 
+    existing_user.password_hash = auth.hash_password("correct-horse")
+    api_session.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "Alex@Example.com", "password": "correct-horse"},
+    )
     response = client.post(
-        f"/api/invites/{invite['token']}/join",
-        json={"display_name": "Alex New", "email": "Alex@Example.com"},
+        f"/api/invites/{invite['token']}/account-join",
+        headers={"Authorization": f"Bearer {login.json()['token']}"},
+        json={},
     )
 
     assert response.status_code == 200
@@ -261,23 +275,51 @@ def test_account_join_reuses_existing_user(client: TestClient, api_session: Sess
     assert after == before
     assert membership.user_id == existing_user.id
     assert membership.role == "participant"
-    assert membership.join_method == "invite_login"
+    assert membership.join_method == "invite_account"
 
 
 def test_account_join_returns_existing_membership_on_repeat(client: TestClient, api_session: Session):
     trip, organizer, _ = _trip(api_session)
     invite = _create_invite(client, organizer, trip)
+    account = _user(api_session, "Alex", email="alex-repeat@example.com")
+    account.password_hash = auth.hash_password("correct-horse")
+    api_session.flush()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "alex-repeat@example.com", "password": "correct-horse"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
 
     first = client.post(
-        f"/api/invites/{invite['token']}/join",
-        json={"display_name": "Alex", "email": "alex-repeat@example.com"},
+        f"/api/invites/{invite['token']}/account-join", headers=headers, json={}
     ).json()
     second = client.post(
-        f"/api/invites/{invite['token']}/join",
-        json={"display_name": "Alex", "email": "alex-repeat@example.com"},
+        f"/api/invites/{invite['token']}/account-join", headers=headers, json={}
     ).json()
 
     assert second["membership_id"] == first["membership_id"]
+
+
+def test_guest_join_rejects_legacy_email_identity_claim(client: TestClient, api_session: Session):
+    trip, organizer, _ = _trip(api_session)
+    invite = _create_invite(client, organizer, trip)
+    user_count_before = api_session.scalar(select(func.count()).select_from(User))
+    membership_count_before = api_session.scalar(
+        select(func.count()).select_from(TripMembership)
+    )
+
+    response = client.post(
+        f"/api/invites/{invite['token']}/join",
+        json={"display_name": "No Claim", "email": "claimed@example.com"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "account_join_requires_authenticated_session"
+    assert api_session.scalar(select(func.count()).select_from(User)) == user_count_before
+    assert (
+        api_session.scalar(select(func.count()).select_from(TripMembership))
+        == membership_count_before
+    )
 
 
 def test_non_organizer_cannot_create_invite(client: TestClient, api_session: Session):

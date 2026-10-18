@@ -559,7 +559,7 @@ def test_credential_only_logout_lock_waits_then_kernel_fails_closed(test_engine,
     assert kernel_sessions and kernel_sessions[0].was_closed is True
 
 
-@pytest.mark.parametrize("status", ["invited", "joined"])
+@pytest.mark.parametrize("status", ["joined", "preferences_submitted"])
 def test_account_invited_and_joined_memberships_match_current_api_policy(test_engine, status):
     seed = _seed_committed(test_engine, account_status=status)
     factory = _factory(test_engine)

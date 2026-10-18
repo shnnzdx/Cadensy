@@ -51,6 +51,9 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             compare_type=True,
             compare_server_default=True,
+            # PR-06B.1A's concurrent-index checkpoint must not commit an
+            # earlier revision without also recording that earlier revision.
+            transaction_per_migration=True,
         )
 
         with context.begin_transaction():

@@ -21,6 +21,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .. import auth as auth_service
+from ..membership_policy import is_membership_access_authorized
 from ...db.models import AuthSession, Base, GuestSession, Plan, Trip, TripMembership
 
 
@@ -353,7 +354,7 @@ class PlanTransactionKernel(Generic[T]):
             .execution_options(populate_existing=True)
             .with_for_update()
         )
-        if membership is None or membership.status == "removed":
+        if membership is None or not is_membership_access_authorized(membership):
             raise MembershipNotAuthorized("Account membership is no longer active")
         return LockedActor(
             membership_id=membership.id,
@@ -392,7 +393,7 @@ class PlanTransactionKernel(Generic[T]):
         if (
             membership is None
             or membership.user_id is not None
-            or not auth_service.is_active_guest_membership_status(membership.status)
+            or not is_membership_access_authorized(membership)
         ):
             raise MembershipNotAuthorized("Guest membership is no longer active")
         return LockedActor(

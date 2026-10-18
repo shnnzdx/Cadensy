@@ -7,31 +7,33 @@ const finalAppUrl = new URL("../../trip/src/final/FinalApp.jsx", import.meta.url
 const tripAppStateUrl = new URL("../../trip/src/final/TripAppState.jsx", import.meta.url);
 const previewContractUrl = new URL("../../shared/tripsync-preview-contract.js", import.meta.url);
 const backendTripServiceUrl = new URL("../../backend/app/domain/trips/service.py", import.meta.url);
+const backendMembershipJoinUrl = new URL("../../backend/app/domain/transactions/membership_join.py", import.meta.url);
 const tripPageUrl = new URL("../app/trip/page.tsx", import.meta.url);
 
 async function loadSources() {
-  const [loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService] = await Promise.all([
+  const [loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService, backendMembershipJoin] = await Promise.all([
     readFile(loginPageUrl, "utf8"),
     readFile(finalAppUrl, "utf8"),
     readFile(tripAppStateUrl, "utf8"),
     readFile(previewContractUrl, "utf8"),
     readFile(tripPageUrl, "utf8"),
     readFile(backendTripServiceUrl, "utf8"),
+    readFile(backendMembershipJoinUrl, "utf8"),
   ]);
 
-  return { loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService };
+  return { loginPage, finalApp, tripAppState, previewContract, tripPage, backendTripService, backendMembershipJoin };
 }
 
 test("characterizes current login redirect and session persistence behavior", async () => {
   const { loginPage } = await loadSources();
 
-  assert.match(loginPage, /const \[nextPath, setNextPath\] = useState\("\/trip"\);/);
-  assert.match(loginPage, /const next = params\.get\("next"\);/);
-  assert.match(loginPage, /if \(next\?\.startsWith\("\/"\)\) setNextPath\(next\);/);
+  assert.match(loginPage, /const nextPathRef = useRef\("\/trip"\);/);
+  assert.match(loginPage, /const requestedNext = params\.get\("next"\);/);
+  assert.match(loginPage, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \? requestedNext : "\/trip";/);
   assert.match(loginPage, /createSessionRuntime, SESSION_RUNTIME_CODES/);
   assert.match(loginPage, /const membership = result\.default_membership \|\| result\.memberships\?\.\[0\];/);
   assert.match(loginPage, /const adoption = sessionRuntime\.adoptAccountAuth\(\{\s*token: result\.token,\s*\.\.\.\(membership \? \{/s);
-  assert.match(loginPage, /window\.location\.href = nextPath;/);
+  assert.match(loginPage, /window\.location\.href = nextPathRef\.current;/);
 });
 
 test("characterizes current workspace host entry as a fixed preview iframe handoff", async () => {
@@ -55,21 +57,25 @@ test("characterizes current restored-trip session behavior in TripAppState", asy
 });
 
 test("characterizes current invite fact availability and policy-driven join destinations", async () => {
-  const { finalApp, tripAppState, backendTripService } = await loadSources();
+  const { finalApp, tripAppState, backendTripService, backendMembershipJoin } = await loadSources();
 
   assert.match(finalApp, /const savedInviteSession = useMemo\(\(\) => app\.readInviteAdoption\(token\), \[app, token\]\)/);
   assert.match(finalApp, /app\.getInvite\(token\)/);
   assert.match(finalApp, /resolveInviteJoinRoute\(\{/);
   assert.match(finalApp, /inviteTripId: savedInviteSession\?\.tripId \|\| null/);
-  assert.match(finalApp, /const joined = await app\.joinInvite\(token, \{/);
-  assert.match(finalApp, /if \(err\.status === 404\) setInvalid\(true\)/);
+  assert.match(finalApp, /const joined = await app\.joinInvite\(token, name\)/);
+  assert.match(finalApp, /const joined = await app\.joinAccountInvite\(token\)/);
+  assert.match(finalApp, /if \(mapped\.kind === 'invite'\) setInvalid\(true\)/);
   assert.match(finalApp, /This link is no longer active/);
   assert.doesNotMatch(finalApp, /navigate\(`\/trip\/\$\{saved\.tripId\}\/plan`, \{ replace: true \}\)/);
   assert.doesNotMatch(finalApp, /navigate\(`\/trip\/\$\{joined\.trip_id\}\/preferences`, \{ replace: true \}\)/);
   assert.match(tripAppState, /sessionRuntime\.adoptTechnicalTripContext\(\{/);
   assert.match(backendTripService, /def invite_preview\(db: Session, token: str\) -> dict:/);
   assert.doesNotMatch(backendTripService, /"trip_id": invite\.trip_id/);
-  assert.match(backendTripService, /return JoinedInvite\(membership=membership, trip_id=invite\.trip_id\)/);
+  assert.doesNotMatch(backendTripService, /def join_invite\(/);
+  assert.match(backendMembershipJoin, /def join_guest_invite_under_trip_root\(/);
+  assert.match(backendMembershipJoin, /trip = _locked_trip\(session, trip_id\)/);
+  assert.match(backendMembershipJoin, /require_no_decision_window\(session, trip\.id\)/);
 });
 
 test("characterizes current centralized workspace route guarding and guest presentation split", async () => {
@@ -81,7 +87,7 @@ test("characterizes current centralized workspace route guarding and guest prese
   assert.match(finalApp, /navigation\.entries\.map\(entry => <Link key=\{entry\.id\} className=\{entry\.active \? 'active' : ''\} to=\{entry\.href\}>/);
   assert.match(finalApp, /members: 'Members'/);
   assert.match(finalApp, /invite: 'Invite'/);
-  assert.match(finalApp, /const isGuest = currentUser\.role === 'guest'/);
+  assert.match(finalApp, /const isGuest = currentUser\.isGuest/);
   assert.match(finalApp, /<Route element={<WorkspaceRouteGuard\/>}>/);
   assert.doesNotMatch(finalApp, /if \(currentUser\.role === 'guest'\) return <Navigate to=\{`\/trip\/\$\{currentTrip\.id\}\/plan`\} replace\/>/);
 });

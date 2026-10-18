@@ -21,6 +21,7 @@ from ..db.session import SessionLocal
 from ..db.models import ChangeProposal, DecisionRound, Plan, PlanItem
 from ..domain.decisions.orchestrator import expire_due_proposals, settle_due_rounds
 from ..domain.transactions import scheduler as protected_scheduler
+from . import conversation_purge
 
 log = logging.getLogger("tripsync.scheduler")
 
@@ -28,6 +29,7 @@ TICK_SECONDS = int(os.getenv("SETTLE_TICK_SECONDS", "60"))
 _PROTECTED_SCHEDULER_GATE = "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _NON_PRODUCTION = {"dev", "development", "local", "test", "testing", "ci", "staging"}
+_CONVERSATION_PURGE_GATE = "CADENSY_CONVERSATION_PURGE_ENABLED"
 
 
 def _protected_scheduler_enabled() -> bool:
@@ -35,6 +37,10 @@ def _protected_scheduler_enabled() -> bool:
         os.getenv(_PROTECTED_SCHEDULER_GATE, "0").strip().lower() in _TRUE_VALUES
         and os.getenv("APP_ENV", "").strip().lower() in _NON_PRODUCTION
     )
+
+
+def _conversation_purge_enabled() -> bool:
+    return os.getenv(_CONVERSATION_PURGE_GATE, "0").strip().lower() in _TRUE_VALUES
 
 
 def _protected_run_once() -> dict[str, list[str]]:
@@ -70,6 +76,9 @@ def run_once() -> dict[str, list[str]]:
             log.info("结算了 %d 轮投票: %s", len(result["settled"]), result["settled"])
         if result["expired"]:
             log.info("作废了 %d 个过期提案: %s", len(result["expired"]), result["expired"])
+        if _conversation_purge_enabled():
+            with SessionLocal.begin() as db:
+                result["conversation_purge"] = conversation_purge.run_once(db)  # type: ignore[assignment]
         return result
     with SessionLocal() as db:
         settled = settle_due_rounds(db)
@@ -79,7 +88,11 @@ def run_once() -> dict[str, list[str]]:
         log.info("结算了 %d 轮投票: %s", len(settled), settled)
     if expired:
         log.info("作废了 %d 个过期提案: %s", len(expired), expired)
-    return {"settled": settled, "expired": expired}
+    result: dict = {"settled": settled, "expired": expired}
+    if _conversation_purge_enabled():
+        with SessionLocal.begin() as db:
+            result["conversation_purge"] = conversation_purge.run_once(db)
+    return result
 
 
 async def _loop() -> None:

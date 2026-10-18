@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...db.models import InviteLink, Plan, PlanItem, Trip, TripMembership, User
 from .. import auth as auth_service
+from ..membership_policy import (
+    access_authorized_membership_clause,
+    is_membership_access_authorized,
+)
 from ..places.service import normalize_destination
 from . import cover_service
 
@@ -149,7 +152,7 @@ def list_user_trips(
         select(TripMembership)
         .where(
             TripMembership.user_id == user.id,
-            TripMembership.status != "removed",
+            access_authorized_membership_clause(),
         )
         .order_by(TripMembership.created_at)
     ).all()
@@ -185,7 +188,10 @@ def list_user_trips(
         member_count = db.scalar(
             select(func.count())
             .select_from(TripMembership)
-            .where(TripMembership.trip_id == trip.id)
+            .where(
+                TripMembership.trip_id == trip.id,
+                access_authorized_membership_clause(),
+            )
         )
         plan = db.scalar(select(Plan).where(Plan.trip_id == trip.id))
         next_item = None
@@ -230,7 +236,11 @@ def _now() -> datetime:
 
 
 def _require_organizer(db: Session, trip_id: str, membership: TripMembership) -> None:
-    if membership.trip_id != trip_id or membership.role != "organizer":
+    if (
+        membership.trip_id != trip_id
+        or membership.role != "organizer"
+        or not is_membership_access_authorized(membership)
+    ):
         raise OrganizerRequired("Only the organizer can manage this trip invite")
 
 
@@ -286,7 +296,10 @@ def invite_preview(db: Session, token: str) -> dict:
     member_count = db.scalar(
         select(func.count())
         .select_from(TripMembership)
-        .where(TripMembership.trip_id == trip.id)
+        .where(
+            TripMembership.trip_id == trip.id,
+            access_authorized_membership_clause(),
+        )
     )
     return {
         "name": trip.name,
@@ -304,73 +317,6 @@ class JoinedInvite:
     membership: TripMembership
     trip_id: str
     guest_session: auth_service.GuestSessionResult | None = None
-
-
-def join_invite(
-    db: Session,
-    token: str,
-    *,
-    display_name: str,
-    email: str | None = None,
-) -> JoinedInvite:
-    invite = _valid_invite(db, token)
-    name = display_name.strip()
-    normalized_email = (email or "").strip().lower() or None
-
-    if normalized_email is None:
-        membership = TripMembership(
-            trip_id=invite.trip_id,
-            user_id=None,
-            guest_display_name=name,
-            role="participant",
-            join_method="invite_guest",
-            status="joined",
-        )
-        db.add(membership)
-        db.flush()
-        return JoinedInvite(
-            membership=membership,
-            trip_id=invite.trip_id,
-            guest_session=auth_service.start_guest_session(db, membership),
-        )
-
-    user = db.scalar(select(User).where(func.lower(User.email) == normalized_email))
-    if user is None:
-        user = User(name=name, email=normalized_email)
-        db.add(user)
-        db.flush()
-
-    existing = db.scalar(
-        select(TripMembership).where(
-            TripMembership.trip_id == invite.trip_id,
-            TripMembership.user_id == user.id,
-        )
-    )
-    if existing is not None:
-        return JoinedInvite(membership=existing, trip_id=invite.trip_id)
-
-    try:
-        with db.begin_nested():
-            membership = TripMembership(
-                trip_id=invite.trip_id,
-                user_id=user.id,
-                role="participant",
-                join_method="invite_login",
-                status="joined",
-            )
-            db.add(membership)
-            db.flush()
-    except IntegrityError:
-        existing = db.scalar(
-            select(TripMembership).where(
-                TripMembership.trip_id == invite.trip_id,
-                TripMembership.user_id == user.id,
-            )
-        )
-        if existing is None:
-            raise
-        membership = existing
-    return JoinedInvite(membership=membership, trip_id=invite.trip_id)
 
 
 def revoke_invite(db: Session, invite_id: str, organizer: TripMembership) -> None:

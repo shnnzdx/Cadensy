@@ -97,6 +97,30 @@ def preview_trip_chat_revision_bracketed(
     )
 
 
+def build_durable_conversation_runtime_coordinator(*, session_factory=SessionLocal):
+    """Compose the selected existing Runtime for one PR-06B submission.
+
+    The session factory is intentionally separate from the request Session, so
+    model latency cannot retain request transaction locks. This helper creates
+    neither an HTTP route nor an autonomous background worker.
+    """
+    from ..conversations import context as conversation_context
+    from ..conversations.runtime import ConversationRuntimeCoordinator
+
+    return ConversationRuntimeCoordinator(
+        session_factory=session_factory,
+        runtime_factory=lambda: build_chat_runtime(system_prompt=_agent_system_prompt()),
+        execution=_chat_agent_execution_config(),
+        # Character accounting is conservative and separate from Runtime token
+        # ceilings. An oversized mandatory request fails; it is never altered.
+        budget=conversation_context.ContextBudget(
+            max_chars=160_000,
+            system_reserve_chars=8_000,
+            output_reserve_chars=16_000,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class ProposedChatChange:
     item_id: str

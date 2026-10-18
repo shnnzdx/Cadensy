@@ -13,9 +13,9 @@ import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -26,6 +26,8 @@ from ..agents import tools as agent_tools
 from ..agents.tools import DAY_END_HOUR, DAY_START_HOUR
 from ..db.models import (
     ChangeProposal,
+    Conversation,
+    ConversationMessage,
     DecisionRound,
     InviteLink,
     Plan,
@@ -41,7 +43,9 @@ from ..db.models import (
 from ..db.session import SessionLocal, get_session
 from ..domain.access import ForeignTripAccess, ScopedResourceNotFound, for_membership
 from ..domain import auth as auth_service
+from ..domain.membership_policy import current_participant_membership_clause
 from ..domain.chat import service as chat_service
+from ..domain.conversations import service as conversation_service
 from ..domain.decisions import orchestrator as orch
 from ..domain.preview_apply import (
     PreviewAccessDenied,
@@ -117,6 +121,8 @@ from ..domain.transactions import preferences_save as protected_preferences_save
 from ..domain.transactions import organizer_actions as protected_organizer_actions
 from ..domain.transactions import membership_remove as protected_membership_remove
 from ..domain.transactions import membership_join as protected_membership_join
+from ..domain.transactions import membership_quarantine as protected_membership_quarantine
+from ..domain.transactions.membership_lifecycle import MembershipChangePendingDecision
 from ..domain.transactions.protected_profile import b3_profile_admission
 from ..domain.transactions.trip_preferences_common import ProtectedConstraintMissing, StaticHmacKeyring as TripStaticHmacKeyring
 
@@ -143,6 +149,7 @@ _B2E_ORGANIZER_GATE = "CADENSY_B2E_PROTECTED_ORGANIZER_WRITES"
 _B2E_MEMBERSHIP_GATE = "CADENSY_B2E_PROTECTED_MEMBERSHIP_WRITES"
 _B2E_SCHEDULER_GATE = "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES"
 _B3_PREVIEW_APPLY_GATE = "CADENSY_B3_PROTECTED_PREVIEW_APPLY"
+_DURABLE_CONVERSATION_RUNTIME_GATE = "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED"
 _B2D_NON_PRODUCTION_ENVIRONMENTS = frozenset(
     {"development", "dev", "local", "test", "testing", "ci", "staging"}
 )
@@ -421,6 +428,146 @@ def _b3_preview_apply_gate_state() -> str:
 # -------------------- Request and response shapes --------------------
 
 
+class ConversationCreateRequest(BaseModel):
+    scope: str = Field(pattern="^(personal|plan_assistant)$")
+    context_key: str = Field(min_length=1, max_length=80)
+
+
+class ConversationSubmitRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=12_000)
+    selected_plan_item_id: str | None = Field(default=None, max_length=32)
+
+
+def _conversation_metadata(conversation: Conversation) -> dict:
+    return {
+        "id": conversation.id,
+        "scope": conversation.scope,
+        "context_key": conversation.context_key,
+        "status": conversation.status,
+        "created_at": conversation.created_at,
+        "last_qualifying_activity_at": conversation.last_qualifying_activity_at,
+        "retention_expires_at": conversation.retention_expires_at,
+        # This is a capability declaration, not a client-controlled feature
+        # flag. A durable submission is intentionally unavailable unless the
+        # request-bound Runtime has been explicitly admitted in non-production.
+        "runtime_available": _durable_conversation_runtime_enabled(),
+    }
+
+
+def _conversation_submission_metadata(submission: conversation_service.SubmissionResult) -> dict:
+    """Owner-safe status projection used to restore a pending browser tab."""
+    return {
+        "submission_id": submission.submission_id,
+        "state": submission.state,
+        "attempt_number": submission.attempt_number,
+        "lease_expires_at": submission.lease_expires_at,
+        "assistant_message_id": submission.assistant_message_id,
+    }
+
+
+def _conversation_submission_result(result: conversation_service.SubmissionResult) -> dict:
+    return {
+        "submission_id": result.submission_id,
+        "state": result.state,
+        "attempt_number": result.attempt_number,
+        "fence": result.fence,
+        "lease_expires_at": result.lease_expires_at,
+        "assistant_message_id": result.assistant_message_id,
+        "replayed": result.replayed,
+        "recovery_accepted_attempt_number": result.recovery_accepted_attempt_number,
+        "recovery_accepted_fence": result.recovery_accepted_fence,
+        "recovery_state": result.recovery_state,
+    }
+
+
+def _historical_option_resolution_out(
+    result: conversation_service.HistoricalOptionResolution,
+) -> dict:
+    notes = {
+        "historical_option_scope": "This suggestion is not available in the current conversation context.",
+        "historical_option_invalid": "This saved suggestion can no longer be used safely.",
+        "historical_option_noop": "That option keeps the current plan as-is.",
+        "historical_option_unavailable": "That option is no longer available from the current plan.",
+        "historical_option_stale": "That suggestion is out of date. Please ask Cadensy for a current option.",
+        "historical_option_conflict": "That option conflicts with a current pending decision.",
+    }
+    response = {
+        "ready": result.ready,
+        "code": result.code,
+        "note": notes.get(result.code, "This saved suggestion is not available."),
+    }
+    if result.ready and result.classification is not None:
+        response.update({
+            "item_id": result.item_id,
+            "item_title": result.item_title,
+            "patch": result.patch,
+            "verdict": _classification_out(result.classification),
+        })
+    return response
+
+
+def _durable_conversation_runtime_enabled() -> bool:
+    """Allow only an explicit, non-production request-bound Runtime call."""
+    requested = os.getenv(_DURABLE_CONVERSATION_RUNTIME_GATE, "0").strip().lower()
+    return (
+        requested in _TRUE_GATE_VALUES
+        and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
+    )
+
+
+def _execute_durable_conversation_claim_after_commit(
+    result: conversation_service.SubmissionResult,
+    *,
+    trip_id: str,
+    membership_id: str,
+    conversation_id: str,
+) -> None:
+    """Synchronously deliver one committed claim without creating a queue.
+
+    The 202 contract remains an admission response: clients poll the frozen
+    submission status resource. Only a newly accepted claim may invoke the
+    Runtime, and the coordinator itself writes only fenced durable outcomes.
+    """
+    if not result.execution_claimed or not _durable_conversation_runtime_enabled():
+        return
+    try:
+        from ..domain.conversations.context import ExecutionIdentity
+
+        chat_service.build_durable_conversation_runtime_coordinator(
+            session_factory=SessionLocal
+        ).execute(
+            identity=ExecutionIdentity(
+                trip_id=trip_id,
+                owner_membership_id=membership_id,
+                conversation_id=conversation_id,
+                submission_id=result.submission_id,
+                attempt_number=result.attempt_number,
+                fence=result.fence,
+            ),
+            now=conversation_service.utcnow(),
+        )
+    except Exception:
+        # Admission was already committed. Do not turn it into a false runtime
+        # success or expose a Provider/composition exception through the API.
+        return
+
+
+def _raise_conversation_error(error: conversation_service.ConversationError) -> None:
+    # "not found" is deliberately used for owner, Trip, deletion, expiry and
+    # revocation failures so these routes do not disclose private metadata.
+    if isinstance(error, conversation_service.ConversationUnavailable):
+        raise HTTPException(404, "Conversation not found") from error
+    if isinstance(error, conversation_service.IdempotencyConflict):
+        raise HTTPException(409, "idempotency_key_conflict") from error
+    if isinstance(error, conversation_service.ConversationBusy):
+        raise HTTPException(409, "conversation_busy") from error
+    if isinstance(error, conversation_service.StaleFence):
+        raise HTTPException(409, "stale_submission_fence") from error
+    if isinstance(error, conversation_service.ConversationValidationError):
+        raise HTTPException(422, "invalid_conversation_request") from error
+    raise HTTPException(503, "conversation_state_unavailable") from error
+
+
 class ChangeOptionIn(BaseModel):
     item_id: str
     label: str | None = None
@@ -565,6 +712,16 @@ class CommentRequest(BaseModel):
 class InviteJoinRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     email: str | None = Field(default=None, max_length=255)
+
+
+class AccountInviteJoinRequest(BaseModel):
+    """Identity-free: the verified bearer session is the only Account authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MembershipQuarantineRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=40)
 
 
 class LoginRequest(BaseModel):
@@ -720,11 +877,7 @@ def _classification_out(verdict) -> dict:
 def _round_out(db: Session, round_: DecisionRound, me: TripMembership | None = None) -> dict:
     item = db.get(PlanItem, round_.plan_item_id)
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    total = len(
-        db.scalars(
-            select(TripMembership).where(TripMembership.trip_id == item.plan.trip_id)
-        ).all()
-    )
+    total = round_.electorate_count
     tally: dict[str, int] = {}
     for vote in votes:
         tally[vote.option_id] = tally.get(vote.option_id, 0) + 1
@@ -743,6 +896,7 @@ def _round_out(db: Session, round_: DecisionRound, me: TripMembership | None = N
         "winning_option_id": round_.winning_option_id,
         "responded": len(votes),
         "total_members": total,
+        "electorate_count_available": total is not None,
         "tally": tally,
         "my_vote": my_vote,
     }
@@ -752,9 +906,9 @@ def _round_has_all_votes(db: Session, round_: DecisionRound) -> bool:
     item = db.get(PlanItem, round_.plan_item_id)
     trip_id = item.plan.trip_id
     votes = db.scalars(select(Vote).where(Vote.round_id == round_.id)).all()
-    total = len(
-        db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all()
-    )
+    total = round_.electorate_count
+    if total is None:
+        return False
     return total > 0 and len(votes) >= total
 
 
@@ -791,6 +945,232 @@ def _proposal_out(db: Session, proposal: ChangeProposal, me: TripMembership | No
 
 
 # -------------------- Reads --------------------
+
+
+@app.post("/api/trips/{trip_id}/conversations", status_code=201)
+def create_conversation(
+    trip_id: str,
+    body: ConversationCreateRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation = conversation_service.create_or_discover(
+            db, trip_id=trip_id, membership_id=me.id, scope=body.scope, context_key=body.context_key,
+            bearer_token=_bearer_token(authorization)
+        )
+        db.commit()
+        return _conversation_metadata(conversation)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations")
+def discover_conversations(
+    trip_id: str,
+    scope: str | None = None,
+    context_key: str | None = None,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        if scope is not None and scope not in {"personal", "plan_assistant"}:
+            raise conversation_service.ConversationValidationError()
+        rows = conversation_service.list_conversations(
+            db, trip_id=trip_id, membership_id=me.id, scope=scope, context_key=context_key,
+            bearer_token=_bearer_token(authorization)
+        )
+        return {"conversations": [_conversation_metadata(row) for row in rows]}
+    except conversation_service.ConversationError as error:
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations/{conversation_id}")
+def get_conversation(
+    trip_id: str,
+    conversation_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation = conversation_service.get_conversation(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+            bearer_token=_bearer_token(authorization)
+        )
+        db.commit()
+        return _conversation_metadata(conversation)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations/{conversation_id}/messages")
+def conversation_messages(
+    trip_id: str,
+    conversation_id: str,
+    before: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        rows = conversation_service.history_projection(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id, before=before, limit=limit,
+            bearer_token=_bearer_token(authorization)
+        )
+        output = []
+        for row in rows:
+            output.append({"id": row.id, "sequence": row.sequence, "role": row.role, "content": row.content,
+                           "created_at": row.created_at, "selected_plan_item_id": row.selected_plan_item_id,
+                           "options": [{"id": option.id, "ordinal": option.ordinal, "title": option.title,
+                                        "summary": option.summary, "target_plan_item_id": option.target_plan_item_id,
+                                        "safe_patch": option.safe_patch, "plan_revision": option.plan_revision,
+                                        "planning_facts_revision": option.planning_facts_revision} for option in row.options],
+                           "submission": _conversation_submission_metadata(row.submission)
+                           if row.submission is not None else None})
+        db.commit()
+        return {"messages": output, "next_before": rows[0].sequence if rows else None}
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.get("/api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission_id}")
+def get_conversation_submission(
+    trip_id: str,
+    conversation_id: str,
+    submission_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        submission = conversation_service.get_submission(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id, submission_id=submission_id,
+            bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        return _conversation_submission_result(submission)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.post(
+    "/api/trips/{trip_id}/conversations/{conversation_id}/messages/{assistant_message_id}/options/{option_id}/resolve"
+)
+def resolve_historical_conversation_option(
+    trip_id: str,
+    conversation_id: str,
+    assistant_message_id: str,
+    option_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Freshly authorize and classify one persisted assistant suggestion."""
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        result = conversation_service.resolve_historical_option(
+            db,
+            trip_id=trip_id,
+            membership_id=me.id,
+            conversation_id=conversation_id,
+            assistant_message_id=assistant_message_id,
+            option_id=option_id,
+            bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        return _historical_option_resolution_out(result)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.post("/api/trips/{trip_id}/conversations/{conversation_id}/messages", status_code=202)
+def submit_conversation_message(
+    trip_id: str,
+    conversation_id: str,
+    body: ConversationSubmitRequest,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    if idempotency_key is None:
+        raise HTTPException(428, "Idempotency-Key is required")
+    try:
+        result = conversation_service.submit_message(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+            idempotency_key=idempotency_key, text=body.text, selected_plan_item_id=body.selected_plan_item_id,
+            bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        _execute_durable_conversation_claim_after_commit(
+            result, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id
+        )
+        return _conversation_submission_result(result)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.post("/api/trips/{trip_id}/conversations/{conversation_id}/submissions/{submission_id}/recover", status_code=202)
+def recover_conversation_submission(
+    trip_id: str,
+    conversation_id: str,
+    submission_id: str,
+    authorization: str | None = Header(default=None),
+    recovery_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    if recovery_key is None:
+        raise HTTPException(428, "Idempotency-Key is required")
+    try:
+        result = conversation_service.recover_submission(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+            submission_id=submission_id, recovery_key=recovery_key, bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        _execute_durable_conversation_claim_after_commit(
+            result, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id
+        )
+        return _conversation_submission_result(result)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.delete("/api/trips/{trip_id}/conversations/{conversation_id}", status_code=204)
+def delete_conversation(
+    trip_id: str,
+    conversation_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> Response:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        conversation_service.delete_conversation(db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
+                                                bearer_token=_bearer_token(authorization))
+        db.commit()
+        return Response(status_code=204)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
 
 
 @app.get("/api/health")
@@ -925,7 +1305,12 @@ def get_trip(
         if trip.preferred_end_date
         else None,
         "member_count": len(
-            db.scalars(select(TripMembership).where(TripMembership.trip_id == trip_id)).all()
+            db.scalars(
+                select(TripMembership).where(
+                    TripMembership.trip_id == trip_id,
+                    current_participant_membership_clause(),
+                )
+            ).all()
         ),
     }
     result.update(trip_cover_service.trip_cover_out(trip))
@@ -1609,23 +1994,19 @@ def join_invite(
 ) -> dict:
     if not body.display_name.strip():
         raise HTTPException(422, "Display name is required")
+    if body.email is not None:
+        raise HTTPException(
+            409,
+            "account_join_requires_authenticated_session",
+        )
     try:
-        if _b2c_trip_writer_gate_requested(_B2E_MEMBERSHIP_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
-            raise HTTPException(503, "Protected membership writes are not available in production")
-        if _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE):
-            joined = protected_membership_join.join_invite_under_trip_root(
-                session_factory=SessionLocal, token=token, display_name=body.display_name, email=body.email,
-            )
-        else:
-            joined = trip_service.join_invite(
-                db,
-                token,
-                display_name=body.display_name,
-                email=body.email,
-            )
+        joined = protected_membership_join.join_guest_invite_under_trip_root(
+            session_factory=SessionLocal, token=token, display_name=body.display_name,
+        )
     except trip_service.InviteNotFound as exc:
         raise HTTPException(404, "Invite not found") from exc
-    db.commit()
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
     response = {
         "membership_id": joined.membership.id,
         "trip_id": joined.trip_id,
@@ -1635,6 +2016,45 @@ def join_invite(
         response["guest_token"] = joined.guest_session.token
         response["guest_expires_at"] = joined.guest_session.session.expires_at.isoformat()
     return response
+
+
+@app.post("/api/invites/{token}/account-join")
+def account_join_invite(
+    token: str,
+    body: AccountInviteJoinRequest,
+    user: User = Depends(current_account_user),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Join by a verified Account Session; request body supplies no identity."""
+
+    del body
+    bearer = _bearer_token(authorization)
+    if bearer is None:
+        raise HTTPException(401, "Login required")
+    try:
+        joined = protected_membership_join.join_account_invite_under_trip_root(
+            session_factory=SessionLocal,
+            token=token,
+            account_token=bearer,
+            account_user_id=user.id,
+        )
+    except trip_service.InviteNotFound as exc:
+        raise HTTPException(404, "Invite not found") from exc
+    except protected_membership_join.LegacyAccountIdentityDenied as exc:
+        raise HTTPException(403, "Legacy identity is not an authenticated Account") from exc
+    except protected_membership_join.MembershipQuarantined as exc:
+        raise HTTPException(409, "Membership is quarantined") from exc
+    except protected_membership_join.AccountMembershipJoinDenied as exc:
+        raise HTTPException(409, "Account Membership cannot join") from exc
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
+    except InvalidCredential as exc:
+        raise HTTPException(401, "Account authentication required") from exc
+    return {
+        "membership_id": joined.membership.id,
+        "trip_id": joined.trip_id,
+        "role": joined.membership.role,
+    }
 
 
 @app.post("/api/invites/{invite_id}/revoke")
@@ -1665,42 +2085,68 @@ def remove_membership(
     expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
     response: Response = None,
 ) -> dict:
-    if _b2c_trip_writer_gate_requested(_B2E_MEMBERSHIP_GATE) and os.getenv("APP_ENV", "development").strip().lower() in PRODUCTION_ENVIRONMENTS:
-        raise HTTPException(503, "Protected membership writes are not available in production")
-    if _b2c_trip_writer_gate_enabled(_B2E_MEMBERSHIP_GATE):
-        try:
-            scope, credential, key, revision, keyring = _protected_trip_revision(
-                membership=me, authorization=authorization, idempotency_key=idempotency_key,
-                expected_trip_facts_revision=expected_trip_facts_revision,
-            )
-            result = protected_membership_remove.execute_protected_membership_remove(
-                session_factory=SessionLocal, scope=scope, credential=credential,
-                command=protected_membership_remove.ProtectedMembershipRemove(membership_id, key, revision),
-                keyring=keyring,
-            )
-        except protected_membership_remove.MembershipTargetMissing as exc:
-            raise HTTPException(404, "Trip membership not found") from exc
-        except trip_service.MembershipRemovalDenied as exc:
-            raise HTTPException(409, "Membership cannot be removed") from exc
-        except Exception as exc:
-            _protected_trip_error(exc)
-        if response is not None:
-            response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
-        return result.payload
     _require_scoped_trip(db, me, trip_id)
     try:
-        trip_service.remove_membership(
-            db,
-            trip_id=trip_id,
-            organizer=me,
-            membership_id=membership_id,
+        scope, credential, key, revision, keyring = _protected_trip_revision(
+            membership=me, authorization=authorization, idempotency_key=idempotency_key,
+            expected_trip_facts_revision=expected_trip_facts_revision,
         )
-    except trip_service.OrganizerRequired as exc:
-        raise HTTPException(403, str(exc)) from exc
+        result = protected_membership_remove.execute_protected_membership_remove(
+            session_factory=SessionLocal, scope=scope, credential=credential,
+            command=protected_membership_remove.ProtectedMembershipRemove(membership_id, key, revision),
+            keyring=keyring,
+        )
+    except protected_membership_remove.MembershipTargetMissing as exc:
+        raise HTTPException(404, "Trip membership not found") from exc
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
     except trip_service.MembershipRemovalDenied as exc:
-        raise HTTPException(404, str(exc)) from exc
-    db.commit()
-    return {"removed": True}
+        raise HTTPException(409, "Membership cannot be removed") from exc
+    except Exception as exc:
+        _protected_trip_error(exc)
+    if response is not None:
+        response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+    return result.payload
+
+
+@app.post("/api/trips/{trip_id}/members/{membership_id}/quarantine")
+def quarantine_membership(
+    trip_id: str,
+    membership_id: str,
+    body: MembershipQuarantineRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_trip_facts_revision: str | None = Header(default=None, alias="X-Expected-Trip-Facts-Revision"),
+    response: Response = None,
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        scope, credential, key, revision, keyring = _protected_trip_revision(
+            membership=me,
+            authorization=authorization,
+            idempotency_key=idempotency_key,
+            expected_trip_facts_revision=expected_trip_facts_revision,
+        )
+        result = protected_membership_quarantine.execute_protected_membership_quarantine(
+            session_factory=SessionLocal,
+            scope=scope,
+            credential=credential,
+            command=protected_membership_quarantine.ProtectedMembershipQuarantine(
+                membership_id, body.reason, key, revision
+            ),
+            keyring=keyring,
+        )
+    except protected_membership_quarantine.MembershipQuarantineTargetMissing as exc:
+        raise HTTPException(404, "Trip membership not found") from exc
+    except protected_membership_quarantine.MembershipQuarantineDenied as exc:
+        raise HTTPException(409, "Membership cannot be quarantined") from exc
+    except Exception as exc:
+        _protected_trip_error(exc)
+    if response is not None:
+        response.headers["X-Trip-Facts-Revision"] = str(result.trip_planning_facts_revision)
+    return result.payload
 
 
 def _generator_result_out(result: plan_generator.GenerationResult) -> dict:
@@ -2472,7 +2918,10 @@ def settle(
     if _b2c_round_settlement_gate_enabled():
         return _protected_round_settlement(round_id=round_id, membership=me, authorization=authorization, idempotency_key=idempotency_key, expected_plan_revision=expected_plan_revision)
     round_ = _require_scoped_round(db, me, round_id)
-    orch.settle_round(db, round_)
+    try:
+        orch.settle_round(db, round_)
+    except orch.LegacyElectorateUnavailable as exc:
+        raise HTTPException(409, "legacy_round_electorate_unavailable") from exc
     db.commit()
     return _round_out(db, round_, me)
 
@@ -2494,6 +2943,8 @@ def _protected_round_settlement(*, round_id: str, membership: TripMembership, au
         result = protected_round_settlements.execute_protected_round_settlement(session_factory=SessionLocal, scope=scope, credential=CredentialProof.from_bearer_token(token), command=protected_round_settlements.ProtectedRoundSettlement(round_id, idempotency_key, revision), keyring=protected_round_settlements.StaticHmacKeyring(protected_round_settlements.HmacSigningKey("b2c-local-v1", key_material.encode("utf-8"))))
     except protected_round_settlements.RoundSettlementRoundMissing as exc:
         raise HTTPException(404, "Round not found") from exc
+    except orch.LegacyElectorateUnavailable as exc:
+        raise HTTPException(409, "legacy_round_electorate_unavailable") from exc
     except (StalePlanRevision, IdempotencyKeyReused, IdempotencyRecordExpired) as exc:
         raise HTTPException(409, "Protected round settlement conflicts with current state") from exc
     except (InvalidIdempotencyKey, InvalidDurableCommand, UnsupportedFingerprintVersion) as exc:

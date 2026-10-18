@@ -286,6 +286,107 @@ def lifecycle_store(test_engine):
         cleanup.close()
 
 
+def test_generation_uses_only_current_participants_and_preserves_inactive_history(
+    lifecycle_store, monkeypatch,
+):
+    """Removed/quarantined data is historical, never a new planning input."""
+
+    factory, seed = lifecycle_store
+    data = seed()
+    with factory.begin() as db:
+        organizer = db.get(TripMembership, data["organizer_id"])
+        trip = db.get(Trip, data["trip_id"])
+        assert organizer is not None and trip is not None
+        removed_user = User(name="Removed", email=f"removed-{uuid4().hex}@example.com")
+        quarantined_user = User(
+            name="Quarantined", email=f"quarantined-{uuid4().hex}@example.com"
+        )
+        db.add_all((removed_user, quarantined_user))
+        db.flush()
+        removed = TripMembership(
+            trip_id=trip.id,
+            user_id=removed_user.id,
+            role="participant",
+            status="removed",
+        )
+        quarantined = TripMembership(
+            trip_id=trip.id,
+            user_id=quarantined_user.id,
+            role="participant",
+            status="preferences_submitted",
+            quarantined_at=datetime.now(timezone.utc),
+            quarantine_reason="security_incident",
+            quarantined_by_membership_id=organizer.id,
+        )
+        db.add_all((removed, quarantined))
+        db.flush()
+        for membership, marker in ((removed, "removed-only"), (quarantined, "quarantined-only")):
+            db.add(
+                Preference(
+                    trip_membership_id=membership.id,
+                    available_start_date=data["start"] + timedelta(days=1),
+                    available_end_date=data["start"] + timedelta(days=1),
+                    maximum_budget=1.0,
+                    top_interests=[marker],
+                    submitted_at=datetime.now(timezone.utc),
+                )
+            )
+            db.add(
+                MemberConstraint(
+                    trip_membership_id=membership.id,
+                    kind="budget_ceiling",
+                    importance="required",
+                    params={"max_total_per_person": 1.0},
+                )
+            )
+        removed_id, quarantined_id = removed.id, quarantined.id
+
+    prepared = prepare_generation(factory, data["trip_id"], data["organizer_id"])
+    assert prepared.inputs.membership_count == 2
+    assert prepared.inputs.interests == ("culture", "food")
+    assert prepared.inputs.meal_budget_cap == 150.0
+    assert prepared.inputs.day_slots == (
+        (1, data["start"]),
+        (2, data["start"] + timedelta(days=1)),
+    )
+    assert {constraint.membership_id for constraint in prepared.inputs.required_constraints} == {
+        data["organizer_id"],
+        data["participant_id"],
+    }
+    assert all(
+        marker not in repr(prepared)
+        for marker in ("removed-only", "quarantined-only")
+    )
+
+    # The legacy synchronous public generator reads the same current facts,
+    # rather than becoming a second path that revives inactive preferences.
+    monkeypatch.setattr(generator.place_service, "places_for_planner", lambda *_args: _places())
+    monkeypatch.setattr(planner, "plan_day", _valid_planner)
+    session = factory()
+    try:
+        organizer = session.get(TripMembership, data["organizer_id"])
+        assert organizer is not None
+        result = generator.generate_plan(session, data["trip_id"], organizer)
+        assert result.status == "active"
+        session.commit()
+    finally:
+        session.close()
+
+    # Membership-owned records remain historical rows; filtering planning facts
+    # neither deletes nor reparents them.
+    verify = factory()
+    try:
+        assert verify.get(TripMembership, removed_id).status == "removed"
+        assert verify.get(TripMembership, quarantined_id).quarantined_at is not None
+        assert verify.scalar(
+            select(func.count())
+            .select_from(Preference)
+            .where(Preference.trip_membership_id.in_((removed_id, quarantined_id)))
+        ) == 2
+    finally:
+        verify.close()
+
+
 def test_prepare_generation_materializes_a_detached_read_only_snapshot(lifecycle_store, test_engine):
     factory, seed = lifecycle_store
     data = seed(participant_availability_start=date(2027, 5, 11))

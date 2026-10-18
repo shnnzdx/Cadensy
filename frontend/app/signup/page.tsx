@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { createSessionRuntime, SESSION_RUNTIME_CODES } from "../../../shared/session-runtime/index.js";
+import { isSafeInternalReturnPath } from "../../../shared/trip-navigation-policy/invite-auth-return.js";
 import BrandLogo from "../BrandLogo";
 
 const API_BASE_URL =
@@ -20,11 +21,13 @@ export default function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const nextPathRef = useRef("/trip");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const next = params.get("next");
-    const resolvedNext = next?.startsWith("/") ? next : "/trip";
+    const resolvedNext = isSafeInternalReturnPath(next) ? next : "/trip";
+    nextPathRef.current = resolvedNext;
     const restored = sessionRuntime.restoreTechnicalSession();
     if (restored.facts.kind === "account") {
       window.location.replace(resolvedNext);
@@ -60,7 +63,7 @@ export default function SignupPage() {
         setError("Your account was created, but this browser could not save the session. Please log in.");
         return;
       }
-      window.location.href = "/trip";
+      window.location.href = nextPathRef.current;
     } catch {
       setError("Could not reach the backend. Make sure the API is running.");
     } finally {
@@ -91,7 +94,10 @@ export default function SignupPage() {
             <label className="signup-consent"><input type="checkbox" required /><span>I agree to the <Link href="/privacy">Privacy Policy</Link> and understand how CADENSY uses planning data.</span></label>
             <button className="signup-submit" type="submit" disabled={submitting}>{submitting ? "Creating account..." : "Create account"} <span>→</span></button>
           </form>
-          <p className="signup-login">Already have an account? <Link href="/login">Log in</Link></p>
+          <p className="signup-login">Already have an account? <Link href="/login" onClick={(event) => {
+            event.preventDefault();
+            window.location.href = `/login?next=${encodeURIComponent(nextPathRef.current)}`;
+          }}>Log in</Link></p>
         </div>
       </div>
     </section>

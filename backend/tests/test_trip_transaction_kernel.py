@@ -303,7 +303,7 @@ def test_preferences_submitted_guest_is_active_in_legacy_plan_and_trip_paths(tes
     ) == seed.guest_membership_id
 
 
-@pytest.mark.parametrize("guest_status", ["removed", "invited", "declined"])
+@pytest.mark.parametrize("guest_status", ["removed", "invited"])
 def test_inactive_guest_status_never_reaches_trip_callback(test_engine, guest_status) -> None:
     seed = _seed(test_engine, guest_status=guest_status)
     called = False

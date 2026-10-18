@@ -48,7 +48,7 @@ from ..observability.telemetry import (
     FailureCategory,
     emit_event_safely,
 )
-from . import auth as auth_service
+from .membership_policy import is_membership_access_authorized
 from .constraints.types import Classification
 from .decisions import orchestrator as orch
 
@@ -125,6 +125,10 @@ class PreviewResult:
     authoritative: bool = False
     # Internal request-observability fact.  The HTTP DTO remains unchanged.
     telemetry_terminal: TerminalCategory = TerminalCategory.SUCCEEDED
+    # Durable Conversation callers persist a categorical Submission failure
+    # instead of an invented assistant reply when Runtime execution failed.
+    # The HTTP Preview DTO deliberately does not expose this internal fact.
+    runtime_failure_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +348,10 @@ class RevisionBracketedPreview:
             candidate=candidate,
             candidate_options=candidate_options,
             telemetry_terminal=_preview_terminal(runtime_result),
+            runtime_failure_category=(
+                runtime_result.observation.failure.normalized_kind
+                if runtime_result.observation.failure is not None else None
+            ),
         )
 
     def _capture(self, request: PreviewRequest) -> _CapturedRevisions:
@@ -532,11 +540,7 @@ def _assert_captured_current(db: Session, captured: _CapturedRevisions) -> None:
 
 
 def _is_active_preview_membership(membership: TripMembership | None) -> bool:
-    if membership is None:
-        return False
-    if membership.user_id is not None:
-        return membership.status != "removed"
-    return auth_service.is_active_guest_membership_status(membership.status)
+    return membership is not None and is_membership_access_authorized(membership)
 
 
 def _safe_patch(raw: Mapping[str, object]) -> dict[str, object]:

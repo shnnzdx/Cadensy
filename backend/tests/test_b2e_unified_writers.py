@@ -23,7 +23,10 @@ from app.domain.transactions import booking as protected_booking
 from app.domain.transactions import membership_join, membership_remove, organizer_actions
 from app.domain.transactions import proposal_decision as protected_proposal_decision
 from app.domain.transactions import scheduler as protected_scheduler
-from app.domain.transactions.membership_join import join_invite_under_trip_root
+from app.domain.transactions.membership_join import (
+    join_account_invite_under_trip_root,
+    join_invite_under_trip_root,
+)
 from app.domain.transactions.scheduler import expire_due_proposal, settle_due_round
 from app.domain.transactions.trip_preferences_common import StaticHmacKeyring
 
@@ -256,7 +259,7 @@ def test_guest_invite_join_uses_trip_root_and_advances_both_revisions(test_engin
 def test_scheduler_terminal_state_is_retry_safe_and_advances_plan_revision(test_engine):
     seed = _seed(test_engine)
     with _factory(test_engine).begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_); db.flush(); round_id = round_.id
     assert settle_due_round(session_factory=_factory(test_engine), trip_id=seed["trip"], round_id=round_id, now=datetime.now(timezone.utc)) is True
     assert settle_due_round(session_factory=_factory(test_engine), trip_id=seed["trip"], round_id=round_id, now=datetime.now(timezone.utc)) is False
@@ -297,13 +300,20 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
     if case == "account_join":
         invite_token = f"account-invite-{seed['trip']}"
         with factory.begin() as db:
-            joiner = User(name="Account joiner", email=f"joiner-{seed['trip']}@test.local")
+            joiner_token = f"account-joiner-{seed['trip']}"
+            joiner = User(
+                name="Account joiner",
+                email=f"joiner-{seed['trip']}@test.local",
+                password_hash=auth_service.hash_password("correct-horse"),
+            )
             db.add(joiner)
             db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
             db.flush()
+            db.add(AuthSession(user_id=joiner.id, token_hash=auth_service.token_hash(joiner_token), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
             _seeded[-1] = (seed["trip"], (*_seeded[-1][1], joiner.id))
-        operation = lambda: join_invite_under_trip_root(
-            session_factory=factory, token=invite_token, display_name="Account joiner", email=f"joiner-{seed['trip']}@test.local"
+        operation = lambda: join_account_invite_under_trip_root(
+            session_factory=factory, token=invite_token, account_token=joiner_token,
+            account_user_id=joiner.id,
         )
     elif case == "guest_join":
         invite_token = f"guest-invite-{seed['trip']}"
@@ -319,7 +329,7 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
         )
     elif case == "settle":
         with factory.begin() as db:
-            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
             db.add(round_)
             db.flush()
             resource_id = round_.id
@@ -333,7 +343,7 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
         operation = lambda: expire_due_proposal(session_factory=factory, trip_id=seed["trip"], proposal_id=resource_id, now=datetime.now(timezone.utc))
     elif case == "extend":
         with factory.begin() as db:
-            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="extend", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+            round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="extend", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
             db.add(round_)
             db.flush()
             resource_id = round_.id
@@ -381,17 +391,25 @@ def test_join_final_commit_failure_leaves_no_member_guest_or_revision_partial(te
     with factory.begin() as db:
         db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
         if email:
-            joiner = User(name="Rollback account", email=f"rollback-{seed['trip']}@test.local")
+            joiner_token = f"rollback-account-{seed['trip']}"
+            joiner = User(name="Rollback account", email=f"rollback-{seed['trip']}@test.local", password_hash=auth_service.hash_password("correct-horse"))
             db.add(joiner)
             db.flush()
+            db.add(AuthSession(user_id=joiner.id, token_hash=auth_service.token_hash(joiner_token), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
             _seeded[-1] = (seed["trip"], (*_seeded[-1][1], joiner.id))
     before_commit = lambda _session: (_ for _ in ()).throw(RuntimeError("final commit fault"))
     event.listen(membership_join.Session, "before_commit", before_commit)
     try:
         with pytest.raises(RuntimeError, match="final commit fault"):
-            join_invite_under_trip_root(
-                session_factory=factory, token=invite_token, display_name="Rollback",
-                email=f"rollback-{seed['trip']}@test.local" if email else None,
+            (
+                join_account_invite_under_trip_root(
+                    session_factory=factory, token=invite_token, account_token=joiner_token,
+                    account_user_id=joiner.id,
+                )
+                if email
+                else join_invite_under_trip_root(
+                    session_factory=factory, token=invite_token, display_name="Rollback", email=None,
+                )
             )
     finally:
         event.remove(membership_join.Session, "before_commit", before_commit)
@@ -429,7 +447,7 @@ def test_scheduler_final_commit_failure_restores_due_terminal_state(test_engine,
     factory = _factory(test_engine)
     with factory.begin() as db:
         if case == "settle":
-            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         else:
             row = ChangeProposal(plan_item_id=seed["item"], action_type="edit", before_json={}, after_json={}, requested_by_membership_id=seed["guest"], status="waiting_affected_members", deadline=datetime.now(timezone.utc) - timedelta(minutes=1))
         db.add(row)
@@ -466,7 +484,7 @@ def test_organizer_ledger_failure_rolls_back_every_action_family(test_engine, op
     factory = _factory(test_engine)
     with factory.begin() as db:
         if operation == organizer_actions.ROUND_EXTEND_OPERATION:
-            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+            row = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="rollback", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
         else:
             row = ChangeProposal(plan_item_id=seed["item"], action_type="edit", before_json={}, after_json={}, requested_by_membership_id=seed["guest"], status="escalated" if operation == organizer_actions.PROPOSAL_DEADLOCK_OPERATION else "waiting_affected_members", deadline=datetime.now(timezone.utc) + timedelta(hours=1))
         db.add(row)
@@ -521,38 +539,20 @@ def test_protected_deadlock_branches_commit_once_and_replay_without_duplicate_ef
         assert db.query(MutationIdempotency).filter(MutationIdempotency.trip_id == seed["trip"]).count() == 1
 
 
-def test_membership_routes_preserve_legacy_off_and_use_protected_transaction_when_enabled(test_engine, monkeypatch):
+def test_membership_routes_always_use_protected_transaction(test_engine, monkeypatch):
     factory = _factory(test_engine)
     monkeypatch.setattr(api, "SessionLocal", factory)
     monkeypatch.setattr(db_session, "SessionLocal", factory)
     legacy = _seed(test_engine)
-    legacy_invite = f"http-legacy-{legacy['trip']}"
+    legacy_invite = f"http-protected-{legacy['trip']}"
     with factory.begin() as db:
         db.add(InviteLink(trip_id=legacy["trip"], token_hash=auth_service.token_hash(legacy_invite), is_primary=True))
     with TestClient(api.app) as client:
-        response = client.post(f"/api/invites/{legacy_invite}/join", json={"display_name": "Legacy guest"})
+        response = client.post(f"/api/invites/{legacy_invite}/join", json={"display_name": "Guest"})
     assert response.status_code == 200 and "guest_token" in response.json()
     with factory() as db:
-        assert db.get(Trip, legacy["trip"]).planning_facts_revision == 0
-        assert db.get(Plan, legacy["plan"]).revision == 0
-
-    protected = _seed(test_engine)
-    protected_invite = f"http-protected-{protected['trip']}"
-    with factory.begin() as db:
-        db.add(InviteLink(trip_id=protected["trip"], token_hash=auth_service.token_hash(protected_invite), is_primary=True))
-    monkeypatch.setenv("CADENSY_B2E_PROTECTED_MEMBERSHIP_WRITES", "1")
-    monkeypatch.setenv("APP_ENV", "test")
-    with TestClient(api.app) as client:
-        joined = client.post(f"/api/invites/{protected_invite}/join", json={"display_name": "Protected guest"})
-    assert joined.status_code == 200 and "guest_token" in joined.json()
-    with factory() as db:
-        assert db.get(Trip, protected["trip"]).planning_facts_revision == 1
-        assert db.get(Plan, protected["plan"]).revision == 1
-
-    monkeypatch.setenv("APP_ENV", "production")
-    with TestClient(api.app) as client:
-        denied = client.post(f"/api/invites/{protected_invite}/join", json={"display_name": "Never writes"})
-    assert denied.status_code == 503
+        assert db.get(Trip, legacy["trip"]).planning_facts_revision == 1
+        assert db.get(Plan, legacy["plan"]).revision == 1
 
 
 def test_membership_remove_http_requires_protected_headers_and_replays_without_second_revocation(test_engine, monkeypatch):
@@ -587,7 +587,7 @@ def test_organizer_http_gate_is_default_off_protected_on_and_production_closed(t
     monkeypatch.setattr(api, "SessionLocal", factory)
     monkeypatch.setattr(db_session, "SessionLocal", factory)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="http", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="http", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
         db.add(round_)
         db.flush()
         round_id = round_.id
@@ -599,7 +599,7 @@ def test_organizer_http_gate_is_default_off_protected_on_and_production_closed(t
         # The schema permits one open Round per item.  Closing the exercised
         # Legacy fixture lets the protected branch use a distinct real Round.
         db.get(DecisionRound, round_id).status = "closed"
-        second = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="protected", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open")
+        second = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="protected", options=[], deadline=datetime.now(timezone.utc) + timedelta(hours=1), status="open", electorate_count=3)
         db.add(second)
         db.flush()
         protected_round_id = second.id
@@ -658,7 +658,7 @@ def test_scheduler_job_gate_selects_protected_due_claim_and_retries_terminal_sta
     seed = _seed(test_engine)
     factory = _factory(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="job", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="job", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_)
         db.flush()
         round_id = round_.id
@@ -680,7 +680,7 @@ def test_due_settlement_and_real_booking_serialize_then_stale_booking_is_rejecte
     seed = _seed(test_engine)
     factory = _factory(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="due", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_)
         db.flush()
         round_id = round_.id
@@ -795,7 +795,7 @@ def test_extension_and_settlement_orders_recheck_round_eligibility(test_engine):
     factory = _factory(test_engine)
     first = _seed(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=first["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=first["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_); db.flush(); round_id = round_.id
     extended = organizer_actions.execute_protected_organizer_action(session_factory=factory, scope=_scope(first), credential=CredentialProof.from_bearer_token(first["token"]), command=organizer_actions.ProtectedOrganizerAction(organizer_actions.ROUND_EXTEND_OPERATION, round_id, "extend-first", 0), keyring=_keyring())
     assert extended.plan_revision == 1
@@ -805,7 +805,7 @@ def test_extension_and_settlement_orders_recheck_round_eligibility(test_engine):
 
     second = _seed(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=second["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open")
+        round_ = DecisionRound(plan_item_id=second["item"], kind="normal", reason="race", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3)
         db.add(round_); db.flush(); round_id = round_.id
     assert settle_due_round(session_factory=factory, trip_id=second["trip"], round_id=round_id, now=datetime.now(timezone.utc)) is True
     with pytest.raises(legacy_organizer.NothingToDo):
@@ -882,7 +882,7 @@ def test_real_overlap_expiry_blocks_then_stales_proposal_decision(test_engine):
 def test_real_overlap_extension_blocks_then_scheduler_rechecks_deadline(test_engine):
     seed = _seed(test_engine); factory = _factory(test_engine)
     with factory.begin() as db:
-        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="overlap", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open"); db.add(round_); db.flush(); round_id = round_.id
+        round_ = DecisionRound(plan_item_id=seed["item"], kind="normal", reason="overlap", options=[{"id": "keep", "title": "Keep", "patch": {}}], deadline=datetime.now(timezone.utc) - timedelta(minutes=1), status="open", electorate_count=3); db.add(round_); db.flush(); round_id = round_.id
     outcomes, pids = _real_writer_overlap(test_engine,
         lambda: organizer_actions.execute_protected_organizer_action(session_factory=factory, scope=_scope(seed), credential=CredentialProof.from_bearer_token(seed["token"]), command=organizer_actions.ProtectedOrganizerAction(organizer_actions.ROUND_EXTEND_OPERATION, round_id, "overlap-extend", 0), keyring=_keyring()),
         lambda: settle_due_round(session_factory=factory, trip_id=seed["trip"], round_id=round_id, now=datetime.now(timezone.utc)),

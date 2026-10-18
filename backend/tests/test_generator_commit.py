@@ -53,8 +53,11 @@ from app.domain.transactions.generator_durable import (
 from app.domain.transactions.trip_preferences_common import StaticHmacKeyring
 from app.domain.plans import generator
 from app.domain.transactions import constraint_create, preferences_save
-from app.domain.transactions import membership_remove
-from app.domain.transactions.membership_join import join_invite_under_trip_root
+from app.domain.transactions import membership_quarantine, membership_remove
+from app.domain.transactions.membership_join import (
+    join_account_invite_under_trip_root,
+    join_invite_under_trip_root,
+)
 from app.domain.places import service as place_service
 
 
@@ -766,12 +769,25 @@ def test_real_protected_invite_join_during_detached_generator_work_stales_existi
         invite_token = f"generator-{join_kind}-invite-{uuid4().hex}"
         session.add(InviteLink(trip_id=data.trip_id, token_hash=auth_service.token_hash(invite_token), is_primary=True))
         if join_kind == "account":
-            joiner = User(name="Generator account joiner", email=f"generator-join-{uuid4().hex}@example.test")
+            joiner = User(
+                name="Generator account joiner",
+                email=f"generator-join-{uuid4().hex}@example.test",
+                password_hash=auth_service.hash_password("generator-join-password"),
+            )
             session.add(joiner)
             session.flush()
-            email = joiner.email
+            account_token = f"generator-account-{uuid4().hex}"
+            session.add(
+                AuthSession(
+                    user_id=joiner.id,
+                    token_hash=auth_service.token_hash(account_token),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            joiner_id = joiner.id
         else:
-            email = None
+            account_token = None
+            joiner_id = None
 
     provider_entered, release_provider = Event(), Event()
     outcomes: Queue[object] = Queue()
@@ -807,12 +823,20 @@ def test_real_protected_invite_join_during_detached_generator_work_stales_existi
         assert provider_entered.wait(5)
         # This is a real, separately-owned Trip transaction while the Provider
         # is paused.  No Generator Session or root lock survives Prepare.
-        joined = join_invite_under_trip_root(
-            session_factory=factory,
-            token=invite_token,
-            display_name=f"Generator {join_kind} joiner",
-            email=email,
-        )
+        if join_kind == "account":
+            joined = join_account_invite_under_trip_root(
+                session_factory=factory,
+                token=invite_token,
+                account_token=account_token,
+                account_user_id=joiner_id,
+            )
+        else:
+            joined = join_invite_under_trip_root(
+                session_factory=factory,
+                token=invite_token,
+                display_name="Generator guest joiner",
+                email=None,
+            )
         assert (joined.guest_session is not None) is (join_kind == "guest")
     finally:
         release_provider.set()
@@ -899,6 +923,77 @@ def test_real_protected_membership_removal_during_detached_generator_work_stales
             MutationIdempotency.trip_id == data.trip_id,
             MutationIdempotency.operation_code == membership_remove.OPERATION,
         )) == 1
+
+
+def test_real_protected_membership_quarantine_during_detached_generator_work_stales_draft(
+    generator_commit_store,
+):
+    """A quarantine revision fences a prepared current-member snapshot."""
+
+    from app.domain.plans.generator_commit import execute_protected_plan_generation
+
+    factory, seed = generator_commit_store
+    data = seed()
+    with factory.begin() as session:
+        plan = Plan(trip_id=data.trip_id, currency="USD", revision=0)
+        target = TripMembership(
+            trip_id=data.trip_id,
+            guest_display_name="Generator quarantined guest",
+            role="participant",
+            status="joined",
+        )
+        session.add_all((plan, target))
+        session.flush()
+        target_id = target.id
+    provider_entered, release_provider = Event(), Event()
+    outcomes: Queue[object] = Queue()
+
+    def paused_provider(_destination: str):
+        provider_entered.set()
+        assert release_provider.wait(5)
+        return _provider_places(data.city)
+
+    def run_generator() -> None:
+        try:
+            outcomes.put(execute_protected_plan_generation(
+                session_factory=factory, coordinator=_coordinator(factory), scope=_scope(data),
+                credential=CredentialProof.from_bearer_token(data.token),
+                command=GeneratorIdempotentCommand("generator-stale-quarantine", 1, datetime.now(timezone.utc) + timedelta(days=1)),
+                provider_fetch=paused_provider, planner_call=_planner,
+            ))
+        except BaseException as exc:
+            outcomes.put(exc)
+
+    worker = Thread(target=run_generator, daemon=True)
+    try:
+        worker.start()
+        assert provider_entered.wait(5)
+        quarantined = membership_quarantine.execute_protected_membership_quarantine(
+            session_factory=factory,
+            scope=_scope(data),
+            credential=CredentialProof.from_bearer_token(data.token),
+            command=membership_quarantine.ProtectedMembershipQuarantine(
+                target_id, "security_incident", "generator-quarantine", 0,
+            ),
+            keyring=StaticHmacKeyring(HmacSigningKey("generator-quarantine", b"generator-quarantine")),
+        )
+        assert quarantined.trip_planning_facts_revision == 1
+    finally:
+        release_provider.set()
+        worker.join(5)
+    assert not worker.is_alive() and isinstance(outcomes.get_nowait(), StaleGeneratorPreconditions)
+    with factory() as session:
+        trip = session.get(Trip, data.trip_id)
+        plan = session.scalar(select(Plan).where(Plan.trip_id == data.trip_id))
+        target = session.get(TripMembership, target_id)
+        assert trip is not None and trip.planning_facts_revision == 1
+        assert plan is not None and plan.revision == 1
+        assert target is not None and target.quarantined_at is not None
+        assert session.scalar(select(func.count()).select_from(PlanItem).where(PlanItem.plan_id == plan.id)) == 0
+        assert session.scalar(select(func.count()).select_from(MutationIdempotency).where(
+            MutationIdempotency.trip_id == data.trip_id,
+            MutationIdempotency.operation_code == "plan.generate.v1",
+        )) == 0
 
 
 def test_generator_commit_then_real_invite_join_advances_existing_plan_revision(generator_commit_store):
@@ -1218,6 +1313,15 @@ def test_protected_generator_matches_legacy_business_outcome_for_key_scenarios(
         command=command,
         provider_fetch=provider_fetch,
         planner_call=planner_call,
+    )
+    # The protected path has persisted the detached provider snapshot.  The
+    # fixture deliberately supplies fewer than the production refresh minimum,
+    # so make the legacy comparison consume that exact persisted snapshot
+    # instead of issuing an unrelated real-provider refresh.
+    monkeypatch.setattr(
+        generator.place_service,
+        "_cache_needs_refresh",
+        lambda _rows, *, minimum: False,
     )
     with factory.begin() as session:
         organizer = session.get(TripMembership, legacy_seed.organizer_id)

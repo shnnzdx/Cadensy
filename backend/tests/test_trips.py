@@ -49,7 +49,17 @@ def api_session(test_engine):
 
 
 @pytest.fixture
-def client(api_session: Session):
+def client(api_session: Session, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        api,
+        "SessionLocal",
+        sessionmaker(
+            bind=api_session.connection(),
+            expire_on_commit=False,
+            future=True,
+            join_transaction_mode="create_savepoint",
+        ),
+    )
     api.app.dependency_overrides[api.get_session] = lambda: api_session
     with TestClient(api.app) as test_client:
         yield test_client
@@ -175,6 +185,7 @@ def _round_and_proposal(
         options=[{"id": "keep", "label": "Keep it"}],
         deadline=datetime.now(timezone.utc) + timedelta(hours=2),
         status="open",
+        electorate_count=1,
     )
     proposal = ChangeProposal(
         plan_item_id=item.id,

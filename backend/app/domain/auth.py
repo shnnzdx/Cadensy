@@ -18,6 +18,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..db.models import AuthSession, GuestSession, TripMembership, User
+from .membership_policy import (
+    access_authorized_membership_clause,
+    is_membership_access_authorized,
+)
 
 SESSION_TTL = timedelta(days=14)
 GUEST_SESSION_TTL = timedelta(days=7)
@@ -106,7 +110,7 @@ def _memberships(db: Session, user_id: str) -> list[dict]:
         select(TripMembership)
         .where(
             TripMembership.user_id == user_id,
-            TripMembership.status != "removed",
+            access_authorized_membership_clause(),
         )
         .order_by(TripMembership.created_at)
     ).all()
@@ -264,7 +268,7 @@ def membership_for_guest_token(db: Session, token: str | None) -> TripMembership
         membership is None
         or membership.trip_id != session.trip_id
         or membership.user_id is not None
-        or not is_active_guest_membership_status(membership.status)
+        or not is_membership_access_authorized(membership)
     ):
         raise AuthRequired("Guest membership is no longer active")
     return membership
@@ -294,7 +298,7 @@ def revoke_guest_sessions_for_membership(db: Session, membership_id: str) -> Non
 def membership_for_trip(db: Session, user: User, trip_id: str | None) -> TripMembership:
     query = select(TripMembership).where(
         TripMembership.user_id == user.id,
-        TripMembership.status != "removed",
+        access_authorized_membership_clause(),
     )
     if trip_id:
         query = query.where(TripMembership.trip_id == trip_id)

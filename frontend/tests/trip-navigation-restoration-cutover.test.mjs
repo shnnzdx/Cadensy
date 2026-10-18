@@ -119,10 +119,11 @@ test("phase 9 TripAppState keeps storage and request-header ownership while addi
   assert.match(source, /const \[hasAccountSession, setHasAccountSession\] = useState\(\(\) => bootstrapSession\.hasAccountSession\)/);
   assert.match(source, /const \[restoredTripId\] = useState\(\(\) => bootstrapSession\.restoredTripId\)/);
   assert.match(source, /const \[activeTripId, setActiveTripId\] = useState\(\(\) => bootstrapSession\.activeTripId\)/);
-  assert.match(source, /const adoptTechnicalTripContext = useCallback\(\(\{ membershipId: nextMembershipId, tripId: nextTripId, inviteToken, profile \}\) => \{/);
+  assert.match(source, /const clearMembershipScopedState = useCallback\(\(\) => \{/);
+  assert.match(source, /const adoptTechnicalTripContext = useCallback\(\(\{ membershipId: nextMembershipId, tripId: nextTripId, guestToken, inviteToken, profile \}\) => \{/);
   assert.match(source, /sessionRuntime\.adoptTechnicalTripContext\(\{\s*membershipId: nextMembershipId,\s*activeTripId: nextTripId,/s);
   assert.match(source, /const identityHeadersFor = useCallback\(scope => \{\s*const identity = sessionRuntime\.requestIdentityFor\(scope, technicalSessionFacts\)/s);
-  assert.match(source, /const raw = await accountRequestJson\('\/api\/trips'\)/);
+  assert.match(source, /const raw = await accountRequestJson\(`\/api\/trips\$\{priorityQuery\}`\)/);
   assert.match(source, /const created = await accountRequestJson\('\/api\/trips', \{/);
   assert.match(source, /setTripSummariesStatus\('failed'\)/);
   assert.match(source, /const readInviteAdoption = useCallback\(token => \{/);
@@ -131,6 +132,6 @@ test("phase 9 TripAppState keeps storage and request-header ownership while addi
   assert.doesNotMatch(bootstrapSource, /requestIdentityFor\('account'/);
   assert.doesNotMatch(bootstrapSource, /Authorization/);
   assert.doesNotMatch(bootstrapSource, /Bearer /);
-  assert.match(bootstrapSource, /restoredTripId: tripBootstrapValue\(\{\s*tripId: restorationHint\?\.tripId \|\| ''/s);
-  assert.match(bootstrapSource, /activeTripId: tripBootstrapValue\(\{\s*tripId: facts\.kind === 'guest' \? facts\.activeTripId : facts\.kind === 'account' \? \(facts\.activeTripId \|\| ''\) : ''/s);
+  assert.match(bootstrapSource, /restoredTripId: restorationHint\?\.tripId \|\| ''/);
+  assert.match(bootstrapSource, /activeTripId: facts\.kind === 'none' \? '' : facts\.activeTripId \|\| ''/);
 });

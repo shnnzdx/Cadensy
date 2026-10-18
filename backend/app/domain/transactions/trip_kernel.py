@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from .. import auth as auth_service
+from ..membership_policy import is_membership_access_authorized
 from ...db.models import AuthSession, GuestSession, Plan, Trip, TripMembership
 from .kernel import (
     ContextExpired,
@@ -260,7 +260,7 @@ class TripTransactionKernel(Generic[T]):
             .execution_options(populate_existing=True)
             .with_for_update()
         )
-        if membership is None or membership.status == "removed":
+        if membership is None or not is_membership_access_authorized(membership):
             raise MembershipNotAuthorized("Account membership is no longer active")
         return LockedActor(
             membership_id=membership.id,
@@ -299,7 +299,7 @@ class TripTransactionKernel(Generic[T]):
         if (
             membership is None
             or membership.user_id is not None
-            or not auth_service.is_active_guest_membership_status(membership.status)
+            or not is_membership_access_authorized(membership)
         ):
             raise MembershipNotAuthorized("Guest membership is no longer active")
         return LockedActor(

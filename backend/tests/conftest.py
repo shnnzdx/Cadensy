@@ -203,6 +203,7 @@ def full_trip(db: Session) -> dict:
             trip_id=trip.id,
             user_id=user.id,
             role="organizer" if i == 0 else "participant",
+            status="joined",
         )
         for i, user in enumerate(users)
     ]

@@ -17,7 +17,7 @@ from .vote import vote_round_out
 
 
 ROUND_SETTLEMENT_OPERATION = "round.settle.v1"
-_ROUND_RESPONSE_FIELDS = frozenset({"id", "kind", "plan_item_id", "item_title", "options", "reason", "deadline", "status", "winning_option_id", "responded", "total_members", "tally", "my_vote"})
+_ROUND_RESPONSE_FIELDS = frozenset({"id", "kind", "plan_item_id", "item_title", "options", "reason", "deadline", "status", "winning_option_id", "responded", "total_members", "electorate_count_available", "tally", "my_vote"})
 
 
 class RoundSettlementRoundMissing(Exception):
