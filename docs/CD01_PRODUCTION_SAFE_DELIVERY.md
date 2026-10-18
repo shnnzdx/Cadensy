@@ -73,6 +73,19 @@ The implementation is split deliberately:
   the same main commit provenance, requires the live service to already retain
   its circuit-breaker profile, and produces a new task definition only from the
   current one.
+
+### PR-06B artifact-build boundary
+
+The build workflow validates the checked-out migration runner against the reviewed
+PR-06B artifact head `b7d3a1e9c642`. This permits an immutable candidate image to
+be built only after the normal `main` CI gate; it does not run Alembic against a
+database and does not change ECS or RDS.
+
+The Production Release workflow intentionally continues to require the recorded
+deployed baseline `c2a4b6d8e0f1`. It therefore fails closed for a PR-06B image until
+a separately approved migration operation has collected snapshot/restore evidence,
+executed the exact reviewed chain, and proved the live database head. Do not change
+the release head merely to make a deployment pass.
 - [`prepare_ecs_task_definition.py`](../scripts/cd01/prepare_ecs_task_definition.py)
   is the offline safety boundary for that clone. It permits only the approved
   ECR repository with an `@sha256:` image, requires Fargate/`awsvpc`, both ECS
