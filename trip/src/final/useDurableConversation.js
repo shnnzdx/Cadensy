@@ -203,6 +203,11 @@ export function useDurableConversation({ app, scope, itemId = null }) {
     }
   }, [client, conversation])
 
+  const resolveOption = useCallback(async ({ assistantMessageId, optionId }) => {
+    if (!conversation) throw new Error('Conversation is unavailable')
+    return client.resolveOption(conversation.id, assistantMessageId, optionId)
+  }, [client, conversation])
+
   return {
     conversation,
     messages,
@@ -216,5 +221,6 @@ export function useDurableConversation({ app, scope, itemId = null }) {
     recoverPending,
     loadOlder,
     deleteConversation,
+    resolveOption,
   }
 }

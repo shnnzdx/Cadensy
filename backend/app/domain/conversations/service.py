@@ -34,6 +34,7 @@ from ...db.models import (
 )
 from ..membership_policy import is_membership_access_authorized
 from .. import auth as auth_service
+from ..decisions import orchestrator as decision_orchestrator
 
 
 RETENTION = timedelta(days=180)
@@ -91,6 +92,46 @@ class SubmissionResult:
     # Internal-only admission fact for the request-bound Runtime bridge.  It
     # is never true for an active idempotency replay or a status read.
     execution_claimed: bool = False
+
+
+@dataclass(frozen=True)
+class ConversationOptionProjection:
+    """A persisted assistant option belonging to an owner-authorized message."""
+
+    id: str
+    ordinal: int
+    title: str
+    summary: str | None
+    target_plan_item_id: str | None
+    safe_patch: dict[str, Any]
+    plan_revision: int | None
+    planning_facts_revision: int | None
+
+
+@dataclass(frozen=True)
+class ConversationHistoryEntry:
+    """Owner-authorized durable history and its non-secret status projection."""
+
+    id: str
+    sequence: int
+    role: str
+    content: str
+    created_at: datetime
+    selected_plan_item_id: str | None
+    options: tuple[ConversationOptionProjection, ...]
+    submission: SubmissionResult | None
+
+
+@dataclass(frozen=True)
+class HistoricalOptionResolution:
+    """Fresh, owner-scoped result for one persisted assistant option."""
+
+    ready: bool
+    code: str
+    item_id: str | None = None
+    item_title: str | None = None
+    patch: dict[str, Any] | None = None
+    classification: Any | None = None
 
 
 def utcnow() -> datetime:
@@ -326,6 +367,185 @@ def history(
         statement = statement.where(ConversationMessage.sequence < before)
     rows = list(db.scalars(statement.order_by(ConversationMessage.sequence.desc()).limit(limit)).all())
     return list(reversed(rows))
+
+
+def history_projection(
+    db: Session, *, trip_id: str, membership_id: str, conversation_id: str, before: int | None, limit: int,
+    now: datetime | None = None, bearer_token: str | None = None,
+) -> list[ConversationHistoryEntry]:
+    """Read durable history without allowing an API caller to widen owner scope."""
+    rows = history(
+        db, trip_id=trip_id, membership_id=membership_id, conversation_id=conversation_id,
+        before=before, limit=limit, now=now, bearer_token=bearer_token,
+    )
+    user_ids = [row.id for row in rows if row.role == "user"]
+    submissions_by_user: dict[str, ConversationSubmission] = {}
+    if user_ids:
+        submissions_by_user = {
+            submission.user_message_id: submission
+            for submission in db.scalars(
+                select(ConversationSubmission).where(
+                    ConversationSubmission.conversation_id == conversation_id,
+                    ConversationSubmission.trip_id == trip_id,
+                    ConversationSubmission.owner_membership_id == membership_id,
+                    ConversationSubmission.user_message_id.in_(user_ids),
+                )
+            ).all()
+        }
+    assistant_ids = [row.id for row in rows if row.role == "assistant"]
+    options_by_message: dict[str, list[ConversationOptionProjection]] = {}
+    if assistant_ids:
+        for option in db.scalars(
+            select(ConversationMessageOption)
+            .where(ConversationMessageOption.assistant_message_id.in_(assistant_ids))
+            .order_by(ConversationMessageOption.assistant_message_id, ConversationMessageOption.ordinal)
+        ).all():
+            options_by_message.setdefault(option.assistant_message_id, []).append(
+                ConversationOptionProjection(
+                    id=option.id,
+                    ordinal=option.ordinal,
+                    title=option.title,
+                    summary=option.summary,
+                    target_plan_item_id=option.target_plan_item_id,
+                    safe_patch=option.safe_patch,
+                    plan_revision=option.plan_revision,
+                    planning_facts_revision=option.planning_facts_revision,
+                )
+            )
+    return [
+        ConversationHistoryEntry(
+            id=row.id,
+            sequence=row.sequence,
+            role=row.role,
+            content=row.content,
+            created_at=row.created_at,
+            selected_plan_item_id=row.selected_plan_item_id,
+            options=tuple(options_by_message.get(row.id, ())),
+            submission=_result(submissions_by_user[row.id], replayed=True)
+            if row.role == "user" and row.id in submissions_by_user else None,
+        )
+        for row in rows
+    ]
+
+
+def get_submission(
+    db: Session, *, trip_id: str, membership_id: str, conversation_id: str, submission_id: str,
+    now: datetime | None = None, bearer_token: str | None = None,
+) -> SubmissionResult:
+    """Return one owner-scoped Submission status, or the same unavailable result."""
+    conversation = get_conversation(
+        db, trip_id=trip_id, membership_id=membership_id, conversation_id=conversation_id,
+        now=now, bearer_token=bearer_token,
+    )
+    submission = db.scalar(
+        select(ConversationSubmission).where(
+            ConversationSubmission.id == submission_id,
+            ConversationSubmission.conversation_id == conversation.id,
+            ConversationSubmission.owner_membership_id == membership_id,
+            ConversationSubmission.trip_id == trip_id,
+        )
+    )
+    if submission is None:
+        raise ConversationUnavailable()
+    return _result(submission, replayed=True)
+
+
+def resolve_historical_option(
+    db: Session, *, trip_id: str, membership_id: str, conversation_id: str, assistant_message_id: str,
+    option_id: str, now: datetime | None = None, bearer_token: str | None = None,
+) -> HistoricalOptionResolution:
+    """Resolve one persisted option through current ownership and planning facts.
+
+    A browser-supplied option projection is never authoritative.  This boundary
+    reloads the parent Conversation, Assistant Message, and Option together,
+    then rejects stale, deleted, wrong-scope, no-op, and no-longer-current
+    suggestions before returning a fresh deterministic classification.
+    """
+    conversation = _locked_owned_conversation(
+        db, trip_id=trip_id, membership_id=membership_id, conversation_id=conversation_id,
+        now=now or utcnow(), bearer_token=bearer_token,
+    )
+    assistant = db.scalar(
+        select(ConversationMessage).where(
+            ConversationMessage.id == assistant_message_id,
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.role == "assistant",
+            ConversationMessage.state == "completed",
+            ConversationMessage.deleted_at.is_(None),
+        )
+    )
+    if assistant is None:
+        raise ConversationUnavailable()
+    option = db.scalar(
+        select(ConversationMessageOption).where(
+            ConversationMessageOption.id == option_id,
+            ConversationMessageOption.assistant_message_id == assistant.id,
+        )
+    )
+    if option is None:
+        raise ConversationUnavailable()
+    if conversation.scope != "plan_assistant":
+        return HistoricalOptionResolution(False, "historical_option_scope")
+    context_item_id = _item_id_from_key(conversation.context_key)
+    if context_item_id is not None and option.target_plan_item_id != context_item_id:
+        return HistoricalOptionResolution(False, "historical_option_scope")
+    try:
+        normalized = _validated_completion_options(
+            db,
+            trip_id=trip_id,
+            options=[{
+                "title": option.title,
+                "summary": option.summary,
+                "safe_patch": option.safe_patch,
+                "target_plan_item_id": option.target_plan_item_id,
+                "plan_revision": option.plan_revision,
+                "planning_facts_revision": option.planning_facts_revision,
+            }],
+        )[0]
+    except ConversationValidationError:
+        return HistoricalOptionResolution(False, "historical_option_invalid")
+    patch = normalized["safe_patch"]
+    target_item_id = normalized["target_plan_item_id"]
+    if target_item_id is None or not patch:
+        return HistoricalOptionResolution(False, "historical_option_noop")
+    trip = db.scalar(select(Trip).where(Trip.id == trip_id).with_for_update())
+    plans = list(db.scalars(select(Plan).where(Plan.trip_id == trip_id).with_for_update()).all())
+    if trip is None or len(plans) != 1:
+        return HistoricalOptionResolution(False, "historical_option_unavailable")
+    plan = plans[0]
+    if (
+        option.plan_revision is None
+        or option.planning_facts_revision is None
+        or option.plan_revision != plan.revision
+        or option.planning_facts_revision != trip.planning_facts_revision
+    ):
+        return HistoricalOptionResolution(False, "historical_option_stale")
+    item = db.scalar(
+        select(PlanItem).where(
+            PlanItem.id == target_item_id,
+            PlanItem.plan_id == plan.id,
+            PlanItem.settledness != "removed",
+        )
+    )
+    if item is None:
+        return HistoricalOptionResolution(False, "historical_option_unavailable")
+    try:
+        # Classifying is intentionally read-only and therefore does not impose
+        # the writer's pending-decision guard itself.  A historical option is
+        # different: the UI may expose Apply after this call, so fail closed at
+        # selection time rather than deferring the conflict to a later write.
+        decision_orchestrator.require_no_pending_decision(db, item)
+        classification = decision_orchestrator.classify_change(db, item, patch, membership_id)
+    except decision_orchestrator.AlreadyPending:
+        return HistoricalOptionResolution(False, "historical_option_conflict")
+    return HistoricalOptionResolution(
+        True,
+        "historical_option_ready",
+        item_id=item.id,
+        item_title=item.title,
+        patch=patch,
+        classification=classification,
+    )
 
 
 def _next_sequence(db: Session, conversation_id: str) -> int:

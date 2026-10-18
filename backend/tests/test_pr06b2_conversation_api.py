@@ -7,10 +7,21 @@ from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api import main as api
-from app.db.models import Conversation, ConversationMessage, ConversationSubmission, TripMembership, User
+from app.db.models import (
+    ChangeProposal,
+    Conversation,
+    ConversationMessage,
+    ConversationMessageOption,
+    ConversationSubmission,
+    DecisionRound,
+    Plan,
+    TripMembership,
+    User,
+)
 from app.domain import auth
 from app.domain.conversations import service
 from app.jobs import conversation_purge
@@ -127,6 +138,134 @@ def test_history_recovers_owner_pending_submission_after_refresh_without_disclos
             f"/api/trips/{trip_id}/conversations/{conversation_id}/messages", headers=other_headers,
         )
         assert denied.status_code == 404
+
+
+def test_historical_option_resolution_rechecks_owner_parent_and_captured_revisions(db: Session, trip_setup: dict):
+    """A displayed option is usable only through its persisted, current server parent."""
+    trip = trip_setup["trip"]
+    plan = trip_setup["plan"]
+    item = trip_setup["item"]
+    owner = trip_setup["organizer"]
+    now = service.utcnow()
+    owner.status = "joined"
+    conversation = service.create_or_discover(
+        db, trip_id=trip.id, membership_id=owner.id, scope="plan_assistant", context_key="global", now=now,
+    )
+    accepted = service.submit_message(
+        db, trip_id=trip.id, membership_id=owner.id, conversation_id=conversation.id,
+        idempotency_key="stored-option", text="Move it later", selected_plan_item_id=item.id, now=now,
+    )
+    completed = service.complete_submission(
+        db, trip_id=trip.id, membership_id=owner.id, conversation_id=conversation.id,
+        submission_id=accepted.submission_id, attempt_number=accepted.attempt_number, fence=accepted.fence,
+        content="Here is a safe alternative.",
+        options=({
+            "title": "Move it later", "summary": "Avoids the morning.",
+            "safe_patch": {"start_hour": 15.0}, "target_plan_item_id": item.id,
+            "plan_revision": plan.revision, "planning_facts_revision": trip.planning_facts_revision,
+        },),
+        now=now + timedelta(seconds=1),
+    )
+    assert completed.assistant_message_id is not None
+    assistant = db.get(ConversationMessage, completed.assistant_message_id)
+    assert assistant is not None
+    option = db.scalar(select(ConversationMessageOption).where(
+        ConversationMessageOption.assistant_message_id == assistant.id,
+    ))
+    assert option is not None
+    trip_id = trip.id
+    owner_id = owner.id
+    participant_id = trip_setup["participant"].id
+    conversation_id = conversation.id
+    assistant_id = assistant.id
+    option_id = option.id
+    item_id = item.id
+    plan_id = plan.id
+    db.commit()
+
+    with _client(db) as client:
+        owner_headers = _headers(client, db, db.get(TripMembership, owner_id), trip_id)
+        path = (
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages/{assistant_id}"
+            f"/options/{option_id}/resolve"
+        )
+        resolved = client.post(path, headers=owner_headers)
+        assert resolved.status_code == 200
+        assert resolved.json()["ready"] is True
+        assert resolved.json()["item_id"] == item_id
+        assert resolved.json()["patch"] == {"start_hour": 15.0}
+
+        # A resolved stored suggestion must not invite an Apply while the
+        # target is already in either kind of unfinished group decision.
+        round_ = DecisionRound(
+            plan_item_id=item_id,
+            kind="normal",
+            options=[],
+            deadline=now + timedelta(hours=1),
+            status="open",
+            electorate_count=2,
+        )
+        db.add(round_)
+        db.commit()
+        round_conflict = client.post(path, headers=owner_headers)
+        assert round_conflict.status_code == 200
+        assert round_conflict.json() == {
+            "ready": False,
+            "code": "historical_option_conflict",
+            "note": "That option conflicts with a current pending decision.",
+        }
+        db.delete(round_)
+        db.commit()
+
+        proposal = ChangeProposal(
+            plan_item_id=item_id,
+            action_type="edit",
+            before_json={},
+            after_json={},
+            requested_by_membership_id=owner_id,
+            status="waiting_affected_members",
+            deadline=now + timedelta(hours=1),
+        )
+        db.add(proposal)
+        db.commit()
+        proposal_conflict = client.post(path, headers=owner_headers)
+        assert proposal_conflict.status_code == 200
+        assert proposal_conflict.json() == {
+            "ready": False,
+            "code": "historical_option_conflict",
+            "note": "That option conflicts with a current pending decision.",
+        }
+        db.delete(proposal)
+        db.commit()
+
+        db.get(Plan, plan_id).revision += 1
+        db.commit()
+        stale = client.post(path, headers=owner_headers)
+        assert stale.status_code == 200
+        assert stale.json() == {
+            "ready": False,
+            "code": "historical_option_stale",
+            "note": "That suggestion is out of date. Please ask Cadensy for a current option.",
+        }
+
+    with pytest.raises(service.ConversationUnavailable):
+        service.resolve_historical_option(
+            db, trip_id=trip_id, membership_id=participant_id, conversation_id=conversation_id,
+            assistant_message_id=assistant_id, option_id=option_id,
+        )
+    with pytest.raises(service.ConversationUnavailable):
+        service.resolve_historical_option(
+            db, trip_id=trip_id, membership_id=owner_id, conversation_id=conversation_id,
+            assistant_message_id=assistant_id, option_id="f" * 32,
+        )
+    service.delete_conversation(
+        db, trip_id=trip_id, membership_id=owner_id, conversation_id=conversation_id,
+    )
+    with pytest.raises(service.ConversationUnavailable):
+        service.resolve_historical_option(
+            db, trip_id=trip_id, membership_id=owner_id, conversation_id=conversation_id,
+            assistant_message_id=assistant_id, option_id=option_id,
+        )
 
 
 def test_request_bound_runtime_runs_once_for_a_new_claim_not_a_replay(

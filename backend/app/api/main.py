@@ -28,8 +28,6 @@ from ..db.models import (
     ChangeProposal,
     Conversation,
     ConversationMessage,
-    ConversationMessageOption,
-    ConversationSubmission,
     DecisionRound,
     InviteLink,
     Plan,
@@ -456,10 +454,10 @@ def _conversation_metadata(conversation: Conversation) -> dict:
     }
 
 
-def _conversation_submission_metadata(submission: ConversationSubmission) -> dict:
+def _conversation_submission_metadata(submission: conversation_service.SubmissionResult) -> dict:
     """Owner-safe status projection used to restore a pending browser tab."""
     return {
-        "submission_id": submission.id,
+        "submission_id": submission.submission_id,
         "state": submission.state,
         "attempt_number": submission.attempt_number,
         "lease_expires_at": submission.lease_expires_at,
@@ -480,6 +478,32 @@ def _conversation_submission_result(result: conversation_service.SubmissionResul
         "recovery_accepted_fence": result.recovery_accepted_fence,
         "recovery_state": result.recovery_state,
     }
+
+
+def _historical_option_resolution_out(
+    result: conversation_service.HistoricalOptionResolution,
+) -> dict:
+    notes = {
+        "historical_option_scope": "This suggestion is not available in the current conversation context.",
+        "historical_option_invalid": "This saved suggestion can no longer be used safely.",
+        "historical_option_noop": "That option keeps the current plan as-is.",
+        "historical_option_unavailable": "That option is no longer available from the current plan.",
+        "historical_option_stale": "That suggestion is out of date. Please ask Cadensy for a current option.",
+        "historical_option_conflict": "That option conflicts with a current pending decision.",
+    }
+    response = {
+        "ready": result.ready,
+        "code": result.code,
+        "note": notes.get(result.code, "This saved suggestion is not available."),
+    }
+    if result.ready and result.classification is not None:
+        response.update({
+            "item_id": result.item_id,
+            "item_title": result.item_title,
+            "patch": result.patch,
+            "verdict": _classification_out(result.classification),
+        })
+    return response
 
 
 def _durable_conversation_runtime_enabled() -> bool:
@@ -999,46 +1023,20 @@ def conversation_messages(
 ) -> dict:
     _require_scoped_trip(db, me, trip_id)
     try:
-        rows = conversation_service.history(
+        rows = conversation_service.history_projection(
             db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id, before=before, limit=limit,
             bearer_token=_bearer_token(authorization)
         )
-        # ``history`` is already owner-authorized. Bind a Submission only to
-        # its own persisted User Message and repeat the Trip/Membership scope
-        # in the query so an Organizer or another membership cannot discover a
-        # private pending submission through this projection.
-        user_ids = [row.id for row in rows if row.role == "user"]
-        submissions_by_user = {}
-        if user_ids:
-            submissions_by_user = {
-                submission.user_message_id: submission
-                for submission in db.scalars(
-                    select(ConversationSubmission).where(
-                        ConversationSubmission.conversation_id == conversation_id,
-                        ConversationSubmission.trip_id == trip_id,
-                        ConversationSubmission.owner_membership_id == me.id,
-                        ConversationSubmission.user_message_id.in_(user_ids),
-                    )
-                ).all()
-            }
         output = []
         for row in rows:
-            options = []
-            if row.role == "assistant":
-                option_rows = db.scalars(
-                    select(ConversationMessageOption)
-                    .where(ConversationMessageOption.assistant_message_id == row.id)
-                    .order_by(ConversationMessageOption.ordinal)
-                ).all()
-                options = [{"id": option.id, "ordinal": option.ordinal, "title": option.title,
-                            "summary": option.summary, "target_plan_item_id": option.target_plan_item_id,
-                            "safe_patch": option.safe_patch, "plan_revision": option.plan_revision,
-                            "planning_facts_revision": option.planning_facts_revision} for option in option_rows]
             output.append({"id": row.id, "sequence": row.sequence, "role": row.role, "content": row.content,
                            "created_at": row.created_at, "selected_plan_item_id": row.selected_plan_item_id,
-                           "options": options,
-                           "submission": _conversation_submission_metadata(submissions_by_user[row.id])
-                           if row.role == "user" and row.id in submissions_by_user else None})
+                           "options": [{"id": option.id, "ordinal": option.ordinal, "title": option.title,
+                                        "summary": option.summary, "target_plan_item_id": option.target_plan_item_id,
+                                        "safe_patch": option.safe_patch, "plan_revision": option.plan_revision,
+                                        "planning_facts_revision": option.planning_facts_revision} for option in row.options],
+                           "submission": _conversation_submission_metadata(row.submission)
+                           if row.submission is not None else None})
         db.commit()
         return {"messages": output, "next_before": rows[0].sequence if rows else None}
     except conversation_service.ConversationError as error:
@@ -1057,19 +1055,43 @@ def get_conversation_submission(
 ) -> dict:
     _require_scoped_trip(db, me, trip_id)
     try:
-        conversation_service.get_conversation(db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id,
-                                              bearer_token=_bearer_token(authorization))
-        submission = db.scalar(select(ConversationSubmission).where(
-            ConversationSubmission.id == submission_id, ConversationSubmission.conversation_id == conversation_id,
-            ConversationSubmission.owner_membership_id == me.id, ConversationSubmission.trip_id == trip_id,
-        ))
-        if submission is None:
-            raise conversation_service.ConversationUnavailable()
+        submission = conversation_service.get_submission(
+            db, trip_id=trip_id, membership_id=me.id, conversation_id=conversation_id, submission_id=submission_id,
+            bearer_token=_bearer_token(authorization),
+        )
         db.commit()
-        return _conversation_submission_result(conversation_service.SubmissionResult(
-            submission.id, submission.state, submission.attempt_number, submission.fence,
-            submission.lease_expires_at, True, submission.assistant_message_id
-        ))
+        return _conversation_submission_result(submission)
+    except conversation_service.ConversationError as error:
+        db.rollback()
+        _raise_conversation_error(error)
+
+
+@app.post(
+    "/api/trips/{trip_id}/conversations/{conversation_id}/messages/{assistant_message_id}/options/{option_id}/resolve"
+)
+def resolve_historical_conversation_option(
+    trip_id: str,
+    conversation_id: str,
+    assistant_message_id: str,
+    option_id: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Freshly authorize and classify one persisted assistant suggestion."""
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        result = conversation_service.resolve_historical_option(
+            db,
+            trip_id=trip_id,
+            membership_id=me.id,
+            conversation_id=conversation_id,
+            assistant_message_id=assistant_message_id,
+            option_id=option_id,
+            bearer_token=_bearer_token(authorization),
+        )
+        db.commit()
+        return _historical_option_resolution_out(result)
     except conversation_service.ConversationError as error:
         db.rollback()
         _raise_conversation_error(error)

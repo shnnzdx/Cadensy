@@ -408,6 +408,17 @@ def _guard_not_pending(db: Session, item: PlanItem) -> None:
         )
 
 
+def require_no_pending_decision(db: Session, item: PlanItem) -> None:
+    """Read-only decision-window guard shared by safe preview consumers.
+
+    A persisted assistant option must not become actionable while the same plan
+    item has an unfinished group decision.  Keeping this check separate from
+    ``classify_change`` preserves that function's pure classification contract;
+    writers continue to enforce the identical guard inside ``propose_change``.
+    """
+    _guard_not_pending(db, item)
+
+
 # Generated itineraries do not always carry a duration. The planner already
 # treats a missing one as 90 minutes, so overlap detection uses the same
 # assumption instead of silently skipping the block it cannot measure.

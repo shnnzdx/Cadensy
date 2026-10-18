@@ -51,10 +51,13 @@ an assistant result or enable the gate.
 `advisory` display object containing its ID, ordinal, assistant-parent rendering
 context, target item, safe display patch, and captured revisions. It exports no
 Apply/mutation operation. The Plan drawer keeps the option attached to its persisted
-assistant message, then selection verifies the target still exists and calls the
-existing fresh `classify` path. Only its fresh verdict can expose the existing
-protected `submitChange`/confirmation flow. A missing/deleted target refuses safely;
-selection never auto-applies an old patch.
+assistant message, then selection calls the owner-scoped durable resolver for that
+exact Conversation, Assistant Message, and Option. The resolver re-authorizes the
+owner and parent chain, validates scope/target/patch, requires captured revisions to
+match the current Plan and facts, and rejects an open Round or waiting Proposal
+before returning a fresh classification. Only a ready server result can expose the
+existing protected `submitChange`/confirmation flow. A missing, deleted, stale, or
+decision-conflicted target refuses safely; selection never auto-applies an old patch.
 
 ## Deletion, retention, and privacy
 
@@ -159,11 +162,15 @@ Trip build completed with 60 Vite modules.
 The server supplies Options only under their assistant message in
 `conversation_messages`. `advisoryCandidatesFromPersisted` retains server option ID,
 ordinal, target, captured revisions, and safe display patch without an Apply method.
-`useAssistantChangeRequestFlow.selectCandidateOption` requires the current target in
-the active plan and invokes `app.classify`; `TripAppState.classify` reaches the
-existing classification/Preview contract. Only `applyProposal` invokes the existing
-protected `submitChange` path after user action. Deleted targets refuse; there is no
-cross-conversation lookup or direct Plan mutation.
+`useAssistantChangeRequestFlow.selectCandidateOption` calls
+`POST /api/trips/{trip_id}/conversations/{conversation_id}/messages/{assistant_message_id}/options/{option_id}/resolve`.
+The domain resolver verifies the persisted parent/owner/scope, target and captured
+revisions, then applies a read-only pending-decision guard before fresh
+classification. It returns a safe no-op/stale/unavailable/conflict note rather than
+an executable candidate when that proof fails. Only `applyProposal` invokes the
+existing protected `submitChange` path after user action. There is no client replay
+of the stored patch to a generic classify endpoint, cross-conversation lookup, or
+direct Plan mutation.
 
 ### Browser matrix and final status
 
@@ -362,7 +369,7 @@ browser lost Trip-X Conversation access (403) after reload, while `/api/account`
 and a GET of the pre-authorized unrelated Trip both returned 200. Quarantine did
 not settle or apply a decision.
 
-### J08 — persisted historical option and fresh classification
+### J08 — persisted historical option and owner-scoped revalidation
 
 The participant used the real Plan item assistant drawer. `[E2E-OPTION]` crossed
 the existing coordinator and `RevisionBracketedPreview`, creating an Assistant
@@ -374,9 +381,10 @@ The Organizer then used the existing protected booking API for that target with
 the option's captured plan revision and an idempotency key. It returned 200; the
 read-only database assertion proved the authoritative Plan revision advanced to
 3. On browser reload, selecting the historical option issued the existing
-`POST /api/plans/items/{item_id}/classify` call (200). No `/changes` request was
-issued and the Plan stayed at revision 3. Thus the stored option is advisory:
-selection performs fresh classification and cannot directly Apply.
+owner-scoped durable resolve call (200), which returned the safe stale-option note.
+No `/changes` request was issued and the Plan stayed at revision 3. Thus the stored
+option is advisory: selection rechecks its owner, parent, revisions, and decision
+window before it can ever expose protected Apply.
 
 ### Strengthened existing journeys
 
@@ -402,7 +410,7 @@ selection performs fresh classification and cannot directly Apply.
 | J05 | PASS | Held Runtime completion is fenced by protected quarantine; no assistant/option commits. |
 | J06 | PASS | Exact idempotency-key before/after assertion. |
 | J07 | PASS | Personal/global/item identities, messages, refresh, and owner isolation. |
-| J08 | PASS | Coordinator-persisted option, protected revision change, fresh classify, no direct Apply. |
+| J08 | PASS | Coordinator-persisted option, protected revision change, owner-scoped stale rejection, no direct Apply. |
 | J09 | PASS | Delete persists across browser reload. |
 | J10 | PASS | Actual legacy route works without a durable write; durable UI has no fallback. |
 | Runtime-off | PASS | Saved history loads; composer disabled; no legacy chat fallback. |

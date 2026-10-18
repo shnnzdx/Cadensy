@@ -67,6 +67,10 @@ export const createDurableConversationClient = ({ requestJson, tripId }) => {
     }).toString()}`),
     get: conversationId => requestJson(`${root}/${encodeURIComponent(conversationId)}`),
     messages,
+    resolveOption: (conversationId, assistantMessageId, optionId) => requestJson(
+      `${root}/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(assistantMessageId)}/options/${encodeURIComponent(optionId)}/resolve`,
+      { method: 'POST' },
+    ),
     status: async (conversationId, submissionId) => normalizeSubmission(await requestJson(`${root}/${encodeURIComponent(conversationId)}/submissions/${encodeURIComponent(submissionId)}`)),
     submit: async (conversationId, { text, selectedPlanItemId = null, idempotencyKey }) => normalizeSubmission(await requestJson(
       `${root}/${encodeURIComponent(conversationId)}/messages`, {

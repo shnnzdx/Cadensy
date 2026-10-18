@@ -43,8 +43,6 @@ const assistantErrorText = err => (
         : 'I could not reach the backend. Try again in a moment.'
 )
 
-const hasExecutablePatch = option => Boolean(option?.patch && Object.keys(option.patch).length)
-
 const removeRequestPatch = () => ({ remove: true })
 
 const isRemoveRequest = text => /\b(remove|delete|clear)\b/i.test(text || '')
@@ -124,49 +122,39 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
   const dismissProposal = id => updateMessage(id, { proposedChange: null, applyError: '', selectionNote: '' })
 
   const selectCandidateOption = async (message, option) => {
-    const targetItem = itemById[option.item_id] || (item.id === option.item_id ? item : null)
-    if (!targetItem) {
-      updateMessage(message.id, {
-        selectedCandidateId: option.id,
-        proposedChange: null,
-        classifyingCandidate: false,
-        selectionNote: '',
-        applyError: 'That option is no longer available from the current plan.',
-      })
-      return
-    }
-
     updateMessage(message.id, {
       selectedCandidateId: option.id,
       proposedChange: null,
       applied: false,
       applyError: '',
       selectionNote: '',
-      classifyingCandidate: hasExecutablePatch(option),
+      classifyingCandidate: true,
     })
 
-    if (!hasExecutablePatch(option)) {
-      updateMessage(message.id, {
-        classifyingCandidate: false,
-        selectionNote: 'That option keeps the Current Plan as-is.',
-      })
-      return
-    }
-
     try {
-      const verdict = await app.classify({
-        item: targetItem,
-        actionType: mode,
-        request: message.request,
-        patch: option.patch || {},
+      const resolved = await durable.resolveOption({
+        assistantMessageId: message.id,
+        optionId: option.id,
       })
+      if (!resolved.ready) {
+        updateMessage(message.id, {
+          classifyingCandidate: false,
+          selectionNote: resolved.note,
+        })
+        return
+      }
       updateMessage(message.id, {
         classifyingCandidate: false,
         proposedChange: {
-          item_id: option.item_id,
-          item_title: targetItem.title || option.title,
-          patch: option.patch || {},
-          verdict,
+          item_id: resolved.item_id,
+          item_title: resolved.item_title,
+          patch: resolved.patch,
+          verdict: resolved.verdict,
+          resolvedOptions: [{
+            ...option,
+            item_id: resolved.item_id,
+            patch: resolved.patch,
+          }],
         },
       })
     } catch (err) {
@@ -188,7 +176,7 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
         request: message.request,
         verdict: proposedChange.verdict,
         patch: proposedChange.patch,
-        options: roundAlternativesFrom(message.candidateOptions, targetItem.id),
+        options: roundAlternativesFrom(proposedChange.resolvedOptions, targetItem.id),
       })
       if (!outcome) {
         updateMessage(message.id, { applying: false })

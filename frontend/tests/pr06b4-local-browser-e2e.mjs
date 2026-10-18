@@ -266,7 +266,9 @@ try {
     const persisted = histories.find(({ history }) => history.body.messages.flatMap(message => message.options || []).some(option => option.title === 'Move this activity to 3:00 PM'));
     assert.ok(persisted, 'historical option must be returned by the durable history contract');
     const itemConversation = persisted.conversation;
-    const persistedOption = persisted.history.body.messages.flatMap(message => message.options || []).find(option => option.title === 'Move this activity to 3:00 PM');
+    const persistedAssistant = persisted.history.body.messages.find(message => (message.options || []).some(option => option.title === 'Move this activity to 3:00 PM'));
+    assert.ok(persistedAssistant, 'historical option must retain its assistant parent identity');
+    const persistedOption = persistedAssistant.options.find(option => option.title === 'Move this activity to 3:00 PM');
     assert.ok(persistedOption, 'historical option must be returned by the durable history contract');
     fixtureAssert('assert-option', itemConversation.id, persistedOption.target_plan_item_id);
     const booked = await api(second.token, `/api/plans/items/${persistedOption.target_plan_item_id}/booking`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'e2e-j08-booking', 'X-Expected-Plan-Revision': String(persistedOption.plan_revision) }, body: JSON.stringify({ booked: true }) });
@@ -277,15 +279,18 @@ try {
     const optionButton = member.frame.getByRole('button', { name: /Move this activity to 3:00 PM/i });
     await optionButton.waitFor({ state: 'visible' });
     const callsBeforeSelection = member.calls.filter(call => call.method === 'POST' && call.url.includes('/changes')).length;
-    const classifyResponse = member.page.waitForResponse(response => response.request().method() === 'POST' && response.url().includes(`/api/plans/items/${persistedOption.target_plan_item_id}/classify`));
+    const resolveResponse = member.page.waitForResponse(response => response.request().method() === 'POST' && response.url().includes(
+      `/api/trips/${fixture.trip_id}/conversations/${itemConversation.id}/messages/${persistedAssistant.id}/options/${persistedOption.id}/resolve`,
+    ));
     await optionButton.click();
-    assert.equal((await classifyResponse).status(), 200);
+    assert.equal((await resolveResponse).status(), 200);
     await member.frame.getByText('Checking that option...').waitFor({ state: 'hidden', timeout: 20_000 });
+    await member.frame.getByText('That suggestion is out of date. Please ask Cadensy for a current option.').waitFor({ state: 'visible' });
     const callsAfterSelection = member.calls.filter(call => call.method === 'POST' && call.url.includes('/changes')).length;
     assert.equal(callsAfterSelection, callsBeforeSelection, 'selecting a historical option must not directly Apply');
     const planAfterSelection = fixtureAssert('assert-plan-revision', fixture.plan_id, persistedOption.plan_revision);
     assert.equal(planAfterSelection.current_revision, planAfter.current_revision);
-    report('J08', 'PASS', 'coordinator-persisted Option captures revisions; historical selection performs fresh classify only and cannot directly Apply');
+    report('J08', 'PASS', 'coordinator-persisted Option captures revisions; owner-scoped resolution rejects the stale option and cannot directly Apply');
 
     // J05: the same legitimate participant is fenced at completion by a real protected quarantine transaction.
     const quarantineConversation = (await browserApi(member, `/api/trips/${fixture.trip_id}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'personal', context_key: 'personal' }) })).body;
