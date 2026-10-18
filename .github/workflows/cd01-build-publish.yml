@@ -42,6 +42,11 @@ jobs:
     # can publish artifacts but contains no ECS, RDS, or migration operation.
     environment: Main
     timeout-minutes: 35
+    # This is an artifact contract only. It is deliberately separate from the
+    # production-release schema preflight, which remains fail-closed at the
+    # deployed c2a4 baseline until a dedicated PR-06B migration is approved.
+    env:
+      BUILD_ALEMBIC_HEAD: b7d3a1e9c642
 
     steps:
       - name: Select the CI-approved main source
@@ -81,6 +86,7 @@ jobs:
           test -f backend/Dockerfile.r5-migration-runner
           test -f backend/alembic.ini
           test -f backend/alembic/versions/c2a4b6d8e0f1_pr05b_phase1_trip_ledger_schema.py
+          test -f backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py
 
       - name: Configure AWS credentials from the Main environment
         uses: aws-actions/configure-aws-credentials@v6
@@ -146,11 +152,11 @@ jobs:
         run: |
           set -euo pipefail
           migration_image="${ECR_URI}:${SOURCE_SHA}-migration"
-          docker run --rm --network none "${migration_image}" sh -eu -c '
+          docker run --rm --network none --env BUILD_ALEMBIC_HEAD "${migration_image}" sh -eu -c '
             test ! -f /app/.env
             python -m pip check
             test -f alembic.ini
-            test "$(python -m alembic -c alembic.ini heads | awk "{print \$1}")" = "c2a4b6d8e0f1"
+            test "$(python -m alembic -c alembic.ini heads | awk "{print \$1}")" = "${BUILD_ALEMBIC_HEAD}"
             python -c "import app.db.legacy_schema_compat"
           '
 

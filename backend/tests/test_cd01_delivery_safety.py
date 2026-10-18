@@ -136,6 +136,22 @@ def test_cd01_workflows_are_digest_pinned_manual_for_production_and_never_migrat
         assert forbidden not in release_script
 
 
+def test_pr06b_build_artifacts_require_the_reviewed_head_without_authorizing_release():
+    """Building a PR-06B image is not a database migration or release approval."""
+    build = _workflow(BUILD_WORKFLOW)
+    release = _workflow(RELEASE_WORKFLOW)
+    build_job = build["jobs"]["build-and-push"]
+    build_script = _workflow_script(build)
+
+    assert build_job["env"]["BUILD_ALEMBIC_HEAD"] == "b7d3a1e9c642"
+    assert 'backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py' in build_script
+    assert "docker run --rm --network none --env build_alembic_head" in build_script
+    assert '"${build_alembic_head}"' in build_script
+    # Production still fails closed until a separately approved operation has
+    # migrated the live schema and supplied the required recovery evidence.
+    assert release["env"]["APPROVED_ALEMBIC_HEAD"] == "c2a4b6d8e0f1"
+
+
 def test_cd01_workflows_do_not_reuse_provisioning_or_mutable_latest_tags():
     build_script = _workflow_script(_workflow(BUILD_WORKFLOW))
     release_script = _workflow_script(_workflow(RELEASE_WORKFLOW))
