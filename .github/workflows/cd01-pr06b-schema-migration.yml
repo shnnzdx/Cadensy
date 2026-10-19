@@ -1,0 +1,203 @@
+name: CD-01 — PR-06B Manually Approved Production Schema Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed main commit whose immutable migration image will run
+        required: true
+        type: string
+      migration_runner_digest:
+        description: Immutable sha256 digest built for source_sha
+        required: true
+        type: string
+      migration_mode:
+        description: Initial chain from c2, or separately approved recovery from a recorded PR-06B checkpoint
+        required: true
+        default: initial
+        type: choice
+        options: [initial, recovery]
+      expected_start_revision:
+        description: Exact catalog-verified Alembic revision at which this execution will begin
+        required: true
+        default: c2a4b6d8e0f1
+        type: choice
+        options: [c2a4b6d8e0f1, 9db6f1a1041b, 7a6c8e1d5f04]
+      migration_owner:
+        description: Named operator accountable for this one execution
+        required: true
+        type: string
+      backup_restore_evidence_ref:
+        description: Approved backup and restore-readiness evidence reference (no secret values)
+        required: true
+        type: string
+      maintenance_window_ref:
+        description: Approved maintenance/cutover or interruption-policy reference
+        required: true
+        type: string
+      confirmation:
+        description: Type EXECUTE_PR06B_SCHEMA_MIGRATION after reviewing the inputs
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cd01-pr06b-schema-migration-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-backend
+  ECS_CLUSTER: tripsync-cluster
+  ECS_SERVICE: tripsync-backend-service
+  CONTAINER_NAME: tripsync-backend
+  OLD_ALEMBIC_HEAD: c2a4b6d8e0f1
+  CHECKPOINT_ALEMBIC_HEAD: 9db6f1a1041b
+  PR06B_INDEX_HEAD: 7a6c8e1d5f04
+  PR06B_ALEMBIC_HEAD: b7d3a1e9c642
+
+jobs:
+  assert-migration-approval:
+    name: Require a protected Gate M approval environment
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'EXECUTE_PR06B_SCHEMA_MIGRATION'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless Main has required reviewers and evidence references are present
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ inputs.migration_owner }}
+          BACKUP_EVIDENCE: ${{ inputs.backup_restore_evidence_ref }}
+          WINDOW_EVIDENCE: ${{ inputs.maintenance_window_ref }}
+          MODE: ${{ inputs.migration_mode }}
+          EXPECTED_START: ${{ inputs.expected_start_revision }}
+        run: |
+          set -euo pipefail
+          test -n "${OWNER}"
+          test -n "${BACKUP_EVIDENCE}"
+          test -n "${WINDOW_EVIDENCE}"
+          test "${MODE}" = initial || test "${MODE}" = recovery
+          if [ "${MODE}" = initial ]; then
+            test "${EXPECTED_START}" = "${OLD_ALEMBIC_HEAD}"
+          else
+            test "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" || test "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}"
+          fi
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/Main" \
+            > /tmp/main-environment.json
+          jq -e 'any(.protection_rules[]?; .type == "required_reviewers")' /tmp/main-environment.json >/dev/null
+
+  migrate:
+    name: Execute one approved PR-06B schema migration
+    needs: assert-migration-approval
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: Main
+    timeout-minutes: 35
+    steps:
+      - name: Check out reviewed release tooling from main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate immutable Gate M inputs
+        id: inputs
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          MODE: ${{ inputs.migration_mode }}
+          EXPECTED_START: ${{ inputs.expected_start_revision }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          if [ "${MODE}" = initial ] && [ "${EXPECTED_START}" = "${OLD_ALEMBIC_HEAD}" ]; then
+            echo "expected_start=${EXPECTED_START}" >> "${GITHUB_OUTPUT}"
+          elif [ "${MODE}" = recovery ] && { [ "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" ] || [ "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}" ]; }; then
+            echo "expected_start=${EXPECTED_START}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::error::unknown migration mode"
+            exit 1
+          fi
+          echo "migration_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure AWS credentials from the approved Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify account, provenance, active service, and fail-closed capacity
+        id: current
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
+          aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${MIGRATION_DIGEST}" --output json > /tmp/migration-image.json
+          jq -e --arg tag "${SOURCE_SHA}-migration" '.imageDetails[0].imageTags | index($tag)' /tmp/migration-image.json >/dev/null
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/service.json
+          jq -e '.services | length == 1 and .[0].status == "ACTIVE" and .[0].desiredCount >= 1 and .[0].runningCount >= 1' /tmp/service.json >/dev/null
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/service.json)"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/current-task-definition.json
+          echo "previous_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run bounded migration and read-only catalog verification
+        id: migrate
+        shell: bash
+        env:
+          MIGRATION_IMAGE: ${{ steps.inputs.outputs.migration_image }}
+        run: |
+          set -euo pipefail
+          python scripts/cd01/prepare_ecs_task_definition.py \
+            --input /tmp/current-task-definition.json \
+            --output /tmp/pr06b-migration-task-definition.json \
+            --image "${MIGRATION_IMAGE}"
+          migration_task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/pr06b-migration-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          test -n "${migration_task_definition}" && test "${migration_task_definition}" != "None"
+          network_configuration="$(jq -c '{awsvpcConfiguration: .services[0].networkConfiguration.awsvpcConfiguration}' /tmp/service.json)"
+          command="python scripts/cd01/run_pr06b_schema_migration.py --expected-start '${{ steps.inputs.outputs.expected_start }}' --target '${PR06B_ALEMBIC_HEAD}' --timeout-seconds 900 && python scripts/cd01/verify_pr06b_schema.py --expected-head '${PR06B_ALEMBIC_HEAD}'"
+          overrides="$(jq -nc --arg name "${CONTAINER_NAME}" --arg command "${command}" '{containerOverrides: [{name: $name, command: ["sh", "-eu", "-c", $command]}]}')"
+          task_arn="$(aws ecs run-task --cluster "${ECS_CLUSTER}" --launch-type FARGATE --platform-version LATEST --task-definition "${migration_task_definition}" --network-configuration "${network_configuration}" --overrides "${overrides}" --query 'tasks[0].taskArn' --output text)"
+          test -n "${task_arn}" && test "${task_arn}" != "None"
+          aws ecs wait tasks-stopped --cluster "${ECS_CLUSTER}" --tasks "${task_arn}"
+          exit_code="$(aws ecs describe-tasks --cluster "${ECS_CLUSTER}" --tasks "${task_arn}" --query "tasks[0].containers[?name=='${CONTAINER_NAME}'].exitCode | [0]" --output text)"
+          test "${exit_code}" = "0"
+          echo "task=${task_arn}" >> "${GITHUB_OUTPUT}"
+          echo "status=verified-pr06b-head" >> "${GITHUB_OUTPUT}"
+
+      - name: Write Gate M evidence summary
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## CD-01 Gate M — PR-06B production schema migration'
+            echo
+            echo "- Git commit: ${SOURCE_SHA}"
+            echo "- Migration runner: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}"
+            echo "- Expected start revision: ${{ steps.inputs.outputs.expected_start }}"
+            echo "- Verified final revision: ${PR06B_ALEMBIC_HEAD}"
+            echo "- Migration task: ${{ steps.migrate.outputs.task }}"
+            echo "- Status: ${{ steps.migrate.outputs.status }}"
+            echo "- Owner: ${{ inputs.migration_owner }}"
+            echo "- Backup/restore evidence reference: ${{ inputs.backup_restore_evidence_ref }}"
+            echo "- Maintenance/interruption reference: ${{ inputs.maintenance_window_ref }}"
+            echo '- This workflow does not update ECS service tasks or enable a Runtime/Provider.'
+            echo '- Failure requires evidence preservation and a new Gate M approval; no automatic retry, stamp, or downgrade occurs.'
+          } >> "${GITHUB_STEP_SUMMARY}"

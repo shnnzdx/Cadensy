@@ -15,6 +15,10 @@ on:
         description: Migration-runner sha256 digest produced by the same build
         required: true
         type: string
+      migration_run_id:
+        description: Successful CD-01 Gate M workflow-run ID for this exact source SHA
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -31,7 +35,7 @@ env:
   ECS_CLUSTER: tripsync-cluster
   ECS_SERVICE: tripsync-backend-service
   CONTAINER_NAME: tripsync-backend
-  APPROVED_ALEMBIC_HEAD: c2a4b6d8e0f1
+  APPROVED_ALEMBIC_HEAD: b7d3a1e9c642
   PRODUCTION_API_BASE_URL: https://app.cadensy.top
 
 jobs:
@@ -78,11 +82,13 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
         run: |
           set -euo pipefail
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${RUNTIME_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${MIGRATION_RUN_ID}" =~ ^[0-9]+$ ]]
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
           echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
@@ -102,6 +108,8 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
@@ -111,9 +119,24 @@ jobs:
             aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${digest}" --output json > "/tmp/${kind}-image.json"
           done
           jq -e --arg tag "${SOURCE_SHA}" '.imageDetails[0].imageTags | index($tag)' /tmp/runtime-image.json >/dev/null
-          jq -e --arg prefix "${SOURCE_SHA}-migration" '.imageDetails[0].imageTags[] | startswith($prefix)' /tmp/migration-image.json >/dev/null
+          jq -e --arg tag "${SOURCE_SHA}-migration" '.imageDetails[0].imageTags | index($tag)' /tmp/migration-image.json >/dev/null
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${MIGRATION_RUN_ID}" \
+            > /tmp/gate-m-run.json
+          jq -e --arg source "${SOURCE_SHA}" \
+            '.conclusion == "success" and .head_sha == $source and .head_branch == "main" and .path == ".github/workflows/cd01-pr06b-schema-migration.yml"' \
+            /tmp/gate-m-run.json >/dev/null
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${MIGRATION_RUN_ID}/jobs?per_page=100" \
+            > /tmp/gate-m-jobs.json
+          jq -e '.jobs | any(.[]; .name == "Execute one approved PR-06B schema migration" and .conclusion == "success")' \
+            /tmp/gate-m-jobs.json >/dev/null
           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/service.json
-          jq -e '.services | length == 1 and .[0].status == "ACTIVE"' /tmp/service.json >/dev/null
+          jq -e '.services | length == 1 and .[0].status == "ACTIVE" and .[0].desiredCount >= 1 and .[0].runningCount >= 1' /tmp/service.json >/dev/null
           current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/service.json)"
           aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/current-task-definition.json
           previous_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
@@ -135,7 +158,7 @@ jobs:
             --image "${MIGRATION_IMAGE}"
           migration_task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/migration-preflight-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
           network_configuration="$(jq -c '{awsvpcConfiguration: .services[0].networkConfiguration.awsvpcConfiguration}' /tmp/service.json)"
-          command="current=\$(python -m alembic -c alembic.ini current | awk 'NR==1 {print \$1}'); head=\$(python -m alembic -c alembic.ini heads | awk 'NR==1 {print \$1}'); test -n \"\$current\"; test \"\$current\" = \"\$head\"; test \"\$head\" = \"${APPROVED_ALEMBIC_HEAD}\""
+          command="python scripts/cd01/verify_pr06b_schema.py --expected-head '${APPROVED_ALEMBIC_HEAD}'"
           overrides="$(jq -nc --arg name "${CONTAINER_NAME}" --arg command "${command}" '{containerOverrides: [{name: $name, command: ["sh", "-eu", "-c", $command]}]}')"
           task_arn="$(aws ecs run-task --cluster "${ECS_CLUSTER}" --launch-type FARGATE --platform-version LATEST --task-definition "${migration_task_definition}" --network-configuration "${network_configuration}" --overrides "${overrides}" --query 'tasks[0].taskArn' --output text)"
           test -n "${task_arn}" && test "${task_arn}" != "None"
@@ -178,6 +201,12 @@ jobs:
           set -euo pipefail
           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
           test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${{ steps.taskdef.outputs.arn }}"
+          aws ecs describe-task-definition --task-definition "${{ steps.taskdef.outputs.arn }}" --output json > /tmp/final-task-definition.json
+          jq -e --arg name "${CONTAINER_NAME}" '
+            .taskDefinition.containerDefinitions[] | select(.name == $name) | .environment as $env |
+            ["DEV_ALLOW_MEMBERSHIP_HEADER", "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED", "CADENSY_E2E_FAKE_RUNTIME"] |
+            all(.[]; . as $required | any($env[]?; .name == $required and .value == "0"))
+          ' /tmp/final-task-definition.json >/dev/null
           jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/target-groups.txt
           test -s /tmp/target-groups.txt
           while read -r target_group; do
@@ -195,6 +224,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           MIGRATION_DIGEST: ${{ inputs.migration_runner_digest }}
+          MIGRATION_RUN_ID: ${{ inputs.migration_run_id }}
         run: |
           set -euo pipefail
           {
@@ -203,6 +233,7 @@ jobs:
             echo "- Git commit: ${SOURCE_SHA}"
             echo "- Runtime image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
             echo "- Migration runner: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}"
+            echo "- Gate M workflow run: ${MIGRATION_RUN_ID}"
             echo "- Migration status: ${{ steps.schema.outputs.status }} (read-only preflight task ${{ steps.schema.outputs.preflight_task }})"
             echo "- Previous task definition: ${{ steps.current.outputs.previous_task_definition }}"
             echo "- Previous image: ${{ steps.current.outputs.previous_image }}"
@@ -210,6 +241,6 @@ jobs:
             echo "- ECS deployment: stable with circuit-breaker rollback enabled"
             echo "- ALB health: ${{ steps.verify.outputs.alb_health }}"
             echo "- API smoke test: ${{ steps.verify.outputs.api_smoke }}"
-            echo '- Feature-gate posture: APP_ENV=production; DEV_ALLOW_MEMBERSHIP_HEADER=0; all R5 protected gates explicitly 0.'
+            echo '- Feature-gate posture: APP_ENV=production; scheduler disabled; DEV_ALLOW_MEMBERSHIP_HEADER=0; durable Runtime=0; E2E fake Runtime=0; all R5 protected gates explicitly 0.'
             echo '- Rollback reference: the previous task definition above. Do not roll back application code until forward-schema compatibility is reviewed; never run an automatic database downgrade.'
           } >> "${GITHUB_STEP_SUMMARY}"
