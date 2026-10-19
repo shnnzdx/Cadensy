@@ -38,6 +38,13 @@ DEFAULT_OFF_GATES = (
     "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES",
     "CADENSY_B2E_PROTECTED_ORGANIZER_WRITES",
     "CADENSY_B3_PROTECTED_PREVIEW_APPLY",
+    # PR-06B durable conversations remain storage-only in Round 1. The
+    # deployment helper makes this a task-definition invariant rather than
+    # relying on the application's safe default.
+    "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED",
+    # This exists only for the disposable browser harness. Pin it off before
+    # process startup as defence in depth.
+    "CADENSY_E2E_FAKE_RUNTIME",
 )
 
 # Fields returned by describe-task-definition that are accepted by
@@ -113,6 +120,14 @@ def _validate_live_contract(task_definition: dict[str, Any], container: dict[str
         entry.get("name") == "DATABASE_URL" and entry.get("valueFrom") for entry in secrets
     ):
         _fail("The application container must retain a DATABASE_URL secret reference.")
+    if not any(
+        entry.get("name") == "CONVERSATION_SUBMISSION_HMAC_KEY" and entry.get("valueFrom")
+        for entry in secrets
+    ):
+        _fail(
+            "The application container must retain a CONVERSATION_SUBMISSION_HMAC_KEY "
+            "secret reference before a PR-06B release."
+        )
     _, environment = _environment_map(container)
     if "DATABASE_URL" in environment:
         _fail("DATABASE_URL must be an ECS secret reference, not plaintext environment data.")

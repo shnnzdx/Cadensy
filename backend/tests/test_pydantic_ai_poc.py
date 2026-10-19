@@ -307,7 +307,15 @@ def test_cooperative_pydantic_run_is_cancelled_by_the_pr01c_request_deadline(
 
     assert started.is_set()
     assert _wait_until(cancelled.is_set)
-    assert lifecycle_events[0]["phase"] == "request_timeout"
+    # The outer Future wait can expire first (``request_timeout``), or the
+    # cooperative worker can observe the same request deadline first
+    # (``request_deadline_exceeded``). Both paths cancel the coroutine, raise
+    # AgentRequestDeadlineExceeded, and are normalized to request_timeout in
+    # telemetry. Which scheduler boundary wins is not product behaviour.
+    assert lifecycle_events[0]["phase"] in {
+        "request_timeout",
+        AgentRequestDeadlineExceeded.kind,
+    }
 
 
 def test_non_cooperative_pydantic_run_is_discarded_after_the_pr01c_deadline(

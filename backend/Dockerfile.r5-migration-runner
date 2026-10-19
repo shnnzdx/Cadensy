@@ -18,6 +18,8 @@ COPY alembic.ini .
 COPY alembic ./alembic
 COPY app ./app
 COPY data ./data
+COPY scripts/cd01/run_pr06b_schema_migration.py ./scripts/cd01/run_pr06b_schema_migration.py
+COPY scripts/cd01/verify_pr06b_schema.py ./scripts/cd01/verify_pr06b_schema.py
 
 USER appuser
 
