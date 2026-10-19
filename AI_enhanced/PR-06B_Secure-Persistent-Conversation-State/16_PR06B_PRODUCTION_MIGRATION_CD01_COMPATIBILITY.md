@@ -48,13 +48,13 @@ TLS enforcement, restore success, least-privilege sufficiency, and production Al
 
 ### Gate M — production schema migration
 
-Gate M is `workflow_dispatch` only, has a separate non-cancelling concurrency group, and requires `Main` Environment approval. It rejects execution unless: (1) caller is on `main`, types `EXECUTE_PR06B_SCHEMA_MIGRATION`, and reviewer protection exists; (2) named owner, backup/restore reference, and maintenance/interruption reference are present; (3) source SHA belongs to `origin/main`, runner digest/tag is immutable, and account/region match; (4) service is active with `desiredCount >= 1` and `runningCount >= 1`; (5) start revision is exactly `c2a4…`, `9db…`, or `7a6…` under the corresponding initial/recovery policy; and (6) the task retains `DATABASE_URL` and `CONVERSATION_SUBMISSION_HMAC_KEY` secret references, production app env, and disabled scheduler.
+Gate M is `workflow_dispatch` only, has a separate non-cancelling concurrency group, and requires `Main` Environment approval. It rejects execution unless: (1) caller is on `main`, types `EXECUTE_PR06B_SCHEMA_MIGRATION`, and reviewer protection exists; (2) named owner, backup/restore reference, and maintenance/interruption reference are present; (3) `actions/checkout` resolves exactly to the supplied source SHA, that SHA belongs to `origin/main`, its required release/migration files exist, runner digest/tag is immutable, and account/region match; (4) service is active with `desiredCount >= 1` and `runningCount >= 1`; (5) start revision is exactly `c2a4…`, `9db…`, or `7a6…` under the corresponding initial/recovery policy; and (6) the task retains `DATABASE_URL` and `CONVERSATION_SUBMISSION_HMAC_KEY` secret references, production app env, and disabled scheduler.
 
 The runner inherits the existing task definition network placement and database-secret reference. It holds a PostgreSQL advisory lock, has a 900-second internal timeout and 35-minute job timeout, executes only `upgrade b7d3…`, then invokes a read-only catalog verifier. A task error, timeout, unexpected revision, missing table, or malformed index stops the run. It never calls `aws ecs update-service`.
 
 ### Gate R — ECS application promotion
 
-Gate R remains manual and gets a distinct `Main` approval event. It requires a successful Gate M run ID; GitHub API evidence must show the same source SHA, `main`, workflow path, completed migration-job name, and job success. It independently checks ECR tags, account/region, nonzero service capacity, exact `b7d3…` catalog, circuit breaker, ALB, and API health. It retains the previous task definition/image reference and never runs a migration. Gate M does not trigger Gate R.
+Gate R remains manual and gets a distinct `Main` approval event. Its checkout must resolve exactly to the supplied source SHA before it uses any release helper, and that SHA must still be an ancestor of `main`. It requires a successful Gate M run ID; GitHub API evidence must show the same source SHA, `main`, workflow path, completed migration-job name, and job success. It independently checks ECR tags, account/region, nonzero service capacity, exact `b7d3…` catalog, circuit breaker, ALB, and API health. It retains the previous task definition/image reference and never runs a migration. Gate M does not trigger Gate R.
 
 The task-definition helper forces `DEV_ALLOW_MEMBERSHIP_HEADER=0`, `CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=0`, `CADENSY_E2E_FAKE_RUNTIME=0`, disabled scheduler, and protected R5 gates `0`.
 
@@ -102,7 +102,7 @@ Every mutation below is **REQUIRES SEPARATE EXPLICIT AUTHORIZATION — NOT EXECU
 
 1. Validate AWS identity/account/region and scoped ECS, ECR, CloudWatch, and RDS access.
 2. Under DBA authority, inventory target service/task definition and Alembic revision without querying user content.
-3. Verify fresh recoverable backup/restore readiness, encrypted backup lifecycle, DB TLS, and database/HMAC secret references without reading values.
+3. Under DBA authority, complete and retain evidence for a fresh backup/restore rehearsal, encrypted backup lifecycle, DB TLS, and database/HMAC secret references without reading values. `backup_restore_evidence_ref` is only an operator attestation bound to Gate M: the workflow neither inspects a backup nor runs or proves a restore, so a reference alone is not recovery evidence.
 4. Record owner, maintenance policy, SHA, digests, and compatibility decision. Stop on mismatch or zero capacity.
 
 ### Phase 2 — schema migration / Gate M

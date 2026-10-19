@@ -70,9 +70,10 @@ jobs:
     timeout-minutes: 35
 
     steps:
-      - name: Check out release tooling from main
+      - name: Check out release tooling at the approved source SHA
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0
 
       - name: Validate immutable release inputs
@@ -89,8 +90,12 @@ jobs:
           [[ "${RUNTIME_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${MIGRATION_RUN_ID}" =~ ^[0-9]+$ ]]
+          actual_sha="$(git rev-parse HEAD)"
+          test "${actual_sha}" = "${SOURCE_SHA}"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          test -f scripts/cd01/prepare_ecs_task_definition.py
+          test -f backend/scripts/cd01/verify_pr06b_schema.py
           echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "migration_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${MIGRATION_DIGEST}" >> "${GITHUB_OUTPUT}"
 

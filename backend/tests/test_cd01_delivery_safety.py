@@ -129,7 +129,10 @@ def test_cd01_workflows_are_digest_pinned_manual_for_production_and_never_migrat
     assert release["jobs"]["promote"]["environment"] == "Main"
     assert release["concurrency"]["cancel-in-progress"] == "false"
     assert release["on"]["workflow_dispatch"]["inputs"]["migration_run_id"]["required"] == "true"
+    assert release["jobs"]["promote"]["steps"][0]["with"]["ref"] == "${{ inputs.source_sha }}"
     assert "@${runtime_digest}" in release_script
+    assert 'actual_sha="$(git rev-parse head)"' in release_script
+    assert 'test "${actual_sha}" = "${source_sha}"' in release_script
     assert "deploymentcircuitbreaker={enable=true,rollback=true}" in release_script
     assert "dev_allow_membership_header" in release_script
     assert "CADENSY_B3_PROTECTED_PREVIEW_APPLY" in HELPER_PATH.read_text(encoding="utf-8")
@@ -173,9 +176,11 @@ def test_pr06b_gate_m_is_manual_protected_and_cannot_promote_ecs():
     assert inputs["backup_restore_evidence_ref"]["required"] == "true"
     assert inputs["maintenance_window_ref"]["required"] == "true"
     assert inputs["migration_owner"]["required"] == "true"
+    assert "attestation only" in inputs["backup_restore_evidence_ref"]["description"]
     assert "7a6c8e1d5f04" in inputs["expected_start_revision"]["options"]
     assert migration["jobs"]["migrate"]["environment"] == "Main"
     assert migration["jobs"]["migrate"]["needs"] == "assert-migration-approval"
+    assert migration["jobs"]["migrate"]["steps"][0]["with"]["ref"] == "${{ inputs.source_sha }}"
     assert inputs["confirmation"]["description"] == "Type EXECUTE_PR06B_SCHEMA_MIGRATION after reviewing the inputs"
     assert "run_pr06b_schema_migration.py" in migration_script
     assert "verify_pr06b_schema.py" in migration_script
@@ -185,6 +190,9 @@ def test_pr06b_gate_m_is_manual_protected_and_cannot_promote_ecs():
     assert "aws ecs update-service" not in migration_script
     assert ".[0].desiredcount >= 1" in migration_script
     assert ".[0].runningcount >= 1" in migration_script
+    assert 'actual_sha="$(git rev-parse head)"' in migration_script
+    assert 'test "${actual_sha}" = "${source_sha}"' in migration_script
+    assert "neither inspects a backup nor performs or proves a restore rehearsal" in migration_script
 
 
 def test_helper_rejects_missing_pr06b_hmac_secret_reference():

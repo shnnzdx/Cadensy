@@ -28,7 +28,7 @@ on:
         required: true
         type: string
       backup_restore_evidence_ref:
-        description: Approved backup and restore-readiness evidence reference (no secret values)
+        description: Approved independently verified backup/restore-rehearsal evidence reference (attestation only; no secret values)
         required: true
         type: string
       maintenance_window_ref:
@@ -102,9 +102,10 @@ jobs:
     environment: Main
     timeout-minutes: 35
     steps:
-      - name: Check out reviewed release tooling from main
+      - name: Check out release tooling at the approved source SHA
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0
 
       - name: Validate immutable Gate M inputs
@@ -119,8 +120,17 @@ jobs:
           set -euo pipefail
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${MIGRATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          actual_sha="$(git rev-parse HEAD)"
+          test "${actual_sha}" = "${SOURCE_SHA}"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          test -f scripts/cd01/prepare_ecs_task_definition.py
+          test -f backend/scripts/cd01/run_pr06b_schema_migration.py
+          test -f backend/scripts/cd01/verify_pr06b_schema.py
+          test -f backend/alembic/versions/c2a4b6d8e0f1_membership_lifecycle.py
+          test -f backend/alembic/versions/9db6f1a1041b_pr06b1a_membership_incarnation.py
+          test -f backend/alembic/versions/7a6c8e1d5f04_pr06b1a_active_account_index_cutover.py
+          test -f backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py
           if [ "${MODE}" = initial ] && [ "${EXPECTED_START}" = "${OLD_ALEMBIC_HEAD}" ]; then
             echo "expected_start=${EXPECTED_START}" >> "${GITHUB_OUTPUT}"
           elif [ "${MODE}" = recovery ] && { [ "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" ] || [ "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}" ]; }; then
@@ -198,6 +208,7 @@ jobs:
             echo "- Owner: ${{ inputs.migration_owner }}"
             echo "- Backup/restore evidence reference: ${{ inputs.backup_restore_evidence_ref }}"
             echo "- Maintenance/interruption reference: ${{ inputs.maintenance_window_ref }}"
+            echo '- Backup/restore references are operator attestations only: this workflow neither inspects a backup nor performs or proves a restore rehearsal.'
             echo '- This workflow does not update ECS service tasks or enable a Runtime/Provider.'
             echo '- Failure requires evidence preservation and a new Gate M approval; no automatic retry, stamp, or downgrade occurs.'
           } >> "${GITHUB_STEP_SUMMARY}"
