@@ -47,6 +47,36 @@ DEFAULT_OFF_GATES = (
     "CADENSY_E2E_FAKE_RUNTIME",
 )
 
+# The Round 1 release profile must never receive a credential that could make a
+# legacy agent route reach a paid model provider.  These are credentials, not
+# harmless model-selection settings.  Keep the list explicit so non-AI service
+# credentials (for example GEOAPIFY_API_KEY) remain intact.
+AI_PROVIDER_CREDENTIAL_NAMES = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "AWS_BEDROCK_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "COHERE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "HUGGINGFACE_API_KEY",
+        "MISTRAL_API_KEY",
+        "OLLAMA_API_KEY",
+        "OLLAMA_CLOUD_API_KEY",
+        "OPENAI_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "TOGETHER_API_KEY",
+        "XAI_API_KEY",
+    }
+)
+
+# These non-model API credentials are present in the reviewed production task
+# definition.  A newly introduced *_API_KEY is rejected rather than copied into
+# a Provider-off release by accident; its owner must classify it explicitly.
+APPROVED_NON_AI_API_KEY_NAMES = frozenset({"GEOAPIFY_API_KEY"})
+
 # Fields returned by describe-task-definition that are accepted by
 # register-task-definition.  Deliberately excluding status/revision/ARN and
 # timestamps prevents accidental replay of server-owned metadata.
@@ -102,6 +132,39 @@ def _environment_map(container: dict[str, Any]) -> tuple[list[str], dict[str, st
         values[name] = value
         order.append(name)
     return order, values
+
+
+def _is_provider_credential(name: object) -> bool:
+    return isinstance(name, str) and name.upper() in AI_PROVIDER_CREDENTIAL_NAMES
+
+
+def _remove_provider_credentials(container: dict[str, Any]) -> None:
+    """Remove provider credentials while retaining every non-AI secret.
+
+    The live task definition is deliberately cloned for configuration
+    preservation.  Removing known model-provider credentials here prevents an
+    older task definition from silently re-enabling paid Provider execution
+    during Gate M or Gate R.
+    """
+    secrets = container.get("secrets", [])
+    if not isinstance(secrets, list):
+        _fail("Container secrets must be a list.")
+    for entry in secrets:
+        if not isinstance(entry, dict):
+            _fail("Container secrets contains a non-object entry.")
+        name = entry.get("name")
+        if (
+            isinstance(name, str)
+            and name.upper().endswith("_API_KEY")
+            and name.upper() not in AI_PROVIDER_CREDENTIAL_NAMES
+            and name.upper() not in APPROVED_NON_AI_API_KEY_NAMES
+        ):
+            _fail(
+                f"Unclassified API-key secret {name!r} cannot enter the Provider-off release profile."
+            )
+    container["secrets"] = [
+        entry for entry in secrets if not _is_provider_credential(entry.get("name"))
+    ]
 
 
 def _validate_live_contract(task_definition: dict[str, Any], container: dict[str, Any]) -> None:
@@ -164,7 +227,12 @@ def prepare_task_definition(payload: dict[str, Any], image: str) -> dict[str, An
     )
     target["image"] = image
     order, environment = _environment_map(target)
+    for name in tuple(environment):
+        if _is_provider_credential(name):
+            del environment[name]
+    _remove_provider_credentials(target)
     environment["DEV_ALLOW_MEMBERSHIP_HEADER"] = "0"
+    environment["MOCK_AI"] = "0"
     for gate in DEFAULT_OFF_GATES:
         environment[gate] = "0"
     ordered_names = order + [name for name in environment if name not in order]

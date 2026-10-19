@@ -1,0 +1,187 @@
+name: CD-01 — Build and Publish Immutable Frontend Image
+
+on:
+  workflow_run:
+    workflows:
+      - CI Regression Gates
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Existing main commit SHA to build (required for a controlled rebuild)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd01-frontend-build-publish-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-frontend
+  PRODUCTION_API_BASE_URL: https://app.cadensy.top
+
+jobs:
+  build-and-push:
+    name: Build, validate, and publish one immutable frontend image
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    # Main remains the artifact-publication approval boundary.  This workflow
+    # has no ECS, RDS, migration, or shared-infrastructure operation.
+    environment: Main
+    timeout-minutes: 35
+
+    steps:
+      - name: Select the CI-approved main source
+        id: source
+        shell: bash
+        env:
+          EVENT_SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            source_sha="${EVENT_SOURCE_SHA}"
+          else
+            test "${GITHUB_REF}" = "refs/heads/main"
+            source_sha="${REQUESTED_SOURCE_SHA}"
+          fi
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the selected immutable source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Verify selected source and full-stack build inputs
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          test "${actual_sha}" = "${SOURCE_SHA}"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          test -f frontend/Dockerfile
+          test -f frontend/package.json
+          test -f trip/package.json
+          test -d shared
+
+      - name: Configure AWS credentials from the Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify approved account and existing frontend repository
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          test "${account_id}" = "${APPROVED_AWS_ACCOUNT_ID}"
+          repository_uri="$(aws ecr describe-repositories \
+            --repository-names "${ECR_REPOSITORY}" \
+            --query 'repositories[0].repositoryUri' --output text)"
+          test "${repository_uri}" = "${account_id}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+          echo "repository_uri=${repository_uri}" >> "${GITHUB_OUTPUT}"
+
+      - name: Refuse a previously used immutable release tag
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          error_file="$(mktemp)"
+          if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}" >/dev/null 2>"${error_file}"; then
+            echo "::error::Refusing to overwrite existing immutable ECR tag ${SOURCE_SHA}."
+            exit 1
+          fi
+          grep -q 'ImageNotFoundException' "${error_file}" || {
+            echo "::error::Unable to prove that ECR tag ${SOURCE_SHA} is unused."
+            exit 1
+          }
+
+      - name: Authenticate Docker to the existing ECR repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "${APPROVED_AWS_REGION}" | \
+            docker login --username AWS --password-stdin \
+              "${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com"
+
+      - name: Build frontend, Trip preview, and shared source from repository root
+        shell: bash
+        env:
+          ECR_URI: ${{ steps.target.outputs.repository_uri }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --file frontend/Dockerfile \
+            --tag "${ECR_URI}:${SOURCE_SHA}" \
+            --build-arg NEXT_PUBLIC_API_BASE_URL="${PRODUCTION_API_BASE_URL}" \
+            --build-arg VITE_API_BASE_URL="${PRODUCTION_API_BASE_URL}" \
+            .
+
+      - name: Validate local container routes before publication
+        shell: bash
+        env:
+          ECR_URI: ${{ steps.target.outputs.repository_uri }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          CONTAINER_NAME: tripsync-frontend-release-proof
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker logs "${CONTAINER_NAME}" --tail 80 || true
+            docker rm --force "${CONTAINER_NAME}" || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name "${CONTAINER_NAME}" --publish 3000:3000 "${ECR_URI}:${SOURCE_SHA}"
+          for attempt in {1..45}; do
+            if curl --fail --silent --show-error http://127.0.0.1:3000/login --output /tmp/tripsync-login.html; then
+              break
+            fi
+            test "${attempt}" -lt 45
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:3000/trip-app/index.html --output /tmp/tripsync-trip-app.html
+          docker inspect --format='container={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}not-configured{{end}}' "${CONTAINER_NAME}"
+
+      - name: Push immutable frontend artifact and resolve digest
+        id: artifact
+        shell: bash
+        env:
+          ECR_URI: ${{ steps.target.outputs.repository_uri }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker push "${ECR_URI}:${SOURCE_SHA}"
+          digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}" --query 'imageDetails[0].imageDigest' --output text)"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          {
+            echo '## CD-01 immutable frontend build result'
+            echo
+            echo "- Git commit: ${SOURCE_SHA}"
+            echo "- Frontend image: ${ECR_URI}@${digest}"
+            echo '- Container proof: /login and /trip-app/index.html returned successfully before publication.'
+            echo '- Deployment: not requested; this workflow cannot update ECS, run a database migration, or modify shared infrastructure.'
+            echo '- Next step: use the separately dispatched frontend promotion workflow after Main Environment approval and successful backend promotion.'
+          } >> "${GITHUB_STEP_SUMMARY}"

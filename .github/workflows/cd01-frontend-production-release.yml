@@ -1,0 +1,175 @@
+name: CD-01 — Manually Approved Production Frontend Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Main commit SHA whose immutable frontend image will be promoted
+        required: true
+        type: string
+      frontend_image_digest:
+        description: Frontend sha256 digest produced by the matching CD-01 frontend build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd01-frontend-production-release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-frontend
+  ECS_CLUSTER: tripsync-cluster
+  ECS_SERVICE: tripsync-frontend-service
+  CONTAINER_NAME: tripsync-frontend
+  PRODUCTION_BASE_URL: https://app.cadensy.top
+
+jobs:
+  assert-approval-gate:
+    name: Require a protected Main approval environment
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless Main has required reviewers
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/Main" \
+            > /tmp/main-environment.json
+          jq -e 'any(.protection_rules[]?; .type == "required_reviewers")' /tmp/main-environment.json >/dev/null
+
+  promote:
+    name: Promote one immutable frontend image after production approval
+    needs: assert-approval-gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: Main
+    timeout-minutes: 30
+    steps:
+      - name: Check out release tooling at the approved source SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Validate immutable release inputs
+        id: inputs
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          FRONTEND_DIGEST: ${{ inputs.frontend_image_digest }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${FRONTEND_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          actual_sha="$(git rev-parse HEAD)"
+          test "${actual_sha}" = "${SOURCE_SHA}"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          test -f scripts/cd01/prepare_frontend_task_definition.py
+          echo "frontend_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${FRONTEND_DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure AWS credentials from the approved Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify image provenance and preserve the active frontend service contract
+        id: current
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          FRONTEND_DIGEST: ${{ inputs.frontend_image_digest }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
+          aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${FRONTEND_DIGEST}" --output json > /tmp/frontend-image.json
+          jq -e --arg tag "${SOURCE_SHA}" '.imageDetails[0].imageTags | index($tag)' /tmp/frontend-image.json >/dev/null
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/service.json
+          jq -e '.services | length == 1 and .[0].status == "ACTIVE" and .[0].desiredCount == 1 and .[0].runningCount >= 1' /tmp/service.json >/dev/null
+          jq -e '.services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .services[0].deploymentConfiguration.minimumHealthyPercent == 100 and .services[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/service.json)"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/current-task-definition.json
+          previous_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
+          test -n "${previous_image}" && test "${previous_image}" != "null"
+          echo "previous_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
+          echo "previous_image=${previous_image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create one digest-pinned frontend task definition
+        id: taskdef
+        shell: bash
+        env:
+          FRONTEND_IMAGE: ${{ steps.inputs.outputs.frontend_image }}
+        run: |
+          set -euo pipefail
+          python scripts/cd01/prepare_frontend_task_definition.py \
+            --input /tmp/current-task-definition.json \
+            --output /tmp/frontend-task-definition.json \
+            --image "${FRONTEND_IMAGE}"
+          task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/frontend-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          test -n "${task_definition}" && test "${task_definition}" != "None"
+          echo "arn=${task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Promote only the existing frontend ECS service
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${{ steps.taskdef.outputs.arn }}" \
+            --desired-count 1 \
+            --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null
+          aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
+
+      - name: Verify frontend ALB health and public routes
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
+          test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${{ steps.taskdef.outputs.arn }}"
+          test "$(jq -r '.services[0].desiredCount' /tmp/final-service.json)" = "1"
+          jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/target-groups.txt
+          test -s /tmp/target-groups.txt
+          while read -r target_group; do
+            aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/target-health.json
+            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/target-health.json >/dev/null
+          done < /tmp/target-groups.txt
+          curl --fail --silent --show-error --max-time 15 "${PRODUCTION_BASE_URL}/" > /tmp/home.html
+          curl --fail --silent --show-error --max-time 15 "${PRODUCTION_BASE_URL}/login" > /tmp/login.html
+          echo "alb_health=healthy" >> "${GITHUB_OUTPUT}"
+          echo "public_routes=passed" >> "${GITHUB_OUTPUT}"
+
+      - name: Write frontend release summary and rollback reference
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          FRONTEND_DIGEST: ${{ inputs.frontend_image_digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## CD-01 production frontend release result'
+            echo
+            echo "- Git commit: ${SOURCE_SHA}"
+            echo "- Frontend image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${FRONTEND_DIGEST}"
+            echo "- Previous task definition: ${{ steps.current.outputs.previous_task_definition }}"
+            echo "- Previous image: ${{ steps.current.outputs.previous_image }}"
+            echo "- New task definition: ${{ steps.taskdef.outputs.arn }}"
+            echo '- Service: tripsync-frontend-service only; desiredCount=1 and circuit-breaker rollback preserved.'
+            echo "- ALB health: ${{ steps.verify.outputs.alb_health }}"
+            echo "- Public homepage/login: ${{ steps.verify.outputs.public_routes }}"
+            echo '- Rollback reference: the previous frontend task definition above. This workflow does not modify the backend service or database.'
+          } >> "${GITHUB_STEP_SUMMARY}"
