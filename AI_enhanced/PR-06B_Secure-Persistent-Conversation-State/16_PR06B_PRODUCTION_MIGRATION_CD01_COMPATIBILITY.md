@@ -4,7 +4,22 @@
 
 This is **Round 1 release engineering**, not production activation. It changes no AWS resource, RDS database, ECS service, Provider configuration, purge schedule, or runtime feature gate. Gate A remains **PASS**; Gate B remains **NOT APPROVED**.
 
-The reviewed baseline was `main` at `75fe2eb109c16d9ccad51349bdbe186786b30e21` (PR #17). Local AWS CLI authentication returned `NoCredentials`; live AWS, ECS, RDS, backup and task-definition facts are therefore **UNVERIFIED**. No secret value was read.
+The reviewed baseline was `main` at `75fe2eb109c16d9ccad51349bdbe186786b30e21` (PR #17). Initial local AWS CLI authentication returned `NoCredentials`. After the operator explicitly supplied the local credential location, a later authenticated **read-only** check was performed without reading secret values or querying database contents.
+
+## Read-only cloud evidence — 2026-10-18
+
+The authenticated identity was account `448678332746`, IAM user `github-actions-deploy`, in `us-east-1`. The following observations are real cloud metadata, not an activation claim:
+
+| Resource | Read-only observation | Release consequence |
+| --- | --- | --- |
+| ECS `tripsync-backend-service` | `ACTIVE` but `desiredCount=0`, `runningCount=0`; task definition is revision 19. Its deployment circuit breaker and `100/200` bounds exist. | Gate M and Gate R correctly fail closed on zero capacity. Do not change desired count without a separate authorization. |
+| ALB target group | No registered targets. | No health proof exists while the service is stopped. |
+| RDS `tripsync-postgres` | PostgreSQL 18.3, `stopped`, private, single-AZ, `StorageEncrypted=false`, backup retention 1 day. | **Gate B blocker:** database encryption-at-rest contract is not met; no release activation is approved. |
+| RDS snapshots | Latest automated and manual snapshots inspected are `Encrypted=false`. | **Gate B blocker:** encrypted-backup contract is not met. Do not treat snapshot existence as restore rehearsal evidence. |
+| Existing task definition | `APP_ENV=production`, scheduler disabled, and retired membership header disabled. It contains existing real-provider references but has no running capacity. It lacks `CONVERSATION_SUBMISSION_HMAC_KEY` reference and does not explicitly set PR-06B durable/fake runtime variables. | The Round 1 helper intentionally rejects this input until the HMAC reference is provisioned through an approved configuration change. It will force durable/fake runtime to `0` only in a future approved replacement task definition. |
+| ECR | Existing reviewed `75fe2eb…` runtime and migration images are present by immutable digest. | Artifact availability is not schema-migration or release approval. |
+
+TLS enforcement, restore success, least-privilege sufficiency, and production Alembic revision remain unverified: this check deliberately did not start RDS/ECS, query database tables, fetch secret values, dispatch workflows, or mutate any resource.
 
 ## Confirmed source facts
 
@@ -108,7 +123,7 @@ Record digests, task definitions, gate IDs, and redacted health evidence. Confir
 
 ## Remaining blockers and next boundary
 
-Before live activation, an authorized operator must restore AWS access and collect live preflight facts. The production task must have the HMAC secret reference; backup/restore, RDS encryption, backup encryption/lifecycle, TLS, least privilege, live schema/capacity, and actual-image compatibility must be reviewed. Provider behavior/cost, durable runtime, purge ownership, telemetry, alerts, and incident SLOs are **Round 2 / Gate B** scope.
+Before live activation, an authorized operator must remediate the observed encryption and stopped-capacity blockers, then collect approved live preflight facts. The production task must have the HMAC secret reference; backup/restore, RDS encryption, backup encryption/lifecycle, TLS, least privilege, live schema/capacity, and actual-image compatibility must be reviewed. Provider behavior/cost, durable runtime, purge ownership, telemetry, alerts, and incident SLOs are **Round 2 / Gate B** scope.
 
 ## Review record
 
