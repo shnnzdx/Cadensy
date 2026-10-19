@@ -110,4 +110,11 @@ Record digests, task definitions, gate IDs, and redacted health evidence. Confir
 
 Before live activation, an authorized operator must restore AWS access and collect live preflight facts. The production task must have the HMAC secret reference; backup/restore, RDS encryption, backup encryption/lifecycle, TLS, least privilege, live schema/capacity, and actual-image compatibility must be reviewed. Provider behavior/cost, durable runtime, purge ownership, telemetry, alerts, and incident SLOs are **Round 2 / Gate B** scope.
 
-The PR/commit/hosted-CI record is appended after review submission. It must distinguish **Round 1 Release Engineering: COMPLETE** from **Production Migration and ECS Activation: NOT EXECUTED**.
+## Review record
+
+- Pull request: [#18 — PR-06B: production migration and CD-01 compatibility](https://github.com/shnnzdx/Cadensy/pull/18)
+- Implementation commit: `18181ba1fe6854eb19ec96a031ff2027a0bb529a` (this record is amended if the documentation-only review metadata changes).
+- Hosted CI: pending after PR submission; it is not represented here as a pass before GitHub reports it.
+- Production migration and ECS activation: **NOT EXECUTED**.
+
+After review and merge, record **Round 1 Release Engineering: COMPLETE** only if hosted checks and review accept this change. That status never means production migration or ECS activation has been executed.
