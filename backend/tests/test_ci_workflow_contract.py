@@ -122,7 +122,7 @@ def test_ci_remote_job_contract_has_pinned_runtimes_isolated_postgres_and_no_sof
     workflow = _workflow()
     assert {"pull_request", "push", "workflow_dispatch"} <= set(workflow["on"])
     assert workflow["permissions"] == {"contents": "read"}
-    assert workflow["env"] == {"PYTHON_VERSION": "3.13.5", "NODE_VERSION": "22.13.0"}
+    assert workflow["env"] == {"PYTHON_VERSION": "3.13", "NODE_VERSION": "22.13.0"}
 
     jobs = workflow["jobs"]
     assert set(jobs) == {

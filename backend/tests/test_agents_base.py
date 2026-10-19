@@ -113,6 +113,26 @@ def test_missing_key_raises_agent_unavailable(monkeypatch):
         )
 
 
+def test_provider_off_without_credentials_never_invokes_external_provider(monkeypatch):
+    monkeypatch.setenv("MOCK_AI", "0")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    def unexpected_provider_invocation(*_args, **_kwargs):
+        pytest.fail("Provider invocation must not occur without an injected credential")
+
+    monkeypatch.setattr(base, "_invoke_agent_provider", unexpected_provider_invocation)
+
+    with pytest.raises(base.AgentUnavailable, match="API key is not set"):
+        base.call_model(
+            system="s",
+            user="u",
+            schema={"type": "object"},
+            schema_name="t",
+            mock={},
+            provider=base.CHAT_ROUTE,
+        )
+
+
 @pytest.mark.parametrize(
     ("provider_name", "provider_url"),
     [

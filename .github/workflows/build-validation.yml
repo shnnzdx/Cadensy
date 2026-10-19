@@ -13,7 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.13.5"
+  # Ubuntu latest can advance before a particular patch build is published for
+  # that runner image. Keep the approved Python 3.13 line while allowing
+  # setup-python to select an available security-patched release.
+  PYTHON_VERSION: "3.13"
   NODE_VERSION: "22.13.0"
 
 jobs:
