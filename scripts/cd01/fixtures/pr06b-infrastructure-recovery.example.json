@@ -1,0 +1,10 @@
+{
+  "identity": {"account": "448678332746", "region": "us-east-1"},
+  "source_database": {"id": "legacy-source", "storage_encrypted": false, "production_ready": false, "engine": "postgres", "engine_version": "18.3"},
+  "replacement_database": {"id": "encrypted-replacement", "storage_encrypted": true, "engine": "postgres", "engine_version": "18.3", "publicly_accessible": false, "db_subnet_group": "approved-private-subnets", "security_group_ids": ["sg-approved"], "backup_retention_days": 7},
+  "approved_min_backup_retention_days": 7,
+  "kms_key": {"arn": "arn:aws:kms:us-east-1:448678332746:key/EXAMPLE", "state": "Enabled", "customer_managed": true},
+  "recovery_evidence": {"encrypted_snapshot": {"id": "encrypted-snapshot-copy", "encrypted": true, "kms_key_arn": "arn:aws:kms:us-east-1:448678332746:key/EXAMPLE"}, "restore_rehearsal": {"status": "passed", "evidence_ref": "DB-1-approved-restore-rehearsal", "completed_at": "2026-10-19T11:00:00Z"}, "max_restore_rehearsal_age_hours": 24},
+  "ecs_bootstrap": {"mode": "planned_maintenance_cutover", "approved_i3": true, "public_traffic_blocked": true, "environment": {"APP_ENV": "production", "DISABLE_SCHEDULER": "1", "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED": "0", "CADENSY_E2E_FAKE_RUNTIME": "0"}, "secret_references": {"DATABASE_URL": "arn:aws:ssm:us-east-1:448678332746:parameter/example/database-url", "CONVERSATION_SUBMISSION_HMAC_KEY": "arn:aws:ssm:us-east-1:448678332746:parameter/example/conversation-hmac"}},
+  "cutover": {"auto_execute": false, "source_database_id": "legacy-source", "replacement_database_id": "encrypted-replacement", "write_freeze_approval_ref": "I2-write-freeze", "compatibility_decision_ref": "DB-3-compatibility", "endpoint_cutover_approval_ref": "I2-cutover", "old_database_retention_ref": "DB-6-retention", "database_url_secret_reference": "arn:aws:ssm:us-east-1:448678332746:parameter/example/database-url"}
+}
