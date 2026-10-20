@@ -127,8 +127,8 @@ jobs:
           test -f scripts/cd01/prepare_ecs_task_definition.py
           test -f backend/scripts/cd01/run_pr06b_schema_migration.py
           test -f backend/scripts/cd01/verify_pr06b_schema.py
-          test -f backend/alembic/versions/c2a4b6d8e0f1_membership_lifecycle.py
-          test -f backend/alembic/versions/9db6f1a1041b_pr06b1a_membership_incarnation.py
+          test -f backend/alembic/versions/c2a4b6d8e0f1_pr05b_phase1_trip_ledger_schema.py
+          test -f backend/alembic/versions/9db6f1a1041b_pr06b1a_membership_lifecycle_schema.py
           test -f backend/alembic/versions/7a6c8e1d5f04_pr06b1a_active_account_index_cutover.py
           test -f backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py
           if [ "${MODE}" = initial ] && [ "${EXPECTED_START}" = "${OLD_ALEMBIC_HEAD}" ]; then
