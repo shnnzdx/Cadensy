@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   conversationIdentityFor,
+  claimPendingRequest,
   createIdempotencyKey,
   durableConversationError,
+  failedSubmissionError,
+  latestSubmissionFromMessages,
   normalizeConversationMessages,
   pendingSubmissionFromMessages,
+  submissionDisposition,
 } from './durableConversationClient.js'
 
 const POLL_INTERVAL_MS = 2500
@@ -62,14 +66,25 @@ export function useDurableConversation({ app, scope, itemId = null }) {
           // owner-authorized action after the server lease expires.
           const status = await client.status(resolved.id, restored.submissionId)
           if (cancelled || generation.current !== thisGeneration) return
-          const current = { ...restored, ...status }
+          const current = { ...restored, ...status, generation: thisGeneration }
           pendingRef.current = current
           setPending(current)
-          if (status.state !== 'running') {
+          const disposition = submissionDisposition(current)
+          if (disposition === 'completed' || disposition === 'failed') {
             await readMessages(resolved.id, null, true, thisGeneration)
             pendingRef.current = null
             setPending(null)
+            if (disposition === 'failed') {
+              setError(failedSubmissionError())
+            }
+          } else if (disposition === 'recoverable') {
+            setError({
+              kind: 'recoverable', recoverable: true,
+              text: 'This saved request did not finish before its lease expired. You can safely recover it.',
+            })
           }
+        } else if (latestSubmissionFromMessages(hydrated)?.state === 'failed') {
+          setError(failedSubmissionError())
         }
       } catch (cause) {
         if (!cancelled && generation.current === thisGeneration) setError(durableConversationError(cause))
@@ -90,18 +105,28 @@ export function useDurableConversation({ app, scope, itemId = null }) {
       latest = { ...latest, ...status }
       pendingRef.current = latest
       setPending(latest)
-      if (status.state !== 'running') {
+      const disposition = submissionDisposition(latest)
+      if (disposition === 'completed' || disposition === 'failed') {
         await readMessages(request.conversationId, null, true, currentGeneration)
         pendingRef.current = null
         setPending(null)
+        setError(disposition === 'failed' ? failedSubmissionError() : null)
+        return status
+      }
+      if (disposition === 'recoverable') {
+        setError({
+          kind: 'recoverable', recoverable: true,
+          text: 'This saved request did not finish before its lease expired. You can safely recover it.',
+        })
         return status
       }
       await new Promise(resolve => window.setTimeout(resolve, POLL_INTERVAL_MS))
     }
     if (generation.current === currentGeneration) {
       setError({
+        kind: 'running',
         retryable: true,
-        text: 'Your message is saved, but assistant delivery is still pending. This environment may have durable Runtime delivery disabled.',
+        text: 'Your message is saved and Cadensy is still working. Retry checks the same saved request; it does not submit a new one.',
       })
     }
     return latest
@@ -114,6 +139,7 @@ export function useDurableConversation({ app, scope, itemId = null }) {
       selectedPlanItemId: request.selectedPlanItemId,
       idempotencyKey: request.idempotencyKey,
     })
+    if (request.generation !== generation.current) return null
     const next = { ...request, ...admitted }
     pendingRef.current = next
     setPending(next)
@@ -125,10 +151,11 @@ export function useDurableConversation({ app, scope, itemId = null }) {
     if (!conversation || pendingRef.current || !text?.trim()) return null
     if (conversation.runtime_available !== true) {
       setError({
+        kind: 'terminal',
         terminal: true,
         text: 'Cadensy assistant delivery is unavailable in this environment. Your message was not sent.',
       })
-      return null
+      return { preserveDraft: true }
     }
     const request = {
       conversationId: conversation.id,
@@ -136,32 +163,49 @@ export function useDurableConversation({ app, scope, itemId = null }) {
       selectedPlanItemId,
       idempotencyKey: createIdempotencyKey(),
       recoveryKey: createIdempotencyKey(),
+      generation: generation.current,
     }
+    if (!claimPendingRequest(pendingRef, request)) return null
+    setPending(request)
     try {
       return await submitRequest(request)
     } catch (cause) {
-      pendingRef.current = request
-      setPending(request)
-      setError(durableConversationError(cause))
-      return null
+      if (request.generation !== generation.current) return null
+      const mapped = durableConversationError(cause)
+      if (mapped.terminal) {
+        pendingRef.current = null
+        setPending(null)
+      }
+      setError(mapped)
+      return mapped.terminal ? { preserveDraft: true } : null
     }
   }, [conversation, submitRequest])
 
   const retryPending = useCallback(async () => {
     const request = pendingRef.current
     if (!request) return null
-    if (request.restored || !request.text || !request.idempotencyKey) {
+    if (request.submissionId || request.restored || !request.text || !request.idempotencyKey) {
       try {
         return await checkStatus(request)
       } catch (cause) {
-        setError(durableConversationError(cause))
+        const mapped = durableConversationError(cause)
+        if (mapped.terminal) {
+          pendingRef.current = null
+          setPending(null)
+        }
+        setError(mapped)
         return null
       }
     }
     try {
       return await submitRequest(request)
     } catch (cause) {
-      setError(durableConversationError(cause))
+      const mapped = durableConversationError(cause)
+      if (mapped.terminal) {
+        pendingRef.current = null
+        setPending(null)
+      }
+      setError(mapped)
       return null
     }
   }, [checkStatus, submitRequest])
@@ -169,6 +213,13 @@ export function useDurableConversation({ app, scope, itemId = null }) {
   const recoverPending = useCallback(async () => {
     const request = pendingRef.current
     if (!request?.submissionId) return retryPending()
+    if (submissionDisposition(request) !== 'recoverable') {
+      setError({
+        kind: 'running', retryable: true,
+        text: 'This saved request is still running. Check its status before attempting recovery.',
+      })
+      return null
+    }
     try {
       const result = await client.recover(request.conversationId, request.submissionId, request.recoveryKey)
       const next = { ...request, ...result }
@@ -176,7 +227,12 @@ export function useDurableConversation({ app, scope, itemId = null }) {
       setPending(next)
       return checkStatus(next)
     } catch (cause) {
-      setError(durableConversationError(cause))
+      const mapped = durableConversationError(cause)
+      if (mapped.terminal) {
+        pendingRef.current = null
+        setPending(null)
+      }
+      setError(mapped)
       return null
     }
   }, [checkStatus, client, retryPending])

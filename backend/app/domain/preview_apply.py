@@ -35,6 +35,7 @@ from ..agents.runtime_contract import (
     AgentSuggestedChange,
     ChatAgentRuntime,
     RuntimeHistoryTurn,
+    RuntimeLimits,
     RuntimeReadTool,
     RuntimeRequest,
     RuntimeResult,
@@ -293,6 +294,7 @@ class RevisionBracketedPreview:
         session_factory: Callable[[], Session],
         runtime: ChatAgentRuntime,
         execution: AgentExecutionConfig | None = None,
+        runtime_limits: RuntimeLimits | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._runtime = runtime
@@ -301,6 +303,7 @@ class RevisionBracketedPreview:
             provider_timeout_seconds=20.0,
             tool_timeout_seconds=5.0,
         )
+        self._runtime_limits = runtime_limits or _runtime_limits()
 
     def preview(self, request: PreviewRequest) -> PreviewResult:
         captured = self._capture(request)
@@ -320,9 +323,7 @@ class RevisionBracketedPreview:
                 history=request.history,
                 selected_item_ref=request.selected_item_id,
                 request_id=(request.telemetry_context.request_id if request.telemetry_context is not None else uuid4().hex),
-                # Keep the established Runtime limits; B.3 changes Session
-                # lifetime, not PR-04's Runtime contract or timeout policy.
-                limits=_runtime_limits(),
+                limits=self._runtime_limits,
             ),
             capability,
             execution=execution,
@@ -649,7 +650,4 @@ def _replacement_provenance_allows(
 
 
 def _runtime_limits():
-    # Import locally to keep the type-only Runtime boundary clear at module top.
-    from ..agents.runtime_contract import RuntimeLimits
-
     return RuntimeLimits(max_rounds=8, max_total_tokens=120000)

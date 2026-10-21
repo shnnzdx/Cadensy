@@ -753,7 +753,8 @@ function PersonalThread() {
     const text = draft.trim()
     if (!text || sending) return
     setDraft('')
-    await durable.send({ text })
+    const result = await durable.send({ text })
+    if (result?.preserveDraft) setDraft(text)
   }
   const deleteThread = async () => {
     if (window.confirm('Delete this private conversation? It will no longer be available.')) await durable.deleteConversation()
@@ -764,8 +765,8 @@ function PersonalThread() {
       <ChatBubble from="tripSync">This conversation is just between us. Ask about the plan, flag fatigue or weather, or request a change — nothing reaches the group until I have checked what it affects.</ChatBubble>
       {durable.nextBefore !== null && <button type="button" className="changeCancelAction" onClick={durable.loadOlder}>Load earlier messages</button>}
       {messages.map((message, index) => <ChatBubble from={message.from} key={message.id || `${message.from}-${index}`}>{message.text}</ChatBubble>)}
-      {sending && <ChatBubble from="tripSync">Request saved. Waiting for Cadensy…</ChatBubble>}
-      {durable.error && <div className="assistantError"><p>{durable.error.text}</p>{durable.error.retryable && <button type="button" className="changeCancelAction" onClick={durable.retryPending}>Retry saved request</button>}{durable.pending?.submissionId && <button type="button" className="changeCancelAction" onClick={durable.recoverPending}>Recover expired request</button>}</div>}
+      {sending && <ChatBubble from="tripSync">{durable.pending?.submissionId ? 'Request saved. Waiting for Cadensy…' : 'Sending request…'}</ChatBubble>}
+      {durable.error && <div className="assistantError"><p>{durable.error.text}</p>{durable.error.retryable && <button type="button" className="changeCancelAction" onClick={durable.retryPending}>Check saved request</button>}{durable.error.recoverable && durable.pending?.submissionId && <button type="button" className="changeCancelAction" onClick={durable.recoverPending}>Recover expired request</button>}</div>}
       {!durable.loading && !durable.runtimeAvailable && <p className="assistantOptionNote">Assistant delivery is unavailable here. You can review saved history, but new messages cannot be sent.</p>}
       {!durable.loading && !sending && messages.length === 0 && <p className="assistantOptionNote">No saved messages yet.</p>}
     </div>

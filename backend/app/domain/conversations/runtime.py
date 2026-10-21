@@ -4,18 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+import math
 
 from sqlalchemy.orm import Session
 
 from ...agents.execution import AgentExecutionConfig
-from ...agents.runtime_contract import ChatAgentRuntime
+from ...agents.runtime_contract import ChatAgentRuntime, RuntimeLimits
+from ...observability.telemetry import TelemetryContext
 from ..preview_apply import (
     PreviewAccessDenied,
     PreviewDuplicatePlans,
     PreviewItemNotFound,
     PreviewMissingPlan,
     PreviewRequest,
+    PreviewResult,
     PreviewTripNotFound,
     RevisionBracketedPreview,
     StalePreview,
@@ -28,6 +31,116 @@ class RuntimeExecutionResult:
     state: str
     submission_id: str
     failure_category: str | None = None
+
+
+_DURABLE_PREVIEW_PATCH_KEYS = frozenset({
+    "title",
+    "place",
+    "start_hour",
+    "day_date",
+    "duration_min",
+    "price_per_person",
+    "lat",
+    "lng",
+})
+_DURABLE_OPTION_TITLE_MAX = 300
+_DURABLE_OPTION_SUMMARY_MAX = 4_000
+
+
+def _durable_preview_patch(raw: dict[str, object]) -> dict[str, object] | None:
+    """Convert only Preview-approved domain values to JSON-compatible data."""
+
+    if not set(raw).issubset(_DURABLE_PREVIEW_PATCH_KEYS):
+        return None
+    normalized: dict[str, object] = {}
+    for field, value in raw.items():
+        if field in {"title", "place"}:
+            if not isinstance(value, str) or not value.strip():
+                return None
+            normalized[field] = value
+        elif field == "day_date":
+            if isinstance(value, datetime):
+                return None
+            if isinstance(value, date):
+                normalized[field] = value.isoformat()
+            elif isinstance(value, str):
+                try:
+                    normalized[field] = date.fromisoformat(value).isoformat()
+                except ValueError:
+                    return None
+            else:
+                return None
+        elif field == "duration_min":
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                return None
+            normalized[field] = value
+        else:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+            ):
+                return None
+            normalized[field] = value
+    return normalized
+
+
+def _direct_candidate_title(item_title: str) -> str:
+    safe_item_title = " ".join(item_title.split())
+    if not safe_item_title:
+        return "Suggested itinerary change"
+    return f"Suggested change for {safe_item_title}"[:_DURABLE_OPTION_TITLE_MAX]
+
+
+def _durable_preview_options(preview: PreviewResult) -> tuple[dict[str, object], ...]:
+    """Merge safe Preview candidates into the existing durable option DTO."""
+
+    candidates: list[tuple[str, str | None, str, dict[str, object], bool]] = []
+    if preview.candidate is not None:
+        candidates.append((
+            _direct_candidate_title(preview.candidate.item_title),
+            None,
+            preview.candidate.item_id,
+            preview.candidate.patch,
+            True,
+        ))
+    candidates.extend(
+        (option.title, option.body or None, option.item_id, option.patch, False)
+        for option in preview.candidate_options
+    )
+
+    durable: list[dict[str, object]] = []
+    seen: set[tuple[str, tuple[tuple[str, object], ...]]] = set()
+    for title, summary, item_id, raw_patch, direct in candidates:
+        if len(durable) >= service.MAX_OPTIONS:
+            break
+        patch = _durable_preview_patch(raw_patch)
+        if patch is None or (direct and not patch):
+            continue
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or len(title) > _DURABLE_OPTION_TITLE_MAX
+            or (summary is not None and (
+                not isinstance(summary, str) or len(summary) > _DURABLE_OPTION_SUMMARY_MAX
+            ))
+            or not isinstance(item_id, str)
+            or not item_id
+        ):
+            continue
+        signature = (item_id, tuple(sorted(patch.items())))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        durable.append({
+            "title": title,
+            "summary": summary,
+            "target_plan_item_id": item_id,
+            "safe_patch": patch,
+            "plan_revision": preview.plan_revision,
+            "planning_facts_revision": preview.planning_facts_revision,
+        })
+    return tuple(durable)
 
 
 class ConversationRuntimeCoordinator:
@@ -45,11 +158,13 @@ class ConversationRuntimeCoordinator:
         runtime_factory: Callable[[], ChatAgentRuntime],
         execution: AgentExecutionConfig,
         budget: context.ContextBudget,
+        runtime_limits: RuntimeLimits | None = None,
     ) -> None:
         self._sessions = session_factory
         self._runtime_factory = runtime_factory
         self._execution = execution
         self._budget = budget
+        self._runtime_limits = runtime_limits
 
     def execute(self, *, identity: context.ExecutionIdentity, now: datetime) -> RuntimeExecutionResult:
         # Phase 1: establish the sole owner-authorized history source. The
@@ -74,6 +189,7 @@ class ConversationRuntimeCoordinator:
                 session_factory=self._sessions,
                 runtime=self._runtime_factory(),
                 execution=self._execution,
+                runtime_limits=self._runtime_limits,
             ).preview(
                 PreviewRequest(
                     trip_id=identity.trip_id,
@@ -81,6 +197,10 @@ class ConversationRuntimeCoordinator:
                     message=built.current_user_message,
                     selected_item_id=built.selected_plan_item_id,
                     history=built.runtime_history,
+                    # Submission ids are opaque server-issued identifiers. They
+                    # correlate the existing safe Runtime events without adding
+                    # message/history/tool-result data to telemetry.
+                    telemetry_context=TelemetryContext(request_id=identity.submission_id),
                 )
             )
         except (PreviewAccessDenied, PreviewTripNotFound):
@@ -93,17 +213,7 @@ class ConversationRuntimeCoordinator:
         if preview.runtime_failure_category is not None:
             return self._fail_or_discard(identity, category=preview.runtime_failure_category)
 
-        options = tuple(
-            {
-                "title": option.title,
-                "summary": option.body or None,
-                "target_plan_item_id": option.item_id,
-                "safe_patch": dict(option.patch),
-                "plan_revision": preview.plan_revision,
-                "planning_facts_revision": preview.planning_facts_revision,
-            }
-            for option in preview.candidate_options
-        )
+        options = _durable_preview_options(preview)
         # Phase 3: completion rechecks active ownership and the current fence.
         # A revision that changes after Preview produces a historical advisory
         # option with its captured revision; it cannot Apply anything directly.
