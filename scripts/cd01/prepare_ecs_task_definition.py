@@ -42,6 +42,9 @@ DEFAULT_OFF_GATES = (
     # deployment helper makes this a task-definition invariant rather than
     # relying on the application's safe default.
     "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED",
+    # Stage 2 adds a second production-only permission. CD-01 continues to
+    # publish the storage-only profile and must pin both permissions off.
+    "CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED",
     # This exists only for the disposable browser harness. Pin it off before
     # process startup as defence in depth.
     "CADENSY_E2E_FAKE_RUNTIME",
@@ -71,11 +74,49 @@ AI_PROVIDER_CREDENTIAL_NAMES = frozenset(
         "XAI_API_KEY",
     }
 )
+AI_PROVIDER_CREDENTIAL_PREFIXES = (
+    "ANTHROPIC",
+    "AWS_BEDROCK",
+    "AZURE_OPENAI",
+    "COHERE",
+    "DEEPSEEK",
+    "GEMINI",
+    "GOOGLE",
+    "GROQ",
+    "HUGGINGFACE",
+    "MISTRAL",
+    "OLLAMA",
+    "OPENAI",
+    "PERPLEXITY",
+    "TOGETHER",
+    "XAI",
+)
+PROVIDER_CREDENTIAL_SUFFIXES = (
+    "_API_KEY",
+    "_TOKEN",
+    "_ACCESS_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+)
 
 # These non-model API credentials are present in the reviewed production task
 # definition.  A newly introduced *_API_KEY is rejected rather than copied into
 # a Provider-off release by accident; its owner must classify it explicitly.
 APPROVED_NON_AI_API_KEY_NAMES = frozenset({"GEOAPIFY_API_KEY"})
+
+PRODUCTION_ACTIVATION_LATCH = (
+    "CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED"
+)
+ROLLBACK_REQUIRED_RUNTIME_OFF_VALUES = {
+    "APP_ENV": "production",
+    "DISABLE_SCHEDULER": "1",
+    "DEV_ALLOW_MEMBERSHIP_HEADER": "0",
+    "MOCK_AI": "0",
+    "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED": "0",
+    "CADENSY_E2E_FAKE_RUNTIME": "0",
+}
 
 # Fields returned by describe-task-definition that are accepted by
 # register-task-definition.  Deliberately excluding status/revision/ARN and
@@ -135,7 +176,22 @@ def _environment_map(container: dict[str, Any]) -> tuple[list[str], dict[str, st
 
 
 def _is_provider_credential(name: object) -> bool:
-    return isinstance(name, str) and name.upper() in AI_PROVIDER_CREDENTIAL_NAMES
+    if not isinstance(name, str):
+        return False
+    normalized = name.upper()
+    return normalized in AI_PROVIDER_CREDENTIAL_NAMES or (
+        normalized.startswith(tuple(f"{prefix}_" for prefix in AI_PROVIDER_CREDENTIAL_PREFIXES))
+        and normalized.endswith(PROVIDER_CREDENTIAL_SUFFIXES)
+    )
+
+
+def _is_unclassified_api_key(name: object) -> bool:
+    return (
+        isinstance(name, str)
+        and name.upper().endswith("_API_KEY")
+        and name.upper() not in AI_PROVIDER_CREDENTIAL_NAMES
+        and name.upper() not in APPROVED_NON_AI_API_KEY_NAMES
+    )
 
 
 def _remove_provider_credentials(container: dict[str, Any]) -> None:
@@ -153,12 +209,7 @@ def _remove_provider_credentials(container: dict[str, Any]) -> None:
         if not isinstance(entry, dict):
             _fail("Container secrets contains a non-object entry.")
         name = entry.get("name")
-        if (
-            isinstance(name, str)
-            and name.upper().endswith("_API_KEY")
-            and name.upper() not in AI_PROVIDER_CREDENTIAL_NAMES
-            and name.upper() not in APPROVED_NON_AI_API_KEY_NAMES
-        ):
+        if _is_unclassified_api_key(name):
             _fail(
                 f"Unclassified API-key secret {name!r} cannot enter the Provider-off release profile."
             )
@@ -200,19 +251,91 @@ def _validate_live_contract(task_definition: dict[str, Any], container: dict[str
         _fail("CD-01 requires the scheduler to remain disabled for this release profile.")
 
 
-def prepare_task_definition(payload: dict[str, Any], image: str) -> dict[str, Any]:
-    """Return a registrable task definition with a digest-pinned application image."""
-    if not APPROVED_IMAGE_RE.fullmatch(image):
-        _fail("Image must be the approved backend ECR repository pinned by sha256 digest.")
-
-    task_definition = _task_definition(payload)
+def _application_container(task_definition: dict[str, Any]) -> dict[str, Any]:
     containers = task_definition.get("containerDefinitions")
     if not isinstance(containers, list):
         _fail("Task definition is missing containerDefinitions.")
     matches = [container for container in containers if container.get("name") == CONTAINER_NAME]
     if len(matches) != 1:
         _fail(f"Expected exactly one {CONTAINER_NAME!r} container.")
-    container = matches[0]
+    return matches[0]
+
+
+def _secret_names(container: dict[str, Any]) -> list[str]:
+    secrets = container.get("secrets", [])
+    if not isinstance(secrets, list):
+        _fail("Container secrets must be a list.")
+    names: list[str] = []
+    for entry in secrets:
+        if not isinstance(entry, dict):
+            _fail("Container secrets contains a non-object entry.")
+        name = entry.get("name")
+        if not isinstance(name, str) or not isinstance(entry.get("valueFrom"), str):
+            _fail("Container secret entries must have string name and valueFrom fields.")
+        if name in names:
+            _fail(f"Duplicate secret {name!r}.")
+        names.append(name)
+    return names
+
+
+def validate_runtime_off_task_definition(
+    payload: dict[str, Any], *, profile: str
+) -> None:
+    """Validate the Release A or historical rollback runtime-off contract.
+
+    New Release A revisions must carry the full explicit default-off posture.
+    A previously validated rollback definition may omit only the production
+    activation latch because code predating that latch treats absence as off.
+    If the latch is present, it must be uniquely configured to ``0``.
+    """
+
+    if profile not in {"release", "rollback"}:
+        _fail("Runtime-off profile must be either 'release' or 'rollback'.")
+    task_definition = _task_definition(payload)
+    container = _application_container(task_definition)
+    _validate_live_contract(task_definition, container)
+    _, environment = _environment_map(container)
+    secret_names = _secret_names(container)
+    collisions = sorted(set(environment).intersection(secret_names))
+    if collisions:
+        _fail(
+            "Variables configured as both environment and secrets are forbidden: "
+            + ", ".join(repr(name) for name in collisions)
+            + "."
+        )
+
+    for name in (*environment.keys(), *secret_names):
+        if _is_provider_credential(name):
+            _fail(f"Provider credential {name!r} is forbidden in the Release A profile.")
+        if _is_unclassified_api_key(name):
+            _fail(
+                f"Unclassified API-key credential {name!r} cannot enter the Provider-off release profile."
+            )
+
+    for name, expected in ROLLBACK_REQUIRED_RUNTIME_OFF_VALUES.items():
+        if environment.get(name) != expected:
+            _fail(f"Runtime-off contract requires {name}={expected}.")
+
+    if profile == "release":
+        for gate in DEFAULT_OFF_GATES:
+            if environment.get(gate) != "0":
+                _fail(f"Release runtime-off contract requires {gate}=0.")
+    elif (
+        PRODUCTION_ACTIVATION_LATCH in environment
+        and environment[PRODUCTION_ACTIVATION_LATCH] != "0"
+    ):
+        _fail(
+            f"Rollback runtime-off contract requires {PRODUCTION_ACTIVATION_LATCH}=0 when present."
+        )
+
+
+def prepare_task_definition(payload: dict[str, Any], image: str) -> dict[str, Any]:
+    """Return a registrable task definition with a digest-pinned application image."""
+    if not APPROVED_IMAGE_RE.fullmatch(image):
+        _fail("Image must be the approved backend ECR repository pinned by sha256 digest.")
+
+    task_definition = _task_definition(payload)
+    container = _application_container(task_definition)
     _validate_live_contract(task_definition, container)
 
     prepared = {
@@ -230,26 +353,45 @@ def prepare_task_definition(payload: dict[str, Any], image: str) -> dict[str, An
     for name in tuple(environment):
         if _is_provider_credential(name):
             del environment[name]
+        elif _is_unclassified_api_key(name):
+            _fail(
+                f"Unclassified API-key environment variable {name!r} cannot enter the Provider-off release profile."
+            )
     _remove_provider_credentials(target)
     environment["DEV_ALLOW_MEMBERSHIP_HEADER"] = "0"
     environment["MOCK_AI"] = "0"
     for gate in DEFAULT_OFF_GATES:
         environment[gate] = "0"
-    ordered_names = order + [name for name in environment if name not in order]
+    ordered_names = [name for name in order if name in environment] + [
+        name for name in environment if name not in order
+    ]
     target["environment"] = [
         {"name": name, "value": environment[name]} for name in ordered_names
     ]
+    validate_runtime_off_task_definition(prepared, profile="release")
     return prepared
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--image")
+    parser.add_argument(
+        "--validate-runtime-off-profile", choices=("release", "rollback")
+    )
     args = parser.parse_args()
     try:
         payload = json.loads(args.input.read_text(encoding="utf-8"))
+        if args.validate_runtime_off_profile:
+            if args.output or args.image:
+                _fail("Runtime-off validation does not accept --output or --image.")
+            validate_runtime_off_task_definition(
+                payload, profile=args.validate_runtime_off_profile
+            )
+            return
+        if args.output is None or args.image is None:
+            _fail("Task-definition generation requires --output and --image.")
         prepared = prepare_task_definition(payload, args.image)
     except (OSError, json.JSONDecodeError, ContractError) as exc:
         raise SystemExit(f"CD-01 task-definition contract failed: {exc}") from exc
