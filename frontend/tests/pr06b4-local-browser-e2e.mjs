@@ -27,6 +27,10 @@ if (!installedChromium) throw new Error('No preinstalled local Playwright Chromi
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const report = (id, status, detail) => console.log(JSON.stringify({ journey: id, status, detail }));
+const redactEvidenceRoute = route => route.replace(
+  /^\/api\/invites\/[^/]+\/account-join$/,
+  '/api/invites/[redacted-invite-token]/account-join',
+);
 function fixtureAssert(command, ...args) {
   const out = execFileSync(python, ['scripts/pr06b4_e2e_fixture.py', command, ...args.map(String)], {
     cwd: `${root}backend`, env: process.env, encoding: 'utf8',
@@ -63,7 +67,7 @@ async function api(token, pathName, options = {}) {
     headers: { Authorization: `Bearer ${token}`, 'X-Trip-Id': tripId, Accept: 'application/json', ...(options.headers || {}) },
   });
   const body = response.status === 204 ? null : await response.json().catch(() => null);
-  evidence.push({ http: `${options.method || 'GET'} ${pathName}`, status: response.status });
+  evidence.push({ http: `${options.method || 'GET'} ${redactEvidenceRoute(pathName)}`, status: response.status });
   return { response, body };
 }
 async function browserApi(session, pathName, options = {}) {
@@ -76,7 +80,7 @@ async function browserApi(session, pathName, options = {}) {
     });
     return { status: response.status, body: response.status === 204 ? null : await response.json().catch(() => null) };
   }, { baseUrl: base, trip: tripId, route: pathName, init: options });
-  evidence.push({ browserHttp: `${options.method || 'GET'} ${pathName}`, status: result.status });
+  evidence.push({ browserHttp: `${options.method || 'GET'} ${redactEvidenceRoute(pathName)}`, status: result.status });
   return { response: { status: result.status }, body: result.body };
 }
 async function login(browser, account) {
@@ -252,31 +256,81 @@ try {
     const ownerBody = await owner.frame.locator('body').innerText();
     assert.equal(ownerBody.includes('J04 Membership A private history'), false);
     fixtureAssert('assert-lifecycle', fixture.trip_id, fixture.owner_a.membership_id, rejoin.body.membership_id, fixture.owner_a.user_id, ownerConversation.id);
-    report('J04', 'PASS', 'browser owner loses A access; protected removal/rejoin creates B, keeps historical owner A, and denies B discovery');
+    const ownerFresh = await login(browser, fixture.owner_a);
+    const freshOldRead = await browserApi(ownerFresh, `/api/trips/${fixture.trip_id}/conversations/${ownerConversation.id}`);
+    assert.equal(freshOldRead.response.status, 404);
+    await openPersonal(ownerFresh);
+    const freshOwnerBody = await ownerFresh.frame.locator('body').innerText();
+    assert.equal(freshOwnerBody.includes('J04 Membership A private history'), false);
+    report('J04', 'PASS', 'fresh Chromium context for Membership B cannot discover Membership A private history');
 
-    // J08: a real Plan Assistant item scope persists an advisory Option, then a protected Plan write makes it historical.
+    // J08: the test-only Direct Candidate crosses the real Preview/Coordinator
+    // persistence path. Resolve it once while current, then make it historical.
     const member = await login(browser, fixture.member);
     const memberMe = (await browserApi(member, '/api/me')).body;
-    await sendItemAssistant(member, '[E2E-OPTION] J08 historical option');
+    await sendItemAssistant(member, '[E2E-DIRECT-CANDIDATE] J08 durable direct candidate');
     const assistantConversations = (await browserApi(member, `/api/trips/${fixture.trip_id}/conversations?scope=plan_assistant`)).body.conversations;
     const histories = await Promise.all(assistantConversations.map(async conversation => ({
       conversation,
       history: await browserApi(member, `/api/trips/${fixture.trip_id}/conversations/${conversation.id}/messages`),
     })));
-    const persisted = histories.find(({ history }) => history.body.messages.flatMap(message => message.options || []).some(option => option.title === 'Move this activity to 3:00 PM'));
-    assert.ok(persisted, 'historical option must be returned by the durable history contract');
+    const isDirectOption = option => option.target_plan_item_id === fixture.plan_item_id
+      && option.safe_patch?.start_hour === 15
+      && option.title.startsWith('Suggested change for ');
+    const persisted = histories.find(({ history }) => history.body.messages.flatMap(message => message.options || []).some(isDirectOption));
+    assert.ok(persisted, 'Direct Candidate option must be returned by the durable history contract');
     const itemConversation = persisted.conversation;
-    const persistedAssistant = persisted.history.body.messages.find(message => (message.options || []).some(option => option.title === 'Move this activity to 3:00 PM'));
-    assert.ok(persistedAssistant, 'historical option must retain its assistant parent identity');
-    const persistedOption = persistedAssistant.options.find(option => option.title === 'Move this activity to 3:00 PM');
-    assert.ok(persistedOption, 'historical option must be returned by the durable history contract');
+    const persistedAssistant = persisted.history.body.messages.find(message => (message.options || []).some(isDirectOption));
+    assert.ok(persistedAssistant, 'Direct Candidate option must retain its assistant parent identity');
+    const persistedOption = persistedAssistant.options.find(isDirectOption);
+    assert.ok(persistedOption, 'Direct Candidate option must be returned by durable history');
     fixtureAssert('assert-option', itemConversation.id, persistedOption.target_plan_item_id);
+    const directSubmissionPath = `/api/trips/${fixture.trip_id}/conversations/${itemConversation.id}/messages`;
+    const submissionsBeforeRecovery = member.calls.filter(call => call.method === 'POST' && call.url.endsWith(directSubmissionPath)).length;
+    assert.equal(submissionsBeforeRecovery, 1, 'Direct Candidate journey must have one initial submission');
+
+    // Refresh and a real sign-out/login must both restore the same server-owned
+    // option before the current-revision Resolve. Neither action may resubmit.
+    await member.page.reload({ waitUntil: 'networkidle' });
+    await openItemAssistant(member);
+    await member.frame.getByRole('button', { name: persistedOption.title, exact: true }).waitFor({ state: 'visible' });
+    await member.frame.getByRole('button', { name: 'Profile menu' }).click();
+    await member.frame.locator('button.profileMenuSignOut').click();
+    await member.page.waitForURL(/\/login(?:\?|$)/, { timeout: 20_000 });
+    await member.page.goto(`${web}/login`, { waitUntil: 'networkidle' });
+    await member.page.locator('#email').fill(fixture.member.email);
+    await member.page.locator('#password').fill(fixture.member.password);
+    await member.page.getByRole('button', { name: /log in/i }).click();
+    await member.page.waitForURL(`${web}/trip`, { timeout: 20_000 });
+    await openItemAssistant(member);
+    let optionButton = member.frame.getByRole('button', { name: persistedOption.title, exact: true });
+    await optionButton.waitFor({ state: 'visible' });
+    const submissionsAfterRelogin = member.calls.filter(call => call.method === 'POST' && call.url.endsWith(directSubmissionPath)).length;
+    assert.equal(submissionsAfterRelogin, submissionsBeforeRecovery, 'refresh/re-login must not resubmit the saved User Message');
+
+    const changesBeforeCurrentResolve = member.calls.filter(call => call.method === 'POST' && call.url.includes('/changes')).length;
+    const currentResolveResponse = member.page.waitForResponse(response => response.request().method() === 'POST' && response.url().includes(
+      `/api/trips/${fixture.trip_id}/conversations/${itemConversation.id}/messages/${persistedAssistant.id}/options/${persistedOption.id}/resolve`,
+    ));
+    await optionButton.click();
+    const currentResolution = await currentResolveResponse;
+    assert.equal(currentResolution.status(), 200);
+    const currentResolutionBody = await currentResolution.json();
+    assert.equal(currentResolutionBody.ready, true);
+    assert.equal(currentResolutionBody.item_id, fixture.plan_item_id);
+    assert.equal(currentResolutionBody.patch.start_hour, 15);
+    await member.frame.locator('button.changePrimaryAction').waitFor({ state: 'visible', timeout: 20_000 });
+    const changesAfterCurrentResolve = member.calls.filter(call => call.method === 'POST' && call.url.includes('/changes')).length;
+    assert.equal(changesAfterCurrentResolve, changesBeforeCurrentResolve, 'current historical Resolve must not directly Apply');
+    fixtureAssert('assert-plan-state', fixture.plan_id, fixture.plan_item_id, persistedOption.plan_revision, fixture.plan_item_start_hour);
+    report('J08-CURRENT', 'PASS', 'Direct Candidate persisted; refresh/re-login restored it; current Resolve returned ready without Apply or Plan mutation');
+
     const booked = await api(second.token, `/api/plans/items/${persistedOption.target_plan_item_id}/booking`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'e2e-j08-booking', 'X-Expected-Plan-Revision': String(persistedOption.plan_revision) }, body: JSON.stringify({ booked: true }) });
     assert.equal(booked.response.status, 200);
     const planAfter = fixtureAssert('assert-plan-revision', fixture.plan_id, persistedOption.plan_revision);
     await member.page.reload({ waitUntil: 'networkidle' });
     await openItemAssistant(member);
-    const optionButton = member.frame.getByRole('button', { name: /Move this activity to 3:00 PM/i });
+    optionButton = member.frame.getByRole('button', { name: persistedOption.title, exact: true });
     await optionButton.waitFor({ state: 'visible' });
     const callsBeforeSelection = member.calls.filter(call => call.method === 'POST' && call.url.includes('/changes')).length;
     const resolveResponse = member.page.waitForResponse(response => response.request().method() === 'POST' && response.url().includes(
@@ -290,7 +344,7 @@ try {
     assert.equal(callsAfterSelection, callsBeforeSelection, 'selecting a historical option must not directly Apply');
     const planAfterSelection = fixtureAssert('assert-plan-revision', fixture.plan_id, persistedOption.plan_revision);
     assert.equal(planAfterSelection.current_revision, planAfter.current_revision);
-    report('J08', 'PASS', 'coordinator-persisted Option captures revisions; owner-scoped resolution rejects the stale option and cannot directly Apply');
+    report('J08-STALE', 'PASS', 'the same Direct Candidate Option remains visible and owner-scoped Resolve rejects it after the Plan revision changes');
 
     // J05: the same legitimate participant is fenced at completion by a real protected quarantine transaction.
     const quarantineConversation = (await browserApi(member, `/api/trips/${fixture.trip_id}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'personal', context_key: 'personal' }) })).body;
@@ -318,6 +372,7 @@ try {
     report('J05', 'PASS', 'submission committed -> runtime barrier -> protected quarantine -> release -> no assistant/option; browser loses Trip X while Account remains valid for another Trip');
 
     await member.context.close();
+    await ownerFresh.context.close();
     await owner.context.close();
     await second.context.close();
     await org.context.close();

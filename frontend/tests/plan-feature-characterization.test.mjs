@@ -168,7 +168,7 @@ test("phase 4 assistant flow currently owns proposal apply state, submitChange b
   assert.match(source, /const applyProposal = async \(message, proposedChange\) => \{/);
   assert.match(source, /const targetItem = itemById\[proposedChange\.item_id\] \|\| \(item\.id === proposedChange\.item_id \? item : \{ id: proposedChange\.item_id, title: proposedChange\.item_title \}\)/);
   assert.match(source, /updateMessage\(message\.id, \{ applying: true, applyError: '' \}\)/);
-  assert.match(source, /const outcome = await app\.submitChange\(\{\s*item: targetItem,\s*actionType: mode,\s*request: message\.request,\s*verdict: proposedChange\.verdict,\s*patch: proposedChange\.patch,\s*options: roundAlternativesFrom\(message\.candidateOptions, targetItem\.id\),\s*\}\)/s);
+  assert.match(source, /const outcome = await app\.submitChange\(\{\s*item: targetItem,\s*actionType: mode,\s*request: message\.request,\s*verdict: proposedChange\.verdict,\s*patch: proposedChange\.patch,\s*options: roundAlternativesFrom\(proposedChange\.resolvedOptions, targetItem\.id\),\s*\}\)/s);
   assert.match(source, /updateMessage\(message\.id, \{ applying: false, applied: true \}\)/);
   assert.match(source, /if \(outcome\.applied\) \{\s*app\.notify\('Updated'\)\s*onResolvedOutcome\?\.\(\{ kind: 'focus-item', itemId: targetItem\.id, outcome, targetItem \}\)\s*\}/s);
   assert.match(source, /else if \(outcome\.path === 'round' \|\| outcome\.path === 'reopen_round'\) \{\s*app\.notify\('Vote opened'\)\s*onResolvedOutcome\?\.\(\{ kind: 'focus-round', itemId: targetItem\.id, outcome, targetItem \}\)\s*\}/s);

@@ -61,7 +61,11 @@ def seed_fixture(output: Path) -> None:
         plan = db.scalar(select(Plan).where(Plan.trip_id == trip.id))
         if plan is None:
             raise RuntimeError("demo seed did not create the E2E Plan")
-        item = db.scalar(select(PlanItem).where(PlanItem.plan_id == plan.id).order_by(PlanItem.id))
+        item = db.scalar(
+            select(PlanItem)
+            .where(PlanItem.plan_id == plan.id)
+            .order_by(PlanItem.day_index, PlanItem.start_hour, PlanItem.id)
+        )
         member_membership = db.scalar(
             select(TripMembership).where(
                 TripMembership.trip_id == trip.id, TripMembership.user_id == member.id
@@ -109,6 +113,7 @@ def seed_fixture(output: Path) -> None:
             "trip_facts_revision": trip.planning_facts_revision,
             "plan_id": plan.id,
             "plan_item_id": item.id,
+            "plan_item_start_hour": item.start_hour,
             "plan_revision": plan.revision,
             "organizer": {"email": ORGANIZER_EMAIL, "password": ORGANIZER_PASSWORD, "user_id": organizer.id},
             "member": {"email": MEMBER_EMAIL, "password": MEMBER_PASSWORD, "membership_id": member_membership.id, "user_id": member.id},
@@ -117,7 +122,7 @@ def seed_fixture(output: Path) -> None:
             "unrelated_membership_id": unrelated_membership.id,
         }
     output.write_text(json.dumps(payload), encoding="utf-8")
-    print(json.dumps(payload))
+    print(json.dumps({"seeded": True, "trip_id": trip.id, "plan_id": plan.id, "plan_item_id": item.id}))
 
 
 def assert_submission(conversation_id: str, key: str, expected: int) -> None:
@@ -146,7 +151,12 @@ def assert_scope(conversation_id: str, membership_id: str, expected_text: str) -
         content = [row.content for row in messages]
         if conversation.owner_membership_id != membership_id or expected_text not in content:
             raise AssertionError("conversation scope does not retain its expected owner/content")
-        print(json.dumps({"conversation_id": conversation.id, "owner_membership_id": conversation.owner_membership_id, "messages": content}))
+        print(json.dumps({
+            "conversation_id": conversation.id,
+            "owner_membership_id": conversation.owner_membership_id,
+            "message_count": len(messages),
+            "expected_text_present": True,
+        }))
 
 
 def assert_lifecycle(trip_id: str, owner_a_id: str, owner_b_id: str, user_id: str, conversation_id: str) -> None:
@@ -219,6 +229,25 @@ def assert_plan_revision(plan_id: str, previous_revision: int) -> None:
         print(json.dumps({"plan_id": plan.id, "previous_revision": previous_revision, "current_revision": plan.revision}))
 
 
+def assert_plan_state(
+    plan_id: str,
+    item_id: str,
+    expected_revision: int,
+    expected_start_hour: float,
+) -> None:
+    with SessionLocal() as db:
+        plan = _one(db, Plan, plan_id)
+        item = _one(db, PlanItem, item_id)
+        if plan.revision != expected_revision or item.start_hour != expected_start_hour:
+            raise AssertionError("historical option selection unexpectedly mutated the Plan")
+        print(json.dumps({
+            "plan_id": plan.id,
+            "plan_revision": plan.revision,
+            "plan_item_id": item.id,
+            "plan_unchanged": True,
+        }))
+
+
 def main() -> None:
     command = sys.argv[1]
     if command == "seed":
@@ -237,6 +266,8 @@ def main() -> None:
         count_conversations(sys.argv[2], sys.argv[3])
     elif command == "assert-plan-revision":
         assert_plan_revision(sys.argv[2], int(sys.argv[3]))
+    elif command == "assert-plan-state":
+        assert_plan_state(sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5]))
     else:
         raise SystemExit("unknown PR-06B.4 E2E fixture assertion")
 
