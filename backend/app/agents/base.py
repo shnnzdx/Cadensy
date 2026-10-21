@@ -46,6 +46,9 @@ load_dotenv(BACKEND_ROOT / ".env", override=False)
 DEEPSEEK_THINKING = os.getenv("DEEPSEEK_THINKING", "disabled")
 
 DEEPSEEK_PROVIDER = "deepseek"
+APPROVED_DEEPSEEK_MODELS = frozenset(
+    {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"}
+)
 
 CHAT_ROUTE = "chat"
 PLANNER_ROUTE = "planner"
@@ -153,6 +156,17 @@ def is_mocked() -> bool:
     return os.getenv("MOCK_AI") == "1"
 
 
+def deepseek_runtime_configuration_ready() -> bool:
+    """Validate the real provider configuration without making a request."""
+    config = provider_catalog().get(DEEPSEEK_PROVIDER)
+    return bool(
+        config is not None
+        and config.api_key
+        and config.base_url
+        and config.model in APPROVED_DEEPSEEK_MODELS
+    )
+
+
 def _resolve_provider_name(route_or_provider: str | None) -> str:
     """Keep the old call signature but route every real request to DeepSeek."""
     return DEEPSEEK_PROVIDER
@@ -175,10 +189,10 @@ def _uses_json_object_mode(config: ProviderConfig) -> bool:
 
 
 def _extra_body(config: ProviderConfig) -> dict[str, Any] | None:
-    """DeepSeek V4 defaults to thinking mode; chat UX needs the fast path."""
+    """Supported DeepSeek Flash names use an explicit chat thinking policy."""
     if "deepseek" not in (config.base_url or "").lower():
         return None
-    if config.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+    if config.model not in APPROVED_DEEPSEEK_MODELS:
         return None
     thinking = "enabled" if DEEPSEEK_THINKING == "enabled" else "disabled"
     return {"thinking": {"type": thinking}}
@@ -452,6 +466,9 @@ def _invoke_agent_provider(
         api_key=config.api_key,
         base_url=config.base_url,
         timeout=timeout_seconds,
+        # Durable/chat retries belong to the application idempotency and
+        # deadline policy. Do not let the SDK multiply a paid invocation.
+        max_retries=0,
     )
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -605,6 +622,8 @@ def _approved_provider(value: str | None) -> ProviderName:
 
 
 def _approved_model(value: str | None) -> ModelId:
+    if value == "deepseek-flash":
+        return ModelId.DEEPSEEK_FLASH
     if value == "deepseek-v4-flash":
         return ModelId.DEEPSEEK_V4_FLASH
     if value == "deepseek-v4-pro":
