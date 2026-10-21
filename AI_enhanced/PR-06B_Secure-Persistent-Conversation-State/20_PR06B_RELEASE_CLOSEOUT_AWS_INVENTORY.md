@@ -4,14 +4,16 @@
 
 - **Inventory time:** 2026-10-20 CDT
 - **AWS account / region:** `448678332746` / `us-east-1`
-- **Execution identity:** `arn:aws:iam::448678332746:user/github-actions-deploy`
+- **Inventory identity:** `arn:aws:iam::448678332746:user/github-actions-deploy`
+- **Approved I1 cleanup identity:**
+  `arn:aws:iam::448678332746:user/ProjectOwnerAdmin`
 
-This is a read-only release-closeout record. The operator used only AWS
-identity, describe/list, metrics, pricing, and Cost Explorer APIs. No RDS, KMS,
-ECS, ECR, EC2 security-group, SSM, log-retention, or production application
-resource was created, modified, stopped, disabled, deregistered, or deleted.
-No database row, secret value, connection string, token, or application log
-payload was retrieved.
+The initial release-closeout inventory used only AWS identity, describe/list,
+metrics, pricing, and Cost Explorer APIs. A later, separately approved cleanup
+changed only the I1 RDS deletion-protection setting and deleted that instance.
+No KMS, ECS, ECR, EC2 security-group, SSM, log-retention, schema, or production
+application resource was changed. No database row, secret value, connection
+string, token, or application log payload is recorded in this document.
 
 The production release evidence remains in
 `19_PR06B_PRODUCTION_ACTIVATION_EXECUTION_RECORD.md`.
@@ -21,26 +23,65 @@ The production release evidence remains in
 PR-06B Full-Stack Production Release and Runtime-off Browser Acceptance are
 **PASS**. Production runs Backend TD23 and Frontend TD17. The database schema is
 at `b7d3a1e9c642`. Real AI Provider execution, Durable Runtime, Fake Runtime,
-additional deployment, and infrastructure cleanup remain unapproved.
+additional deployment, and any further infrastructure cleanup remain unapproved.
+
+## Approved post-closeout cleanup — I1 rehearsal RDS
+
+On 2026-10-20 CDT, a separately approved cost-cleanup change removed only
+`tripsync-postgres-pr06b-i1-20261019-01` in account `448678332746`, region
+`us-east-1`. The execution identity was `ProjectOwnerAdmin`.
+
+Deletion preflight confirmed all of the following:
+
+- PR #23 was merged at main commit
+  `b084d431092fc4f34c1eb77654b4861257ea3214`;
+- the target was the I1 PostgreSQL 18.3 restore-rehearsal instance restored from
+  `tripsync-postgres-i1-encrypted-20261019-01`, not the production instance;
+- the production `DATABASE_URL` endpoint matched
+  `tripsync-postgres-pr06b-prod-20261020-01` and did not match the I1 endpoint;
+- an independent CloudWatch query returned 51 five-minute samples with an I1
+  maximum of `0` connections, while the production database maximum was `5`;
+- no RDS Proxy or read-replica dependency referenced the I1 instance;
+- the retained I1 snapshot was `available`, 100% complete, encrypted with the
+  production CMK, and matched the restored engine and storage contract; and
+- Backend TD23 and Frontend TD17 were each `1/1/0`, both ALB targets were
+  `healthy`, and `/`, `/login`, and `/api/health` returned HTTP 200.
+
+The I1 rehearsal had been accepted as read-only compatibility validation and
+had no production endpoint assignment or snapshot-external data requiring
+retention. The operator then performed exactly these two state changes:
+
+| CloudTrail event | Time (CDT) | Operation | Result |
+| --- | --- | --- | --- |
+| `a651f028-953d-4b20-b097-e49a02ef03a1` | `2026-10-20 19:15:46` | `ModifyDBInstance` with deletion protection disabled and immediate application | Target returned `available` with deletion protection `false`. |
+| `2b63e7f2-22b6-45aa-9d6c-e90e5e1800eb` | `2026-10-20 19:15:51` | `DeleteDBInstance` with `skipFinalSnapshot=true` and `deleteAutomatedBackups=false` | Target entered `deleting` and subsequently returned `DBInstanceNotFound`. |
+
+No final snapshot was created. The existing automated backup record was left in
+`retained` state to expire through the RDS lifecycle. The five manual snapshots
+were unchanged, including the required encrypted I1 recovery snapshot. No other
+RDS instance, ECS Service, Task Definition, ECR image, security group, SSM
+parameter, schema, CMK, or runtime configuration was changed.
 
 ## RDS inventory and classification
 
-All three instances are PostgreSQL `18.3`, `db.t4g.micro`, Single-AZ, private,
-and use 20 GiB gp3 storage in `tripsync-private-db-subnet-group`.
+The initial inventory contained three PostgreSQL `18.3`, `db.t4g.micro`,
+Single-AZ, private instances with 20 GiB gp3 storage. After the approved I1
+cleanup, the production and isolated legacy instances remain.
 
 | Resource | Observed state | Classification | Closeout decision |
 | --- | --- | --- | --- |
 | `tripsync-postgres-pr06b-prod-20261020-01` | `available`; encrypted; CMK `82952d7c-8a33-4d3e-b4cd-00ee6c1ebb71`; 7-day backups; deletion protection enabled; current RDS SG; latest sampled connections `5` | **Current production — must retain** | Do not stop, delete, detach its SG, change its KMS dependency, or reduce recovery settings. |
 | `tripsync-postgres` | `available`; unencrypted; 1-day backups; deletion protection disabled; attached to `tripsync-rds-source-retained-sg`, which has no ingress; latest sampled connections `0` | **Temporary retained pre-I2 source** | Retain through the separately confirmed post-cutover period and consistency sign-off. Earliest review is approximately 2026-10-27 CDT; there is no automatic deletion approval. |
-| `tripsync-postgres-pr06b-i1-20261019-01` | `available`; encrypted with the production CMK; 7-day backups; deletion protection enabled; latest sampled connections `0` | **I1 restore-rehearsal instance** | Recovery evidence is complete. It is a future cleanup candidate after the evidence PR merges and an encrypted recovery snapshot is explicitly selected for retention. |
+| `tripsync-postgres-pr06b-i1-20261019-01` | **Deleted 2026-10-20 CDT**; final `describe-db-instances` returned `DBInstanceNotFound` | **Completed I1 cleanup** | The encrypted rehearsal snapshot remains available. No further action is authorized for its snapshots or automated backups. |
 
 The backend ECS service uses `sg-0185eb0590f96c27d`. The current RDS security
 group `sg-0bc74bd5a6f5c2728` permits PostgreSQL only from that backend group. The
 retained legacy database uses isolated group `sg-0f3bcb394f10b1395`, which had
-no ingress at inventory time. Three hours of RDS `DatabaseConnections` metrics
-showed maximums of `0`, `0`, and `5` for the legacy, I1, and production
-instances respectively. These facts corroborate, without reading a secret,
-that the encrypted I2 database is the active production target.
+no ingress at inventory time. The deletion preflight connection query showed an
+I1 maximum of `0` and a production maximum of `5`. A protected endpoint-only
+comparison also confirmed that the production database parameter referenced
+the encrypted I2 database, not the I1 instance. The I1 instance no longer
+exists.
 
 ## Snapshot and recovery evidence
 
@@ -54,10 +95,12 @@ Five manual snapshots were `available`:
 | `tripsync-postgres-i2-final-encrypted-20261020-01` | Yes | PR-06B CMK | **Recommended recovery-evidence retention**; this is the encrypted final cutover snapshot. |
 | `tripsync-postgres-r5-20261014-020428` | No | — | Pre-I1 historical migration snapshot; future cleanup candidate after evidence/retention review. |
 
-Automated snapshots also existed for all three database identities. They remain
-governed by the instances' 1-day or 7-day backup-retention settings and should
-be allowed to expire through the normal RDS lifecycle. No manual attempt to
-delete them is recommended in this closeout.
+Automated backups existed for all three database identities at inventory time.
+The approved I1 deletion used `deleteAutomatedBackups=false`; its backup record
+was observed as `retained` with 20 GiB logical allocation after the instance was
+gone. It should expire through the RDS lifecycle. The legacy and production
+backups remain governed by their 1-day and 7-day instance retention settings.
+No manual backup deletion is authorized by this record.
 
 Snapshot `AllocatedStorage` is the logical source size, not the billable
 incremental snapshot size. The cost section therefore presents a conservative
@@ -73,7 +116,7 @@ five independent full copies.
 | Manager / origin | Customer-managed / AWS KMS |
 | State | `Enabled` |
 | Rotation | Enabled; 365-day period; next rotation recorded for 2027-10-19 |
-| Current dependents | Production encrypted RDS, I1 RDS, encrypted manual snapshots, encrypted automated backups |
+| Current dependents | Production encrypted RDS, encrypted manual snapshots, production automated backups, and the retained I1 automated backup |
 
 **This key is a current production dependency and must be retained enabled.**
 Do not disable it, schedule deletion, replace its policy, or remove RDS access
@@ -142,22 +185,32 @@ baseline, not a guarantee of a future invoice.
 | RDS `db.t4g.micro` Single-AZ PostgreSQL | `$0.016/hour`; `$11.68/month` at 730 hours |
 | RDS gp3 | `$0.115/GiB-month`; `$2.30/month` for 20 GiB |
 | One current-size RDS total | approximately `$13.98/month` |
-| Three running RDS instances | approximately `$41.94/month` |
-| Extra legacy + I1 RDS instances | approximately `$27.96/month` above the required production instance |
+| Three running RDS instances before I1 cleanup | approximately `$41.94/month` |
+| Two running RDS instances after I1 cleanup | approximately `$27.96/month` |
+| Remaining extra legacy RDS instance | approximately `$13.98/month` above the required production instance |
 | Customer-managed KMS key | `$1.00/month` plus request charges |
 | PostgreSQL snapshot storage over free allocation | `$0.095/GiB-month` |
 | Five manual snapshots at a deliberately conservative full logical-size ceiling | up to `$9.50/month`; actual incremental billing may be lower |
 | ECR storage | `$0.10/GiB-month`; manifest-size indicator is about 12.301 GiB / `$1.23/month`, while actual September ECR cost was `$0.5729` |
 | Active Task Definition registrations | `$0`; only running Fargate tasks incur compute cost |
 
-Using the completed September account cost as the existing one-RDS production
-baseline, retaining two extra RDS instances and the new CMK produces a planning
-run rate of about `$91.77/month` before snapshot and ECR variation. Adding the
-conservative full-size manual-snapshot ceiling and current ECR size delta gives
-an intentionally cautious upper planning figure of about `$101.93/month`.
-Treat `$91.77–$101.93/month` as a closeout planning band, not an AWS forecast or
-invoice. It excludes unexpected traffic, burst CPU credits, data transfer,
-future log growth, taxes, and Provider use.
+Before cleanup, using the completed September account cost as the existing
+one-RDS production baseline, the two extra RDS instances and CMK produced a
+planning band of `$91.77–$101.93/month`. Removing the I1 instance eliminates
+approximately `$11.68/month` of instance time plus `$2.30/month` of gp3 storage,
+for an estimated ongoing saving of **`$13.98/month`**. The updated planning band
+is therefore **`$77.79–$87.95/month`** after the retained automated backup
+expires. These figures were recalculated deterministically from the documented
+public rates.
+
+No final snapshot was added. The retained automated backup has 20 GiB logical
+allocated storage and may create a temporary incremental backup charge until
+expiration. At the public `$0.095/GiB-month` rate, a deliberately conservative
+full-logical-size ceiling is `$1.90` for a full month or about `$0.44` prorated
+for seven days; actual incremental billing may be lower. The updated planning
+band remains guidance rather than an AWS forecast or invoice and excludes
+unexpected traffic, burst CPU credits, data transfer, future log growth, taxes,
+and Provider use.
 
 ## Minimum-risk future cleanup order
 
@@ -170,11 +223,10 @@ No step below is authorized by this document.
    production data consistency, and whether the old unencrypted database is
    still required. Do not retire it before the separately approved retention
    date and final recovery decision.
-3. **Retire the I1 live rehearsal database first:** after this evidence PR is
-   merged and an encrypted rehearsal snapshot is selected for retention,
-   request a separate change to remove deletion protection and delete only
-   `tripsync-postgres-pr06b-i1-20261019-01`. This is the lowest-risk material
-   monthly saving because it has no connections and is not production.
+3. **Completed — I1 live rehearsal database:** the separately approved change
+   deleted only `tripsync-postgres-pr06b-i1-20261019-01`; the encrypted rehearsal
+   snapshot remains available and the automated backup is retained for normal
+   lifecycle expiry.
 4. **Retire the isolated legacy database later:** after the old-source
    retention window and explicit data-owner approval, preserve the required
    final snapshot evidence and separately authorize deletion of only
@@ -199,8 +251,9 @@ No step below is authorized by this document.
 - Retain the historical Gate M `state=skipped` approval exception and
   maintenance-rule timing gap as process-improvement items; do not rerun the
   successful migration solely for audit cosmetics.
-- Schedule a separately approved **AWS Cleanup Change** after the old-source
-  retention date, beginning with the unused I1 live RDS instance.
+- If desired, schedule a separate **AWS Cleanup Change** after the old-source
+  retention date for the isolated legacy RDS. This completed change grants no
+  authority to delete it, any snapshot, ECR image, or Task Definition.
 - Schedule a separate **Provider and Durable Runtime readiness gate** only if a
   real-model production experience is desired. It is not part of this closeout.
 
@@ -208,6 +261,7 @@ No step below is authorized by this document.
 
 **PR-06B RELEASE CLOSEOUT: PASS.** The application release, schema migration,
 Backend/Frontend promotion, and Runtime-off browser acceptance are complete and
-documented. The AWS inventory is understood. The remaining issues are
-non-blocking operational observations and separately authorized cleanup or
-future-runtime work.
+documented. The first separately authorized cleanup removed the unused I1 live
+RDS while preserving the encrypted recovery evidence and production health.
+The remaining issues are non-blocking operational observations and separately
+authorized cleanup or future-runtime work.
