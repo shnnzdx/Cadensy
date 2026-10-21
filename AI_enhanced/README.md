@@ -13,5 +13,8 @@ This directory is organized by implementation phase. Historical filenames and re
 | [PR-04E — Controlled integration](PR-04E_Controlled-Integration/) | Controlled Pydantic application-composition design and implementation. |
 | [PR-05A — Alembic baseline](PR-05A_Alembic-Baseline/) | Alembic baseline report. |
 | [PR-05B — Revision and idempotency](PR-05B_Revision-and-Idempotency/) | Revision, durable idempotency, transaction kernel, writer coverage, generator, and R5 acceptance evidence. |
+| [PR-06A — Safe telemetry](PR-06A_Unified-Safe-Telemetry/) | Unified privacy-safe telemetry contracts and verification evidence. |
+| [PR-06B — Secure persistent conversations](PR-06B_Secure-Persistent-Conversation-State/) | Membership lifecycle, durable conversations, server-owned context, browser acceptance, production release, and closeout evidence. |
+| [PR-07 — Real AI runtime activation](PR-07_Real-AI-Runtime-Activation/) | Stage 1–4B audit, Legacy/DeepSeek activation preparation, real-provider validation, Direct Candidate persistence fix, Chromium acceptance, RC assembly, and CD-01 release-safety contracts. |
 
 The folders are an archival/navigation organization only; they do not alter the historical conclusions inside the reports. When a report contains a link to another report, its path has been updated where needed for this layout.

@@ -147,8 +147,12 @@ UNSPLASH_ACCESS_KEY=
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_THINKING=disabled
 CHAT_AGENT_RUNTIME=legacy
 MOCK_AI=1
+CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=0
+CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED=0
+CADENSY_E2E_FAKE_RUNTIME=0
 SETTLE_TICK_SECONDS=60
 DISABLE_SCHEDULER=0
 DEV_ALLOW_MEMBERSHIP_HEADER=0
@@ -170,6 +174,18 @@ Notes:
   composition requires `MOCK_AI=0`, a present `DEEPSEEK_API_KEY`, the official
   `https://api.deepseek.com` endpoint, and a configured/defaulted model. It
   fails closed and never falls back to Legacy.
+- DeepSeek is the current real Chat Provider. To exercise Durable Chat against
+  it in a non-production process, set `MOCK_AI=0`, provide the key securely,
+  keep the official HTTPS endpoint, and set only
+  `CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=1`. Leave the production
+  activation latch at `0` outside an explicitly authorized production change.
+- Production requires both Durable Runtime gates plus production signing
+  material. Release A pins both gates, `CADENSY_E2E_FAKE_RUNTIME`, and paid
+  Provider execution off; Release B is a separate authorization boundary.
+- `CADENSY_E2E_FAKE_RUNTIME=1` is only valid with `APP_ENV=test` and
+  `MOCK_AI=1`. It must never be used as a production fallback.
+- The completed local Stage 3B DeepSeek validation proves the local application
+  chain, not AWS production activation.
 - on Windows, pytest now forces the PostgreSQL test database and client connection to
   UTF-8 so non-ASCII fixtures stay valid
 - on this machine, the local AWS CLI credential copy also lives in `backend/.env`
