@@ -210,16 +210,28 @@ def test_release_runtime_off_contract_rejects_provider_credentials(location):
         helper.validate_runtime_off_task_definition(prepared, profile="release")
 
 
+@pytest.mark.parametrize(
+    "credential_name",
+    [
+        "DEEPSEEK_TOKEN",
+        "DEEPSEEK_KEY",
+        "OPENAI_KEY",
+        "ANTHROPIC_KEY",
+        "OLLAMA_KEY",
+    ],
+)
 @pytest.mark.parametrize("location", ["environment", "secrets"])
-def test_release_runtime_off_contract_rejects_provider_token_aliases(location):
+def test_release_runtime_off_contract_rejects_provider_credential_aliases(
+    location, credential_name
+):
     prepared = _prepared_release_task_definition()
     container = _application_container(prepared)
     if location == "environment":
-        container[location].append({"name": "DEEPSEEK_TOKEN", "value": "unsafe"})
+        container[location].append({"name": credential_name, "value": "unsafe"})
     else:
         container[location].append(
             {
-                "name": "DEEPSEEK_TOKEN",
+                "name": credential_name,
                 "valueFrom": "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/deepseek-token",
             }
         )
@@ -228,16 +240,28 @@ def test_release_runtime_off_contract_rejects_provider_token_aliases(location):
         helper.validate_runtime_off_task_definition(prepared, profile="release")
 
 
+@pytest.mark.parametrize(
+    "credential_name",
+    [
+        "DEEPSEEK_TOKEN",
+        "DEEPSEEK_KEY",
+        "OPENAI_KEY",
+        "ANTHROPIC_KEY",
+        "OLLAMA_KEY",
+    ],
+)
 @pytest.mark.parametrize("location", ["environment", "secrets"])
-def test_task_definition_generation_strips_provider_token_aliases(location):
+def test_task_definition_generation_strips_provider_credential_aliases(
+    location, credential_name
+):
     payload = _task_definition()
     container = _application_container(payload)
     if location == "environment":
-        container[location].append({"name": "DEEPSEEK_TOKEN", "value": "unsafe"})
+        container[location].append({"name": credential_name, "value": "unsafe"})
     else:
         container[location].append(
             {
-                "name": "DEEPSEEK_TOKEN",
+                "name": credential_name,
                 "valueFrom": "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/deepseek-token",
             }
         )
@@ -250,11 +274,11 @@ def test_task_definition_generation_strips_provider_token_aliases(location):
     prepared_container = _application_container(prepared)
 
     assert all(
-        entry["name"] != "DEEPSEEK_TOKEN"
+        entry["name"] != credential_name
         for entry in prepared_container["environment"]
     )
     assert all(
-        entry["name"] != "DEEPSEEK_TOKEN" for entry in prepared_container["secrets"]
+        entry["name"] != credential_name for entry in prepared_container["secrets"]
     )
 
 
