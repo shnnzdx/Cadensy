@@ -92,9 +92,13 @@ def _environment_and_secret_names(container: dict[str, Any]) -> tuple[dict[str, 
     return environment, secret_names
 
 
-def validate_release_a_baseline(payload: dict[str, Any]) -> None:
-    """Require the exact default-off profile that CD-02 can safely replace."""
+def validate_release_a_baseline(payload: dict[str, Any]) -> str:
+    """Require the exact default-off profile and return its immutable image."""
     _release_helper.validate_runtime_off_task_definition(payload, profile="release")
+    image = _application_container(_task_definition(payload)).get("image")
+    if not isinstance(image, str) or not _release_helper.APPROVED_IMAGE_RE.fullmatch(image):
+        _fail("Release A baseline must use the approved backend ECR repository pinned by sha256.")
+    return image
 
 
 def validate_activation_task_definition(payload: dict[str, Any]) -> None:
@@ -145,12 +149,18 @@ def prepare_activation_task_definition(
     payload: dict[str, Any], image: str, deepseek_api_key_secret_arn: str
 ) -> dict[str, Any]:
     """Clone one Release A task definition into the narrowly approved CD-02 profile."""
-    validate_release_a_baseline(payload)
+    release_a_image = validate_release_a_baseline(payload)
     _validate_secret_reference(deepseek_api_key_secret_arn)
+    if image != release_a_image:
+        _fail(
+            "DeepSeek activation must retain the exact current Release A backend image; "
+            "application image upgrades are a separate release."
+        )
 
-    # Reuse the reviewed registrable-field and digest-pinning conversion.  Its
-    # output has already removed any Provider credentials and pinned every
-    # default-off gate before the two approved gates are selectively enabled.
+    # Reuse the reviewed registrable-field conversion. Its output has already
+    # removed any Provider credentials and pinned every default-off gate before
+    # the two approved gates are selectively enabled. ``image`` is deliberately
+    # the exact Release A image, never a CD-02 tooling image.
     prepared = _release_helper.prepare_task_definition(copy.deepcopy(payload), image)
     container = _application_container(prepared)
     order, environment = _release_helper._environment_map(container)

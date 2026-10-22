@@ -88,7 +88,7 @@ def _container(payload: dict) -> dict:
 def test_activation_profile_is_exact_and_preserves_only_safe_existing_configuration():
     helper = _load_helper()
     source = _release_a_task_definition()
-    image = "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "b" * 64
+    image = _container(source["taskDefinition"])["image"]
     secret_arn = "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/deepseek-api-key"
 
     prepared = helper.prepare_activation_task_definition(source, image, secret_arn)
@@ -107,6 +107,37 @@ def test_activation_profile_is_exact_and_preserves_only_safe_existing_configurat
     assert secrets["DEEPSEEK_API_KEY"] == secret_arn
     assert set(secrets) == {"DATABASE_URL", "CONVERSATION_SUBMISSION_HMAC_KEY", "GEOAPIFY_API_KEY", "DEEPSEEK_API_KEY"}
     helper.validate_activation_task_definition(prepared)
+
+
+def test_activation_requires_the_exact_release_a_image_and_never_performs_an_image_upgrade():
+    helper = _load_helper()
+    source = _release_a_task_definition()
+    release_a_image = _container(source["taskDefinition"])["image"]
+
+    prepared = helper.prepare_activation_task_definition(
+        source,
+        release_a_image,
+        "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/deepseek-api-key",
+    )
+    assert _container(prepared)["image"] == release_a_image
+
+    with pytest.raises(helper.ContractError, match="retain the exact current Release A backend image"):
+        helper.prepare_activation_task_definition(
+            _release_a_task_definition(),
+            "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "b" * 64,
+            "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/deepseek-api-key",
+        )
+
+
+def test_release_a_baseline_requires_an_approved_digest_pinned_backend_image():
+    helper = _load_helper()
+    payload = _release_a_task_definition()
+    _container(payload["taskDefinition"])["image"] = (
+        "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend:latest"
+    )
+
+    with pytest.raises(helper.ContractError, match="approved backend ECR repository pinned by sha256"):
+        helper.validate_release_a_baseline(payload)
 
 
 @pytest.mark.parametrize(
@@ -209,5 +240,25 @@ def test_workflow_requires_immutable_inputs_secret_metadata_iam_simulation_and_r
         "Automatic Runtime-off rollback could not be fully verified",
         "--force-new-deployment",
         "describe-target-health",
+        "TOOLING_SHA",
+        "RELEASE_A_IMAGE_SOURCE_SHA",
+        "release_a_image",
+        "test \"${release_a_image##*@}\" = \"${RUNTIME_DIGEST}\"",
     ):
         assert required in script
+
+
+def test_workflow_separates_reviewed_tooling_identity_from_release_a_image_provenance():
+    workflow = _workflow()
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert {"tooling_sha", "runtime_image_digest", "release_a_image_source_sha"} <= set(inputs)
+    assert workflow["jobs"]["execute"]["steps"][0]["with"]["ref"] == "${{ inputs.tooling_sha }}"
+
+    script = "\n".join(
+        step.get("run", "")
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert '--arg tag "${RELEASE_A_IMAGE_SOURCE_SHA}"' in script
+    assert '--arg tag "${TOOLING_SHA}"' not in script
+    assert 'test "${TOOLING_SHA}" = "${RELEASE_A_IMAGE_SOURCE_SHA}"' not in script

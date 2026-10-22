@@ -23,6 +23,25 @@ deployed, Runtime-off backend task definition, preserves Database, HMAC, IAM,
 networking, logging, and application configuration, then permits only one
 additional ECS secret reference: `DEEPSEEK_API_KEY`.
 
+CD-02 deliberately separates the reviewed `tooling_sha` from the original
+`release_a_image_source_sha`. The former selects the workflow/helper code from
+merged `main`; the latter verifies ECR provenance for the image already running
+in Release A. They are not required to match. Activation fails unless the
+requested digest and the generated task definition use that exact current
+Release A image.
+
+### Final image-identity correction
+
+The first CD-02 version used one `source_sha` for both identities. Before merge,
+that ambiguous input was replaced with the two names above. The workflow now
+checks that the current ECS backend image is the approved ECR repository pinned
+by digest, that its digest equals the requested Release A digest, and that ECR
+tags that digest with `release_a_image_source_sha`. It then passes the current
+full image URI to the helper. The helper independently rejects an image that is
+not byte-for-byte the current Release A image. Consequently CD-02 cannot use a
+newer application image merely because its activation tooling was reviewed at a
+newer commit.
+
 The generated activation profile is exact:
 
 ```ini
@@ -67,7 +86,7 @@ rejected. The workflow never retrieves a secret or parameter value.
 
 ## Validation record
 
-- Offline helper/workflow/CD-01/CI contract tests: **81 passed**.
+- Final image-identity helper/workflow/CD-01/CI contract tests: **84 passed**.
 - Local PostgreSQL Durable Runtime/API/Idempotency regression: **64 passed**.
 - Local PostgreSQL CD-02/CD-01/Runtime Gate/lease-concurrency regression:
   **98 passed**.

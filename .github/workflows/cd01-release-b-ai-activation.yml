@@ -9,12 +9,16 @@ on:
         default: activate
         type: choice
         options: [activate, runtime_off_rollback]
-      source_sha:
-        description: Reviewed main SHA owning this activation tooling and the immutable backend image
+      tooling_sha:
+        description: Reviewed main SHA owning the CD-02 workflow and helper implementation
         required: true
         type: string
       runtime_image_digest:
-        description: Immutable backend image digest tagged by source_sha; required for activate
+        description: Release A backend image digest; required for activate and must equal the current service image
+        required: false
+        type: string
+      release_a_image_source_sha:
+        description: Original source SHA whose ECR provenance tag identifies the deployed Release A backend image; required for activate
         required: false
         type: string
       expected_current_task_definition_arn:
@@ -86,10 +90,10 @@ jobs:
     environment: Main
     timeout-minutes: 35
     steps:
-      - name: Check out reviewed tooling at the approved source SHA
+      - name: Check out reviewed tooling at the approved tooling SHA
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ inputs.tooling_sha }}
           fetch-depth: 0
 
       - name: Require one recorded non-bypassed Main approval
@@ -109,22 +113,24 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          TOOLING_SHA: ${{ inputs.tooling_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          RELEASE_A_IMAGE_SOURCE_SHA: ${{ inputs.release_a_image_source_sha }}
           DEEPSEEK_SECRET_ARN: ${{ inputs.deepseek_api_key_secret_arn }}
           EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
           ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
         run: |
           set -euo pipefail
-          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}" =~ ^arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task-definition/${CONTAINER_NAME}:[0-9]+$ ]]
           [[ "${ROLLBACK_TASK_DEFINITION_ARN}" =~ ^arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task-definition/${CONTAINER_NAME}:[0-9]+$ ]]
-          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${TOOLING_SHA}"
           git fetch --no-tags origin main
-          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          git merge-base --is-ancestor "${TOOLING_SHA}" origin/main
           test -f scripts/cd01/prepare_deepseek_activation_task_definition.py
           if [[ "${OPERATION}" == "activate" ]]; then
             [[ "${RUNTIME_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "${RELEASE_A_IMAGE_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
             [[ "${DEEPSEEK_SECRET_ARN}" =~ ^arn:aws:(ssm|secretsmanager):${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}: ]]
           else
             test "${OPERATION}" = "runtime_off_rollback"
@@ -142,6 +148,7 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
           ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
         run: |
@@ -158,6 +165,10 @@ jobs:
             # An activation can only replace the exact independently verified
             # Release A baseline.  It may never skip over an unknown service revision.
             test "${current_task_definition}" = "${ROLLBACK_TASK_DEFINITION_ARN}"
+            release_a_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
+            [[ "${release_a_image}" =~ ^${APPROVED_AWS_ACCOUNT_ID}\.dkr\.ecr\.${APPROVED_AWS_REGION}\.amazonaws\.com/${ECR_REPOSITORY}@sha256:[0-9a-f]{64}$ ]]
+            test "${release_a_image##*@}" = "${RUNTIME_DIGEST}"
+            echo "release_a_image=${release_a_image}" >> "${GITHUB_OUTPUT}"
           else
             # Emergency Runtime-off rollback deliberately does not need a
             # DeepSeek Secret reference.  It does require that the operator
@@ -170,13 +181,13 @@ jobs:
         if: inputs.operation == 'activate'
         shell: bash
         env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_A_IMAGE_SOURCE_SHA: ${{ inputs.release_a_image_source_sha }}
           RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
           DEEPSEEK_SECRET_ARN: ${{ inputs.deepseek_api_key_secret_arn }}
         run: |
           set -euo pipefail
           aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${RUNTIME_DIGEST}" --output json > /tmp/runtime-image.json
-          jq -e --arg tag "${SOURCE_SHA}" '.imageDetails | length == 1 and (.imageDetails[0].imageTags | index($tag))' /tmp/runtime-image.json >/dev/null
+          jq -e --arg tag "${RELEASE_A_IMAGE_SOURCE_SHA}" '.imageDetails | length == 1 and (.imageDetails[0].imageTags | index($tag))' /tmp/runtime-image.json >/dev/null
           execution_role_arn="$(jq -r '.taskDefinition.executionRoleArn' /tmp/current-task-definition.json)"
           test -n "${execution_role_arn}" && test "${execution_role_arn}" != "null"
           case "${DEEPSEEK_SECRET_ARN}" in
@@ -233,7 +244,7 @@ jobs:
             echo "final_task_definition=${ROLLBACK_TASK_DEFINITION_ARN}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          image="${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
+          image="${{ steps.current.outputs.release_a_image }}"
           deployment_started=0
           rollback_on_error() {
             exit_status="$?"
@@ -265,14 +276,18 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          TOOLING_SHA: ${{ inputs.tooling_sha }}
+          RELEASE_A_IMAGE_SOURCE_SHA: ${{ inputs.release_a_image_source_sha }}
         run: |
           set -euo pipefail
           {
             echo '## CD-02 controlled DeepSeek production operation'
             echo
             echo "- Operation: ${OPERATION}"
-            echo "- Reviewed source SHA: ${SOURCE_SHA}"
+            echo "- Reviewed tooling SHA: ${TOOLING_SHA}"
+            if [[ "${OPERATION}" == "activate" ]]; then
+              echo "- Release A image source SHA: ${RELEASE_A_IMAGE_SOURCE_SHA}"
+            fi
             echo "- Final task definition: ${{ steps.execute.outputs.final_task_definition }}"
             echo '- Secret values, prompts, tool results, and request payloads are never read or emitted by this workflow.'
             echo '- Activation establishes infrastructure readiness only; bounded real-provider verification requires separate authorization.'
