@@ -67,14 +67,16 @@ rejected. The workflow never retrieves a secret or parameter value.
 
 ## Validation record
 
-- Offline helper/workflow/CD-01 regression tests: **81 passed**.
+- Offline helper/workflow/CD-01/CI contract tests: **81 passed**.
+- Local PostgreSQL Durable Runtime/API/Idempotency regression: **64 passed**.
+- Local PostgreSQL CD-02/CD-01/Runtime Gate/lease-concurrency regression:
+  **98 passed**.
 - Python compilation of the new helper: **passed**.
 - `git diff --check`: **passed**.
 - Changed-file high-confidence secret scan: **passed**.
-- PostgreSQL-backed Durable regression: **blocked locally** because
-  `localhost:5432` did not respond. No production or non-local database was
-  used; waiting test processes were terminated after the condition was
-  confirmed.
+- PostgreSQL evidence used two newly created local databases with names ending
+  in `_test`; both were deleted after successful verification. No production or
+  non-local database was used.
 
 ## Explicitly not performed
 
