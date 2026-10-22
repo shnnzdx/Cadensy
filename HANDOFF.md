@@ -183,9 +183,8 @@ POST /api/trips/{trip_id}/plans/generate
 → backend/app/agents/base.py
 ```
 
-当前真实 AI Provider 路由为 **DeepSeek-only**，由 `DEEPSEEK_*` 配置控制；不再使用
-Ollama Cloud 或 `CHAT_AI_PROVIDER` / `PLANNER_AI_PROVIDER` / `EXPLAINER_AI_PROVIDER`
-作为当前运行时选择路径。Chat Runtime 默认是 `CHAT_AGENT_RUNTIME=legacy`；
+当前真实 AI Provider 路由为 **DeepSeek-only**，由 `DEEPSEEK_*` 配置控制；不使用
+任何历史 Provider selector 作为当前运行时选择路径。Chat Runtime 默认是 `CHAT_AGENT_RUNTIME=legacy`；
 `pydantic` 仍是显式 opt-in，且不会回退到 Legacy。
 
 仓库本地配置示例的默认 `DEEPSEEK_MODEL` 是兼容别名

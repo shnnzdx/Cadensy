@@ -64,14 +64,8 @@ https://github.com/shnnzdx/cap_stone/actions/workflows/cloud-demo-purge.yml
 Cloud Demo Purge successful run:
 https://github.com/shnnzdx/cap_stone/actions/runs/31663298728
 
-Backend AI Runtime Config workflow:
-https://github.com/shnnzdx/cap_stone/actions/workflows/backend-ai-runtime-config.yml
-
-Backend AI Runtime Config successful run:
-https://github.com/shnnzdx/cap_stone/actions/runs/31406205586
-
-Backend AI Runtime Config guest-invite repair run:
-https://github.com/shnnzdx/cap_stone/actions/runs/31996161940
+DeepSeek-only Release B activation workflow:
+https://github.com/shnnzdx/Cadensy/actions/workflows/cd01-release-b-ai-activation.yml
 ```
 
 ## Local AWS Operator Credential Source
@@ -192,9 +186,7 @@ AWS/TRIPSYNC_AWS_URLS.md
 AWS/CUSTOM_DOMAIN_HTTPS_RESULT.md
 AWS/PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 AWS/CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
-AWS/BACKEND_AI_RUNTIME_RUNBOOK.md
-AWS/CLOUD_DEEPSEEK_CLI_RUNBOOK.md
-AWS/CLOUD_DUAL_AI_CLI_RUNBOOK.md
+GitHub CD-02 DeepSeek-only activation workflow
 AWS/PHASE6_RUNTIME_SECRETS_PLAN.md
 ```
 
@@ -231,9 +223,8 @@ organizer@cadensy.local
 participant@cadensy.local
 ```
 
-Use `AWS/BACKEND_AI_RUNTIME_RUNBOOK.md` and the manual `Backend AI Runtime
-Config` workflow if the deployed backend should stop using `MOCK_AI=1` and start
-using a real OpenAI-compatible provider.
+Use the protected CD-02 DeepSeek-only activation workflow from `main` if the
+deployed backend should enable real AI. Do not edit ECS task definitions by hand.
 
 Historical-only demo cleanup notes are archived at:
 
@@ -241,18 +232,15 @@ Historical-only demo cleanup notes are archived at:
 AWS/archive/CLOUD_DEMO_PURGE_RUNBOOK.md
 ```
 
-Current backend AI runtime:
+Current backend AI activation contract:
 
 ```text
 MOCK_AI=0
-CHAT_AI_PROVIDER=deepseek
-PLANNER_AI_PROVIDER=deepseek
-EXPLAINER_AI_PROVIDER=deepseek
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
-OLLAMA_CLOUD_BASE_URL=https://ollama.com/v1/
-OLLAMA_CLOUD_MODEL=qwen3.5:cloud
-DEV_ALLOW_MEMBERSHIP_HEADER=1
+DEEPSEEK_MODEL=deepseek-flash
+CHAT_AGENT_RUNTIME=legacy
+CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=1 only after authorized Release B activation
+CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED=1 only after authorized Release B activation
 ```
 
 Guest invite cloud verification on Monday, August 17, 2026:
@@ -274,17 +262,8 @@ Current backend non-AI provider secret expected in cloud runtime:
 GEOAPIFY_API_KEY -> /tripsync/backend/prod/geoapify-api-key
 ```
 
-Current manual DeepSeek CLI operator guide:
-
-```text
-AWS/CLOUD_DEEPSEEK_CLI_RUNBOOK.md
-```
-
-Current manual dual-AI CLI operator guide:
-
-```text
-AWS/CLOUD_DUAL_AI_CLI_RUNBOOK.md
-```
+There is no supported manual provider-switching CLI guide. CD-02 is the sole
+production AI activation control plane.
 
 Cloud branch policy:
 

@@ -5,8 +5,7 @@
 1. `DEEPSEEK_*` provider 配置
 2. `chat` / `planner` / `explainer` 只是调用场景标签,不再切换厂商
 
-这样可以避免本地和云端再出现 legacy / Ollama / DeepSeek 三套配置并存时的
-混乱路由问题。
+这样可以避免本地和云端出现多个 Provider 配置并存时的混乱路由问题。
 """
 
 from __future__ import annotations
