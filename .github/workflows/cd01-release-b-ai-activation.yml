@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${RUNTIME_DIGEST}" --output json > /tmp/runtime-image.json
-          jq -e --arg tag "${RELEASE_A_IMAGE_SOURCE_SHA}" '.imageDetails | length == 1 and (.imageDetails[0].imageTags | index($tag))' /tmp/runtime-image.json >/dev/null
+          jq -e --arg tag "${RELEASE_A_IMAGE_SOURCE_SHA}" '(.imageDetails | length == 1) and (.imageDetails[0].imageTags | index($tag))' /tmp/runtime-image.json >/dev/null
           execution_role_arn="$(jq -r '.taskDefinition.executionRoleArn' /tmp/current-task-definition.json)"
           test -n "${execution_role_arn}" && test "${execution_role_arn}" != "null"
           case "${DEEPSEEK_SECRET_ARN}" in

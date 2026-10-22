@@ -112,3 +112,42 @@ execution, an authorized operator must supply the current Release A baseline
 ARN, the approved existing DeepSeek secret reference, fixed source SHA/image
 digest, and approve the protected `Main` deployment. Bounded production chat
 verification is a separate authorization after infrastructure activation.
+
+## Production activation attempt record and follow-up fix
+
+**Date:** 2026-10-22
+**Scope:** CD-02 infrastructure activation only. No real Provider request was
+sent and no Secret value was read.
+
+Two controlled runs stopped before an ECS task-definition registration or a
+service update:
+
+1. Run `39808879373` stopped at the approval-record guard. The `Main`
+   Environment had a required reviewer but still allowed administrator bypass;
+   GitHub recorded the deployment as `skipped`, which CD-02 correctly rejected.
+   The Environment was then hardened to disallow administrator bypass while
+   preserving the required reviewer and branch policy.
+2. Run `39809861614` had a normal recorded `approved` Main-environment review.
+   It then stopped in the ECR provenance preflight because its `jq` filter piped
+   away the response root before accessing `imageDetails` a second time. This
+   was an implementation defect, not an ECR, IAM, secret-metadata, image, or
+   runtime configuration failure.
+
+The verified production state after both failed attempts remained the Release A
+baseline: backend task definition `tripsync-backend:25`, Durable Runtime gates
+off, no attached `DEEPSEEK_API_KEY`, one running backend task, and healthy
+ALB/API health. No rollback was necessary because neither run reached the
+activation write step.
+
+The follow-up change preserves the existing tag-provenance predicate while
+keeping the ECR response root for both checks:
+
+```jq
+(.imageDetails | length == 1) and (.imageDetails[0].imageTags | index($tag))
+```
+
+It adds a focused offline workflow-contract regression. The local CD-02 and
+CD-01 safety contract suite passed after the change. The Windows development
+host does not include `jq`; the actual GitHub Ubuntu runner provides it, so the
+filter will be validated again by the repair PR's CI before any further
+production activation attempt.
