@@ -2,6 +2,13 @@
 
 ## Status and boundary
 
+**Status: DEFERRED — NON-BLOCKING (2026-10-22).** Release B activation and
+bounded real-provider acceptance have completed successfully. This retirement
+plan remains intentionally deferred because the current approved Runtime-off
+rollback baseline is `tripsync-backend:25`, which retains historical Ollama
+environment fields. This document does not authorize any AWS deletion, IAM
+change, task-definition deregistration, or rollback-baseline replacement.
+
 This is an inventory and retirement plan, not an AWS deletion procedure. It
 records metadata-only observations made on 2026-10-22. No parameter value,
 Secret value, credential, prompt, or user data was read.
@@ -9,10 +16,10 @@ Secret value, credential, prompt, or user data was read.
 No item below may be deleted until all of these gates are met:
 
 1. A separately authorized CD-02 Release B activation has completed and its
-   bounded real-provider acceptance has passed.
+   bounded real-provider acceptance has passed. **Met on 2026-10-22.**
 2. A separately validated DeepSeek-only Runtime-off rollback baseline exists.
    It must retain Durable History while containing no Ollama environment value
-   or secret reference.
+   or secret reference. **Not yet met; retain `tripsync-backend:25` unchanged.**
 3. The ECS service and every rollback target selected for operations have been
    checked for no remaining Ollama dependency.
 4. An operator has approved the exact deletion targets and IAM-policy change.
