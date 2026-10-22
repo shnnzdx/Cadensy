@@ -262,3 +262,16 @@ def test_workflow_separates_reviewed_tooling_identity_from_release_a_image_prove
     assert '--arg tag "${RELEASE_A_IMAGE_SOURCE_SHA}"' in script
     assert '--arg tag "${TOOLING_SHA}"' not in script
     assert 'test "${TOOLING_SHA}" = "${RELEASE_A_IMAGE_SOURCE_SHA}"' not in script
+
+
+def test_workflow_ecr_provenance_check_keeps_the_ecr_response_root_for_both_assertions():
+    """The digest lookup must validate its tag without piping away imageDetails."""
+    workflow = _workflow()
+    script = "\n".join(
+        step.get("run", "")
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+    )
+
+    assert '(.imageDetails | length == 1) and (.imageDetails[0].imageTags | index($tag))' in script
+    assert '.imageDetails | length == 1 and (.imageDetails[0].imageTags | index($tag))' not in script
