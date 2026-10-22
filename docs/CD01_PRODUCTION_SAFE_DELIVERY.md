@@ -35,7 +35,7 @@ does not reinterpret that manual release as a deployment workflow run.
 | `build-validation.yml` | Reused as the required upstream gate | Its `CI Regression Gates` run validates Legacy, isolated Pydantic, production image, migration-runner image, and frontend contracts. CD-01 consumes only a successful **push to `main`** run. |
 | `r5-manual-ecr-build.yml` | Historical release evidence; patterns reused, workflow left unchanged | It established immutable ECR tags, offline migration-runner validation, and account pinning for the R5 release. It is intentionally fixed to the R5 SHA, so it is not general CD. |
 | `main.yml` | Not a release workflow | AWS identity verification only. |
-| `database-readiness.yml`, `runtime-secrets-readiness.yml`, `backend-ai-secret-provision.yml`, `backend-ai-runtime-config.yml` | Not used for promotion | Readiness/configuration are not a schema compatibility proof; secret/configuration workflows are not a deployment approval boundary. |
+| `database-readiness.yml`, `runtime-secrets-readiness.yml`, and other readiness-only workflows | Not used for promotion | Readiness/configuration are not a schema compatibility proof; they are not a deployment approval boundary. |
 | `phase5-backend-provision.yml`, `phase6-runtime-provision.yml`, `phase7-backend-runtime-config.yml` | Explicitly excluded | Phase 5 can provision/mutate network, IAM, ECR, logging, and ALB resources. Phase 6 contains the prohibited legacy `app.db.init_schema` path. Phase 7 hand-authors a task definition instead of preserving the live one. |
 | `phase8-frontend-provision.yml`, `phase9-public-e2e.yml`, `phase10-https-custom-domain.yml`, `frontend-container-readiness.yml`, `frontend-hosting-proof.yml` | Out of backend CD scope | They concern frontend provisioning/hosting/public proof, not the backend release boundary. |
 | `cloud-demo-purge.yml`, `cloud-fixed-accounts-upsert.yml` | Explicitly excluded | They can mutate cloud demo/account data and must never be used as deployment smoke tests. |
@@ -264,8 +264,8 @@ entry, or an enabled base/Fake/Mock path rejects the baseline.
   credential is attached. Durable history remains readable, but production AI
   execution is not activated.
 - **Release B — separately authorized activation:** only a later reviewed
-  process may attach the DeepSeek secret reference and enable both Runtime
-  permissions. The legacy Ollama-era configuration workflows are not the
+  CD-02 process may attach the DeepSeek secret reference and enable both Runtime
+  permissions. The retired provider-configuration workflows are not an
   activation procedure.
 
 The successful Stage 3B real DeepSeek run was isolated local evidence. It does

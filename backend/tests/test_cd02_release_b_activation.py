@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,10 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_deepseek_activation_task_definition.py"
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-release-b-ai-activation.yml"
+OBSOLETE_OLLAMA_WORKFLOWS = (
+    REPOSITORY_ROOT / ".github" / "workflows" / "backend-ai-runtime-config.yml",
+    REPOSITORY_ROOT / ".github" / "workflows" / "backend-ai-secret-provision.yml",
+)
 
 
 def _load_helper():
@@ -159,11 +164,15 @@ def test_activation_rejects_unapproved_secret_references(secret_arn: str):
         )
 
 
-def test_activation_rejects_other_provider_credentials_and_plaintext_collisions():
+@pytest.mark.parametrize("provider_credential", ["OPENAI_KEY", "ANTHROPIC_KEY", "MISTRAL_API_KEY"])
+def test_activation_rejects_other_provider_credentials_and_plaintext_collisions(provider_credential):
     helper = _load_helper()
     provider_payload = _release_a_task_definition()
     provider_payload["taskDefinition"]["containerDefinitions"][0]["secrets"].append(
-        {"name": "OPENAI_KEY", "valueFrom": "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/openai"}
+        {
+            "name": provider_credential,
+            "valueFrom": "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/other-provider",
+        }
     )
     with pytest.raises(helper.ContractError, match="Provider credential"):
         helper.prepare_activation_task_definition(
@@ -178,6 +187,60 @@ def test_activation_rejects_other_provider_credentials_and_plaintext_collisions(
     )
     with pytest.raises(helper.ContractError):
         helper.validate_release_a_baseline(collision_payload)
+
+
+def test_activation_strips_legacy_ollama_namespace_and_provider_selectors_without_mutating_release_a():
+    helper = _load_helper()
+    source = _release_a_task_definition()
+    container = _container(source["taskDefinition"])
+    container["environment"].extend(
+        [
+            {"name": "OLLAMA_CLOUD_BASE_URL", "value": "https://ollama.example/v1"},
+            {"name": "OLLAMA_CLOUD_MODEL", "value": "legacy-cloud-model"},
+            {"name": "OLLAMA_LOCAL_FALLBACK_MODE", "value": "enabled"},
+            {"name": "CHAT_AI_PROVIDER", "value": "ollama_cloud"},
+            {"name": "PLANNER_AI_PROVIDER", "value": "ollama_local"},
+            {"name": "EXPLAINER_AI_PROVIDER", "value": "deepseek"},
+        ]
+    )
+    container["secrets"].append(
+        {
+            "name": "OLLAMA_CLOUD_FALLBACK_REFERENCE",
+            "valueFrom": "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/ollama-fallback-reference",
+        }
+    )
+    before = copy.deepcopy(source)
+
+    prepared = helper.prepare_activation_task_definition(
+        source,
+        _container(source["taskDefinition"])["image"],
+        "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/deepseek-api-key",
+    )
+    prepared_container = _container(prepared)
+    environment = {entry["name"]: entry["value"] for entry in prepared_container["environment"]}
+    secret_names = {entry["name"] for entry in prepared_container["secrets"]}
+
+    assert source == before
+    assert all(not name.upper().startswith("OLLAMA_") for name in environment)
+    assert all(not name.upper().endswith("_AI_PROVIDER") for name in environment)
+    assert all("ollama" not in str(value).casefold() for value in environment.values())
+    assert all(not name.upper().startswith("OLLAMA_") for name in secret_names)
+    assert secret_names == {
+        "DATABASE_URL",
+        "CONVERSATION_SUBMISSION_HMAC_KEY",
+        "GEOAPIFY_API_KEY",
+        "DEEPSEEK_API_KEY",
+    }
+    helper.validate_activation_task_definition(prepared)
+
+    prepared_container["secrets"].append(
+        {
+            "name": "OLLAMA_CLOUD_API_KEY",
+            "valueFrom": "arn:aws:ssm:us-east-1:448678332746:parameter/tripsync/backend/prod/ollama-key",
+        }
+    )
+    with pytest.raises(helper.ContractError, match="Retired Ollama secret reference"):
+        helper.validate_activation_task_definition(prepared)
 
 
 def test_activation_rejects_a_non_release_a_or_invalid_runtime_profile():
@@ -216,6 +279,7 @@ def test_workflow_is_main_only_manual_and_has_no_secret_value_or_schema_operatio
     assert "alembic" not in script
     assert "aws rds" not in script
     assert "aws iam put" not in script
+    assert all(not workflow_path.exists() for workflow_path in OBSOLETE_OLLAMA_WORKFLOWS)
 
 
 def test_workflow_requires_immutable_inputs_secret_metadata_iam_simulation_and_runtime_off_rollback():

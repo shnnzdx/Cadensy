@@ -2336,7 +2336,7 @@ AWS/TRIPSYNC_AWS_MASTER_CONTEXT_FINAL.md
 AWS/TRIPSYNC_AWS_URLS.md
 AWS/PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 AWS/CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
-AWS/BACKEND_AI_RUNTIME_RUNBOOK.md
+GitHub CD-02 DeepSeek-only activation workflow
 AWS/PHASE6_RUNTIME_SECRETS_PLAN.md
 ```
 
@@ -2361,13 +2361,12 @@ AWS/CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
 For backend AI runtime activation, use:
 
 ```text
-AWS/BACKEND_AI_RUNTIME_RUNBOOK.md
-.github/workflows/backend-ai-runtime-config.yml
+.github/workflows/cd01-release-b-ai-activation.yml
 ```
 
-This path keeps the current private RDS model, preserves the deployed backend
-service shape, and updates ECS runtime config so the backend can switch between
-`MOCK_AI=1` demo mode and a real OpenAI-compatible provider.
+This protected, DeepSeek-only path keeps the current private RDS model,
+preserves the deployed backend service shape and exact Release A image, and
+updates only the approved runtime profile after a Main-environment approval.
 
 Backend AI runtime activation completed successfully:
 
@@ -2375,7 +2374,7 @@ Backend AI runtime activation completed successfully:
 https://github.com/shnnzdx/cap_stone/actions/runs/31406205586
 ```
 
-Current deployed AI runtime:
+Historical deployed AI runtime evidence (superseded by CD-02):
 
 ```text
 MOCK_AI=0

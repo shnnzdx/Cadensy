@@ -51,10 +51,29 @@ _OTHER_PROVIDER_PREFIXES = tuple(
     for prefix in _release_helper.AI_PROVIDER_CREDENTIAL_PREFIXES
     if prefix != "DEEPSEEK"
 )
+_OLLAMA_NAMESPACE_RE = re.compile(r"^OLLAMA(?:_|$)", re.IGNORECASE)
+_AI_PROVIDER_SELECTOR_RE = re.compile(r"(?:^|_)AI_PROVIDER$", re.IGNORECASE)
 
 
 def _fail(message: str) -> None:
     raise ContractError(message)
+
+
+def _is_ollama_namespace(name: object) -> bool:
+    return isinstance(name, str) and bool(_OLLAMA_NAMESPACE_RE.match(name))
+
+
+def _is_retired_ollama_configuration(name: object) -> bool:
+    """Match the retired namespace plus the old vendor-selector seam.
+
+    The Activation profile has no provider selectors: DeepSeek is fixed by its
+    approved environment values.  Removing every historical ``*_AI_PROVIDER``
+    selector prevents an old ``ollama_cloud``/``ollama_local`` value from
+    surviving under a non-Ollama variable name.
+    """
+    return isinstance(name, str) and (
+        _is_ollama_namespace(name) or bool(_AI_PROVIDER_SELECTOR_RE.search(name))
+    )
 
 
 def _task_definition(payload: dict[str, Any]) -> dict[str, Any]:
@@ -122,6 +141,8 @@ def validate_activation_task_definition(payload: dict[str, Any]) -> None:
 
     for name in environment:
         upper_name = name.upper()
+        if _is_retired_ollama_configuration(name):
+            _fail(f"Retired Ollama configuration or provider selector {name!r} is forbidden.")
         if upper_name.startswith(_OTHER_PROVIDER_PREFIXES):
             _fail(f"Non-DeepSeek provider configuration {name!r} is forbidden.")
         if upper_name.startswith("DEEPSEEK_") and name not in _ALLOWED_DEEPSEEK_ENVIRONMENT_NAMES:
@@ -132,6 +153,8 @@ def validate_activation_task_definition(payload: dict[str, Any]) -> None:
     if secret_names.count("DEEPSEEK_API_KEY") != 1:
         _fail("DeepSeek activation requires exactly one DEEPSEEK_API_KEY secret reference.")
     for name in secret_names:
+        if _is_ollama_namespace(name):
+            _fail(f"Retired Ollama secret reference {name!r} is forbidden.")
         if _release_helper._is_provider_credential(name) and name != "DEEPSEEK_API_KEY":
             _fail(f"Non-DeepSeek provider credential {name!r} is forbidden.")
         if _release_helper._is_unclassified_api_key(name):
@@ -164,9 +187,22 @@ def prepare_activation_task_definition(
     prepared = _release_helper.prepare_task_definition(copy.deepcopy(payload), image)
     container = _application_container(prepared)
     order, environment = _release_helper._environment_map(container)
+    environment = {
+        name: value
+        for name, value in environment.items()
+        if not _is_retired_ollama_configuration(name)
+    }
+    order = [name for name in order if name in environment]
     secrets = container.get("secrets", [])
     if not isinstance(secrets, list):
         _fail("Container secrets must be a list.")
+    if any(not isinstance(entry, dict) for entry in secrets):
+        _fail("Container secret entries must be objects.")
+    secrets = [
+        entry
+        for entry in secrets
+        if not _is_ollama_namespace(entry.get("name", ""))
+    ]
     if any(entry.get("name") == "DEEPSEEK_API_KEY" for entry in secrets):
         _fail("Release A baseline must not already contain DEEPSEEK_API_KEY.")
 

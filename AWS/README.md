@@ -12,9 +12,7 @@ AWS/TRIPSYNC_AWS_URLS.md
 AWS/CUSTOM_DOMAIN_HTTPS_RESULT.md
 AWS/PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 AWS/CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
-AWS/BACKEND_AI_RUNTIME_RUNBOOK.md
-AWS/CLOUD_DEEPSEEK_CLI_RUNBOOK.md
-AWS/CLOUD_DUAL_AI_CLI_RUNBOOK.md
+AWS/DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md
 ```
 
 Use `TRIPSYNC_AWS_MASTER_CONTEXT_FINAL.md` for the full architecture and deployment history.
@@ -30,30 +28,15 @@ Use `PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md` when continuing HTTPS/custom domain wo
 Use `CLOUD_FIXED_ACCOUNTS_RUNBOOK.md` when the private cloud RDS database
 should contain the two fixed backend accounts without creating any demo trip.
 
-Use `BACKEND_AI_RUNTIME_RUNBOOK.md` when the deployed backend should switch from
-`MOCK_AI=1` to a real provider and the AI runtime secret may need to be
-provisioned first.
+Use `DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md` for the metadata-only legacy
+inventory and the separately authorized post-Release-B retirement sequence.
 
-Important on Monday, August 17, 2026:
-
-```text
-guest invite links on cloud depend on DEV_ALLOW_MEMBERSHIP_HEADER=1 in the backend ECS runtime
-if this is changed back to 0, guest join can appear to succeed but the next trip read returns 401 Login required
-the fixed workflow and current cloud runtime now keep DEV_ALLOW_MEMBERSHIP_HEADER=1
-```
-
-Use `CLOUD_DEEPSEEK_CLI_RUNBOOK.md` when you want the exact local PowerShell +
-AWS CLI operator steps for switching the current deployed backend to a
-DeepSeek-only runtime by hand.
-
-Use `CLOUD_DUAL_AI_CLI_RUNBOOK.md` when you want the exact local PowerShell +
-AWS CLI operator steps for switching the deployed backend to the newer dual-AI
-runtime with Ollama Cloud for chat and DeepSeek for planner/explainer.
-
-If the backend starts using the Geoapify place provider in cloud runtime, the
-deployed ECS backend task also needs `GEOAPIFY_API_KEY` injected from AWS SSM.
-The current `backend-ai-secret-provision.yml` and
-`backend-ai-runtime-config.yml` workflows are the source of truth for that.
+Production AI activation is DeepSeek-only. Use the reviewed, protected
+`.github/workflows/cd01-release-b-ai-activation.yml` from `main`; do not edit
+an ECS task definition by hand or use a provider-provisioning workflow. The
+workflow validates the current Release A baseline, retains its exact image,
+attaches only the approved `DEEPSEEK_API_KEY` reference, enables the two
+Durable Runtime gates, and has a Runtime-off rollback path.
 
 ## Current Manual AWS Workflows
 
@@ -63,7 +46,7 @@ runtime administration:
 ```text
 .github/workflows/cloud-fixed-accounts-upsert.yml
 .github/workflows/cloud-demo-purge.yml
-.github/workflows/backend-ai-runtime-config.yml
+.github/workflows/cd01-release-b-ai-activation.yml
 ```
 
 Important:
@@ -119,9 +102,8 @@ TRIPSYNC_AWS_URLS.md
 CUSTOM_DOMAIN_HTTPS_RESULT.md
 PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 Cloud Fixed Accounts Runbook: CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
-Backend AI Runtime Runbook: BACKEND_AI_RUNTIME_RUNBOOK.md
-Cloud DeepSeek CLI Runbook: CLOUD_DEEPSEEK_CLI_RUNBOOK.md
-Cloud Dual AI CLI Runbook: CLOUD_DUAL_AI_CLI_RUNBOOK.md
+DeepSeek-only production activation: .github/workflows/cd01-release-b-ai-activation.yml
+Ollama retirement plan: DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md
 PHASE6_RUNTIME_SECRETS_PLAN.md
 ```
 
@@ -162,22 +144,10 @@ instead of opening RDS to direct laptop access.
 If the old demo trip still exists in cloud RDS and should be removed while
 keeping the fixed accounts, use the manual `Cloud Demo Purge` GitHub Action.
 
-If the deployed backend should start using a real AI provider, use the manual
-`Backend AI Runtime Config` GitHub Action instead of editing ECS task
-definitions by hand.
-
-Current guest invite cloud access note:
-
-```text
-Backend AI Runtime Config successful repair run:
-https://github.com/shnnzdx/cap_stone/actions/runs/31996161940
-
-Current live backend task definition:
-tripsync-backend:17
-
-Current required guest-compatible backend runtime flag:
-DEV_ALLOW_MEMBERSHIP_HEADER=1
-```
+If the deployed backend should activate real AI, use the protected CD-02
+DeepSeek-only workflow after an authorized preflight; do not edit ECS task
+definitions by hand. Release A remains Runtime-off until that separate
+activation is approved.
 
 Before running Phase 10 for any future Route 53-managed domain, provide:
 
