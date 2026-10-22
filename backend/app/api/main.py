@@ -150,6 +150,9 @@ _B2E_MEMBERSHIP_GATE = "CADENSY_B2E_PROTECTED_MEMBERSHIP_WRITES"
 _B2E_SCHEDULER_GATE = "CADENSY_B2E_PROTECTED_SCHEDULER_WRITES"
 _B3_PREVIEW_APPLY_GATE = "CADENSY_B3_PROTECTED_PREVIEW_APPLY"
 _DURABLE_CONVERSATION_RUNTIME_GATE = "CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED"
+_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_GATE = (
+    "CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED"
+)
 _B2D_NON_PRODUCTION_ENVIRONMENTS = frozenset(
     {"development", "dev", "local", "test", "testing", "ci", "staging"}
 )
@@ -449,7 +452,8 @@ def _conversation_metadata(conversation: Conversation) -> dict:
         "retention_expires_at": conversation.retention_expires_at,
         # This is a capability declaration, not a client-controlled feature
         # flag. A durable submission is intentionally unavailable unless the
-        # request-bound Runtime has been explicitly admitted in non-production.
+        # request-bound Runtime has been explicitly admitted and its local
+        # configuration is ready.
         "runtime_available": _durable_conversation_runtime_enabled(),
     }
 
@@ -507,12 +511,20 @@ def _historical_option_resolution_out(
 
 
 def _durable_conversation_runtime_enabled() -> bool:
-    """Allow only an explicit, non-production request-bound Runtime call."""
+    """Authorize a locally ready Runtime with production requiring two gates."""
     requested = os.getenv(_DURABLE_CONVERSATION_RUNTIME_GATE, "0").strip().lower()
-    return (
-        requested in _TRUE_GATE_VALUES
-        and os.getenv("APP_ENV", "development").strip().lower() not in PRODUCTION_ENVIRONMENTS
-    )
+    if requested not in _TRUE_GATE_VALUES:
+        return False
+    environment = os.getenv("APP_ENV", "development").strip().lower()
+    if environment in PRODUCTION_ENVIRONMENTS:
+        production_activation = os.getenv(
+            _DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_GATE, "0"
+        ).strip().lower()
+        if production_activation not in _TRUE_GATE_VALUES:
+            return False
+        if not conversation_service.production_signing_material_ready():
+            return False
+    return chat_service.durable_conversation_runtime_configuration_ready()
 
 
 def _execute_durable_conversation_claim_after_commit(

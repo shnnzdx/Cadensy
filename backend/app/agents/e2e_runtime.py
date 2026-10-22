@@ -16,6 +16,7 @@ from pathlib import Path
 from .runtime_contract import (
     AgentCandidateOption,
     AgentReplyOnly,
+    AgentSuggestedChange,
     RuntimeObservation,
     RuntimeRequest,
     RuntimeResult,
@@ -39,6 +40,15 @@ class LocalE2ERuntime:
                     raise TimeoutError("local E2E runtime barrier was not released")
                 time.sleep(0.02)
         options: tuple[AgentCandidateOption, ...] = ()
+        outcome = AgentReplyOnly()
+        if "[E2E-DIRECT-CANDIDATE]" in request.message and request.selected_item_ref:
+            # Exercise the Direct Candidate path that Stage 3A maps at the
+            # Preview -> durable persistence boundary. This remains suggestion
+            # syntax and still crosses the real RevisionBracketedPreview.
+            outcome = AgentSuggestedChange(
+                item_ref=request.selected_item_ref,
+                safe_patch={"start_hour": 15.0},
+            )
         if "[E2E-OPTION]" in request.message and request.selected_item_ref:
             # This is deliberately suggestion syntax only.  The real
             # RevisionBracketedPreview still validates the item, patch and
@@ -56,7 +66,7 @@ class LocalE2ERuntime:
             )
         return RuntimeResult(
             reply=f"E2E assistant completion: {request.message}",
-            outcome=AgentReplyOnly(),
+            outcome=outcome,
             candidate_options=options,
             observation=RuntimeObservation(
                 trace_id="local-e2e-runtime",

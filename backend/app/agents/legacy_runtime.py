@@ -55,6 +55,7 @@ _SAFE_PATCH_FIELDS = frozenset(
         "lng",
     }
 )
+_LEGACY_MOCK_REPLY = "Mock reply: no live AI analysis was performed."
 
 
 ToolInvocationRecorder = Callable[
@@ -222,6 +223,9 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
                         {"role": turn.role, "content": turn.text}
                         for turn in request.history
                     ),
+                    mock_rounds=(
+                        base.AgentProviderReply(content=_LEGACY_MOCK_REPLY),
+                    ) if base.is_mocked() else (),
                     max_rounds=request.limits.max_rounds,
                     max_total_tokens=request.limits.max_total_tokens,
                     max_tokens=request.limits.max_tokens,

@@ -112,7 +112,8 @@ export function useAssistantChangeRequestFlow({ item, mode, onCommand, onResolve
     if (!text || sending) return
     setDraft('')
     try {
-      await durable.send({ text, selectedPlanItemId: itemId })
+      const result = await durable.send({ text, selectedPlanItemId: itemId })
+      if (result?.preserveDraft) setDraft(text)
     } catch (err) {
       // The hook preserves the original idempotency key and presents a
       // retryable status; it never fabricates an Assistant completion.

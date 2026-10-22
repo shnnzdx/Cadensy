@@ -462,7 +462,7 @@ def _emit_pydantic_model_call(
             model_invocation_index=invocation_index,
             invocation_source=source,
             provider=ProviderName.DEEPSEEK if "deepseek" in model_name.lower() else ProviderName.UNAPPROVED_PROVIDER,
-            model_id=(ModelId.DEEPSEEK_V4_FLASH if model_name == "deepseek-v4-flash" else ModelId.DEEPSEEK_V4_PRO if model_name == "deepseek-v4-pro" else ModelId.UNAPPROVED_MODEL),
+            model_id=(ModelId.DEEPSEEK_FLASH if model_name == "deepseek-flash" else ModelId.DEEPSEEK_V4_FLASH if model_name == "deepseek-v4-flash" else ModelId.DEEPSEEK_V4_PRO if model_name == "deepseek-v4-pro" else ModelId.UNAPPROVED_MODEL),
             invocation_outcome=outcome,
             failure_category=None if error is None else _pydantic_failure_category(error),
             elapsed_ms=round(max(elapsed_ms, 0), 2),

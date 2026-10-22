@@ -102,6 +102,7 @@ def test_backend_release_profile_removes_provider_credentials_and_preserves_non_
     assert environment["MOCK_AI"] == "0"
     assert environment["DISABLE_SCHEDULER"] == "1"
     assert environment["CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED"] == "0"
+    assert environment["CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED"] == "0"
     assert environment["CADENSY_E2E_FAKE_RUNTIME"] == "0"
 
 

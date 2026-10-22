@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 
 import {
   conversationIdentityFor,
+  claimPendingRequest,
   createDurableConversationClient,
+  durableConversationError,
+  failedSubmissionError,
+  latestSubmissionFromMessages,
   normalizeConversationMessages,
   pendingSubmissionFromMessages,
+  submissionDisposition,
 } from '../../trip/src/final/durableConversationClient.js'
 
 test('durable conversation client selects only approved server-owned context keys', () => {
@@ -70,4 +76,47 @@ test('refreshed history restores only the server-issued pending submission ident
   assert.equal(pending.restored, true)
   assert.equal('text' in pending, false)
   assert.equal('idempotencyKey' in pending, false)
+})
+
+test('rapid duplicate sends synchronously claim only one pending request before network work', () => {
+  const pendingRef = { current: null }
+  const first = { idempotencyKey: 'first' }
+  const second = { idempotencyKey: 'second' }
+
+  assert.equal(claimPendingRequest(pendingRef, first), true)
+  assert.equal(claimPendingRequest(pendingRef, second), false)
+  assert.equal(pendingRef.current, first)
+
+  const hookSource = readFileSync(new URL('../../trip/src/final/useDurableConversation.js', import.meta.url), 'utf8')
+  assert.ok(hookSource.indexOf('claimPendingRequest(pendingRef, request)') < hookSource.indexOf('return await submitRequest(request)'))
+})
+
+test('submission state distinguishes running, recoverable, failed, completed, and network uncertainty', () => {
+  const future = '2030-01-01T00:00:00Z'
+  const past = '2020-01-01T00:00:00Z'
+  assert.equal(submissionDisposition({ submissionId: 's', state: 'running', leaseExpiresAt: future }, Date.parse('2025-01-01T00:00:00Z')), 'running')
+  assert.equal(submissionDisposition({ submissionId: 's', state: 'running', leaseExpiresAt: past }, Date.parse('2025-01-01T00:00:00Z')), 'recoverable')
+  assert.equal(submissionDisposition({ submissionId: 's', state: 'failed' }), 'failed')
+  assert.equal(submissionDisposition({ submissionId: 's', state: 'completed' }), 'completed')
+  assert.equal(submissionDisposition({ state: 'running' }), 'network_unknown')
+})
+
+test('network uncertainty is retryable while terminal validation is not', () => {
+  assert.deepEqual(durableConversationError(new Error('offline')).kind, 'network_unknown')
+  const validation = durableConversationError({ status: 422 })
+  assert.equal(validation.kind, 'terminal')
+  assert.equal(validation.retryable, undefined)
+})
+
+test('refresh restores only the latest terminal submission failure', () => {
+  const history = normalizeConversationMessages({ messages: [
+    { id: 'old', sequence: 1, role: 'user', content: 'old', submission: { submission_id: 's1', state: 'failed', attempt_number: 1 } },
+    { id: 'new', sequence: 2, role: 'user', content: 'new', submission: { submission_id: 's2', state: 'completed', attempt_number: 1 } },
+  ] })
+  assert.equal(latestSubmissionFromMessages(history).state, 'completed')
+
+  history[1].submission.state = 'failed'
+  assert.equal(latestSubmissionFromMessages(history).state, 'failed')
+  assert.equal(failedSubmissionError().terminal, true)
+  assert.equal(failedSubmissionError().retryable, undefined)
 })

@@ -47,6 +47,7 @@ CHAT_AGENT_MAX_ROUNDS = 8
 # measured ~32k. The real ceiling on cost is CHAT_AGENT_MAX_ROUNDS; this is only a
 # backstop against a runaway loop.
 CHAT_AGENT_MAX_TOTAL_TOKENS = 120000
+DURABLE_CHAT_MAX_OUTPUT_TOKENS = 4096
 
 
 class ChatAccessDenied(Exception):
@@ -111,6 +112,11 @@ def build_durable_conversation_runtime_coordinator(*, session_factory=SessionLoc
         session_factory=session_factory,
         runtime_factory=lambda: build_chat_runtime(system_prompt=_agent_system_prompt()),
         execution=_chat_agent_execution_config(),
+        runtime_limits=RuntimeLimits(
+            max_rounds=CHAT_AGENT_MAX_ROUNDS,
+            max_total_tokens=CHAT_AGENT_MAX_TOTAL_TOKENS,
+            max_tokens=DURABLE_CHAT_MAX_OUTPUT_TOKENS,
+        ),
         # Character accounting is conservative and separate from Runtime token
         # ceilings. An oversized mandatory request fails; it is never altered.
         budget=conversation_context.ContextBudget(
@@ -119,6 +125,13 @@ def build_durable_conversation_runtime_coordinator(*, session_factory=SessionLoc
             output_reserve_chars=16_000,
         ),
     )
+
+
+def durable_conversation_runtime_configuration_ready() -> bool:
+    """Check selected Runtime/provider composition without calling a provider."""
+    from ...agents.runtime_factory import chat_runtime_configuration_ready
+
+    return chat_runtime_configuration_ready(system_prompt=_agent_system_prompt())
 
 
 @dataclass(frozen=True)

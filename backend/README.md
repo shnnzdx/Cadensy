@@ -144,8 +144,12 @@ Put runtime variables in `backend/.env`. Do not commit real secrets.
 | `DEEPSEEK_API_KEY` | DeepSeek cloud API key | none |
 | `DEEPSEEK_BASE_URL` | DeepSeek base URL | `https://api.deepseek.com` |
 | `DEEPSEEK_MODEL` | DeepSeek model name | `deepseek-v4-flash` |
+| `DEEPSEEK_THINKING` | Legacy DeepSeek thinking mode | `disabled` |
 | `CHAT_AGENT_RUNTIME` | Chat Runtime selector | `legacy` |
 | `MOCK_AI` | use local mock AI when `1` | `1` |
+| `CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED` | base Durable Chat execution gate | `0` |
+| `CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED` | separate production activation latch | `0` |
+| `CADENSY_E2E_FAKE_RUNTIME` | disposable browser-harness Runtime; test only | `0` |
 | `SETTLE_TICK_SECONDS` | settlement polling interval | `60` |
 | `DISABLE_SCHEDULER` | disable scheduler when `1` | none |
 | `DEV_ALLOW_MEMBERSHIP_HEADER` | retired; production fails fast if truthy | `0` |
@@ -161,6 +165,20 @@ explainer -> deepseek
 ```
 
 `CHAT_AGENT_RUNTIME=legacy` is the default and current safe Chat behavior.
+DeepSeek is the current real Chat Provider. A non-production real-Provider run
+requires `MOCK_AI=0`, valid DeepSeek configuration, and
+`CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=1`. The production environment
+requires both that base gate and the independent
+`CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED=1` latch, plus
+production signing material. Absence of either permission keeps execution off.
+
+The normal production code-only profile is **Release A**: both Durable Runtime
+gates are explicitly `0`, `MOCK_AI=0`, the E2E Fake Runtime is `0`, and no model
+Provider credential is attached to the task definition. **Release B** is a
+separately authorized activation that may add a DeepSeek secret reference and
+turn on both gates. Local Stage 3B real-Provider evidence does not mean Release
+B has run in AWS.
+
 `CHAT_AGENT_RUNTIME=pydantic` is an explicit opt-in composition path. It
 requires `MOCK_AI=0`, a present `DEEPSEEK_API_KEY`, the official
 `https://api.deepseek.com` endpoint, and a configured or defaulted
@@ -169,6 +187,8 @@ failure returns the existing safe degraded Chat response. The Pydantic path
 pins model thinking off and does not inherit `DEEPSEEK_THINKING`.
 
 Never hard-code real credentials into source files.
+`CADENSY_E2E_FAKE_RUNTIME=1` is accepted only by an explicitly mocked
+`APP_ENV=test` browser process and is never a production fallback.
 
 ---
 

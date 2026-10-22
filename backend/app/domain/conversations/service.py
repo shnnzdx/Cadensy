@@ -157,6 +157,12 @@ def _hmac_key() -> bytes:
     return b"cadensy-pr06b2-development-only-not-a-production-secret"
 
 
+def production_signing_material_ready() -> bool:
+    """Report only presence of production HMAC material, never its value."""
+    material = os.getenv("CONVERSATION_SUBMISSION_HMAC_KEY")
+    return bool(material and material.strip())
+
+
 def _canonical_hmac(*, conversation: Conversation, text: str, selected_plan_item_id: str | None) -> str:
     payload = {
         "conversation_id": conversation.id,

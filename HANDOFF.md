@@ -183,31 +183,29 @@ POST /api/trips/{trip_id}/plans/generate
 → backend/app/agents/base.py
 ```
 
-provider routing 当前由以下环境变量控制：
+当前真实 AI Provider 路由为 **DeepSeek-only**，由 `DEEPSEEK_*` 配置控制；不再使用
+Ollama Cloud 或 `CHAT_AI_PROVIDER` / `PLANNER_AI_PROVIDER` / `EXPLAINER_AI_PROVIDER`
+作为当前运行时选择路径。Chat Runtime 默认是 `CHAT_AGENT_RUNTIME=legacy`；
+`pydantic` 仍是显式 opt-in，且不会回退到 Legacy。
 
-```env
-CHAT_AI_PROVIDER=ollama_cloud
-PLANNER_AI_PROVIDER=deepseek
-EXPLAINER_AI_PROVIDER=deepseek
-```
+仓库本地配置示例的默认 `DEEPSEEK_MODEL` 是兼容别名
+`deepseek-v4-flash`。Stage 3B 的受限本地真实 Provider 验证则显式使用
+`deepseek-flash`、Thinking disabled；该验证配置不等于更改仓库或生产默认值。
 
-`.env.example` 中的推荐模型：
+Durable Chat 的运行权限是明确的：
 
-```text
-Planner Agent
-Provider = DeepSeek
-Model = deepseek-v4-flash
-Local or Cloud = Cloud
-```
+- 非生产 `legacy` + `MOCK_AI=1` + Durable Base Gate=`1` + Fake E2E Runtime=`0`
+  可走确定性的本地 Mock Reply；它不会调用 DeepSeek、不会伪造建议或 Preview。
+- 真实 DeepSeek 需要 `MOCK_AI=0`、官方 HTTPS endpoint、有效 Provider 配置与
+  Durable Base Gate=`1`。
+- `APP_ENV=production` 还必须同时拥有独立 Production Activation Latch 与生产签名
+  material；`MOCK_AI=1` 和 Fake E2E Runtime 都不能绕过这一限制。
 
-Chat 默认走 Ollama Cloud 的 `qwen3.5:cloud`。本地 Ollama 只通过 legacy OpenAI-compatible 配置兼容，例如 `OPENAI_BASE_URL=http://localhost:11434/v1/`；它不是当前 Planner 的默认路径。
-
-特别注意：
-
-- `MOCK_AI=1` 时不会真实调用 DeepSeek；Planner 会进入 deterministic fallback
-- 真实运行时最终 provider 仍以 `backend/.env` 为准
-- 不要输出或提交任何真实 API Key
-- provider 失败时，核心 deterministic rules 和 decision flow 必须保持可运行
+发布边界保持不变：**Release A** 仅发布代码，两个 Durable Runtime gate 都固定为
+`0`，不附加 Provider credential；**Release B** 必须经过单独授权，才可配置
+DeepSeek secret reference、Legacy selector、Thinking-off/model 与双 gate。不要输出、
+复制或提交任何真实 API Key；Provider 失败时，核心 deterministic rules 与 decision
+flow 必须保持可运行。
 
 ## 8. Planner 最新 scheduling 行为
 
