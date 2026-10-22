@@ -40,11 +40,39 @@ def _ready_legacy_runtime(monkeypatch: pytest.MonkeyPatch, *, environment: str) 
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 
+def _ready_legacy_mock_runtime(
+    monkeypatch: pytest.MonkeyPatch, *, environment: str
+) -> None:
+    monkeypatch.setenv("APP_ENV", environment)
+    monkeypatch.setenv("CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED", "1")
+    monkeypatch.setenv("CHAT_AGENT_RUNTIME", "legacy")
+    monkeypatch.setenv("MOCK_AI", "1")
+    monkeypatch.setenv("CADENSY_E2E_FAKE_RUNTIME", "0")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+
+
 def test_non_production_runtime_requires_base_gate_and_local_readiness(monkeypatch):
     _ready_legacy_runtime(monkeypatch, environment="test")
     assert _durable_conversation_runtime_enabled() is True
 
     monkeypatch.setenv("CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED", "0")
+    assert _durable_conversation_runtime_enabled() is False
+
+
+def test_non_production_legacy_mock_runtime_requires_the_explicit_base_gate(monkeypatch):
+    _ready_legacy_mock_runtime(monkeypatch, environment="test")
+    assert _durable_conversation_runtime_enabled() is True
+
+    monkeypatch.setenv("CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED", "0")
+    assert _durable_conversation_runtime_enabled() is False
+
+
+def test_non_production_mock_mode_does_not_enable_pydantic_or_fallback(monkeypatch):
+    _ready_legacy_mock_runtime(monkeypatch, environment="test")
+    monkeypatch.setenv("CHAT_AGENT_RUNTIME", "pydantic")
+
     assert _durable_conversation_runtime_enabled() is False
 
 
@@ -80,10 +108,17 @@ def test_production_runtime_requires_both_permissions_and_hmac(monkeypatch):
     assert _durable_conversation_runtime_enabled() is False
 
 
+def test_production_mock_runtime_is_refused_even_when_both_gates_are_enabled(monkeypatch):
+    _ready_legacy_mock_runtime(monkeypatch, environment="production")
+    monkeypatch.setenv("CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED", "1")
+    monkeypatch.setenv("CONVERSATION_SUBMISSION_HMAC_KEY", "offline-hmac-placeholder")
+
+    assert _durable_conversation_runtime_enabled() is False
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("MOCK_AI", "1"),
         ("CHAT_AGENT_RUNTIME", "invalid"),
         ("DEEPSEEK_API_KEY", ""),
     ],

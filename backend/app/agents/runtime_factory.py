@@ -22,6 +22,7 @@ class ChatRuntimeConfigurationError(RuntimeError):
 PydanticRuntimeFactory = Callable[[], ChatAgentRuntime]
 
 _PYDANTIC_CONFIGURATION_ERROR = "Pydantic Chat Runtime configuration is unavailable"
+_PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod"})
 
 
 def chat_runtime_configuration_ready(*, system_prompt: str) -> bool:
@@ -38,7 +39,14 @@ def chat_runtime_configuration_ready(*, system_prompt: str) -> bool:
         # configuration and remains unavailable in development/production.
         return environment == "test" and base.is_mocked()
     if base.is_mocked():
-        return False
+        # The real Legacy adapter uses base.call_agent's existing mock seam;
+        # admit it only for non-production Legacy selection. Pydantic remains
+        # explicitly unavailable in mock mode and never falls back to Legacy.
+        selector = os.getenv("CHAT_AGENT_RUNTIME", "").strip()
+        return (
+            environment not in _PRODUCTION_ENVIRONMENTS
+            and selector in {"", "legacy"}
+        )
     try:
         if not base.deepseek_runtime_configuration_ready():
             return False

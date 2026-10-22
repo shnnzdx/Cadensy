@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agents import base
 from app.agents.execution import AgentExecutionConfig
 from app.agents.runtime_contract import (
     AgentSuggestedChange,
@@ -29,6 +30,7 @@ from app.db.models import (
     User,
 )
 from app.domain import auth
+from app.domain.chat import service as chat_service
 from app.domain.conversations import context, service
 from app.domain.conversations.runtime import ConversationRuntimeCoordinator
 from app.jobs import conversation_purge
@@ -517,6 +519,83 @@ def test_request_bound_runtime_runs_once_for_a_new_claim_not_a_replay(
         ConversationMessage.conversation_id == conversation_id,
     ).count() == 2
     assert db.query(ConversationMessageOption).count() == 1
+
+
+def test_non_production_legacy_mock_submission_completes_and_history_recovers_without_provider(
+    db: Session, trip_setup: dict, monkeypatch: pytest.MonkeyPatch
+):
+    """The real durable API seam may use a Legacy mock without a Provider key."""
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("CHAT_AGENT_RUNTIME", "legacy")
+    monkeypatch.setenv("MOCK_AI", "1")
+    monkeypatch.setenv("CADENSY_E2E_FAKE_RUNTIME", "0")
+    monkeypatch.setenv("CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED", "1")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    provider_calls: list[object] = []
+
+    def provider_must_not_run(**_kwargs):
+        provider_calls.append(object())
+        raise AssertionError("mock durable submission must not invoke a Provider client")
+
+    monkeypatch.setattr(base, "_invoke_agent_provider", provider_must_not_run)
+    build_coordinator = chat_service.build_durable_conversation_runtime_coordinator
+    test_session_factory = sessionmaker(
+        bind=db.connection(), future=True, join_transaction_mode="create_savepoint"
+    )
+    monkeypatch.setattr(
+        api.chat_service,
+        "build_durable_conversation_runtime_coordinator",
+        lambda *, session_factory: build_coordinator(session_factory=test_session_factory),
+    )
+
+    trip_id = trip_setup["trip"].id
+    with _client(db) as client:
+        headers = _headers(client, db, trip_setup["organizer"], trip_id)
+        created = client.post(
+            f"/api/trips/{trip_id}/conversations",
+            headers=headers,
+            json={"scope": "personal", "context_key": "personal"},
+        )
+        assert created.status_code == 201
+        assert created.json()["runtime_available"] is True
+        conversation_id = created.json()["id"]
+        accepted = client.post(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages",
+            headers={**headers, "Idempotency-Key": "mock-durable-once"},
+            json={"text": "Can you summarize the current plan?"},
+        )
+        replay = client.post(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages",
+            headers={**headers, "Idempotency-Key": "mock-durable-once"},
+            json={"text": "Can you summarize the current plan?"},
+        )
+        history = client.get(
+            f"/api/trips/{trip_id}/conversations/{conversation_id}/messages",
+            headers=headers,
+        )
+
+    assert accepted.status_code == replay.status_code == 202
+    assert replay.json()["replayed"] is True
+    assert provider_calls == []
+    assert [(message["role"], message["content"]) for message in history.json()["messages"]] == [
+        ("user", "Can you summarize the current plan?"),
+        ("assistant", "Mock reply: no live AI analysis was performed."),
+    ]
+    assert all(not message["options"] for message in history.json()["messages"])
+    assert db.query(ConversationSubmission).filter(
+        ConversationSubmission.conversation_id == conversation_id,
+    ).count() == 1
+    assert db.query(ConversationMessage).filter(
+        ConversationMessage.conversation_id == conversation_id,
+    ).count() == 2
+    assert db.query(ConversationMessageOption).join(
+        ConversationMessage,
+        ConversationMessageOption.assistant_message_id == ConversationMessage.id,
+    ).filter(
+        ConversationMessage.conversation_id == conversation_id,
+    ).count() == 0
 
 
 def test_owner_isolation_and_internal_recovery_fence_expiry(db: Session, trip_setup: dict):
