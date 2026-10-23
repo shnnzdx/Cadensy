@@ -1,0 +1,191 @@
+{
+  "evaluation_version": "v0302d-execution-evidence-v1",
+  "executed_at": "2026-10-23",
+  "source_revision": {
+    "branch": "codex/v0302-pydantic-functional-parity",
+    "head": "5ce3782df8222cc87fd468bf1cf649a6d4aefe69",
+    "baseline": "5ce3782df8222cc87fd468bf1cf649a6d4aefe69",
+    "worktree_state": "v0302/v0302b implementation and review documentation uncommitted",
+    "implementation_files": {
+      "backend/app/agents/pydantic_runtime.py": "sha256:2fe3bf1ff596f6cd834a40f1862bf3c38aa55812b2a7a966cb801e2d21d5b98e",
+      "backend/tests/test_pydantic_runtime.py": "sha256:b7b46afa41b275ab4a4fc90c8bb11f3010774c8c8057f9d95542305bec1d18a9"
+    }
+  },
+  "environment": {
+    "category": "fresh task-owned disposable PostgreSQL",
+    "host": "localhost (IPv4 and IPv6 loopback only)",
+    "port": 55436,
+    "data_directory": "task-owned disposable local Temp directory (not committed)",
+    "test_database": "cadensy_v0302d_test",
+    "database_and_test_database": "both explicitly set to the disposable test database for pytest; conftest forces test-only binding",
+    "environment_gates": {
+      "APP_ENV": "test",
+      "MOCK_AI": "1",
+      "DISABLE_SCHEDULER": "1",
+      "DEV_ALLOW_MEMBERSHIP_HEADER": "0"
+    },
+    "provider_and_aws_credentials": "removed from each test process; FunctionModel and mocked/injected handlers only",
+    "production_change": false
+  },
+  "commands": {
+    "sanitized_environment_prelude": "TEST_DATABASE_URL and DATABASE_URL set to postgresql+psycopg://cadensy_eval@localhost:55436/cadensy_v0302d_test?connect_timeout=5; APP_ENV=test; MOCK_AI=1; DISABLE_SCHEDULER=1; DEV_ALLOW_MEMBERSHIP_HEADER=0; AWS/provider credential variables removed.",
+    "scenario_suite": {
+      "description": "Twelve exact pytest node identifiers backing the eleven scenarios; two parameterized nodes yield fourteen cases.",
+      "command": "python -m pytest -q --durations=10 <the twelve node ids recorded in scenarios[].node_ids>",
+      "result": "14 passed in 2.03s",
+      "exit_code": 0
+    },
+    "focused_core": {
+      "description": "Pydantic, scoped tools, runtime contract, Preview, Durable, and telemetry files.",
+      "command": "python -m pytest -q test_pydantic_runtime.py test_pydantic_composition.py test_agents_tools.py test_runtime_contract.py test_b3_revision_bracketed_preview.py test_pr06b3_runtime.py test_pr06b3_context.py test_pr06b2_conversation_concurrency_postgres.py test_durable_idempotency_kernel.py test_telemetry_privacy.py test_telemetry_execution_wiring.py test_telemetry_contract.py",
+      "result": "207 passed in 20.80s",
+      "exit_code": 0
+    },
+    "frozen_evaluation": {
+      "description": "Evaluation foundation, symmetric harness, formal runner, and grade partition; executed as 10 + 1 + 1 + 23 bounded groups.",
+      "commands": ["python -m pytest -q test_evaluation_foundation.py -k 'not runner_cli'", "python -m pytest -q test_evaluation_foundation.py::test_runner_cli_uses_only_test_database_url_and_cleans_only_synthetic_rows", "python -m pytest -q test_evaluation_foundation.py::test_runner_cli_refuses_to_overwrite_the_archived_baseline_without_an_output_path", "python -m pytest -q test_symmetric_evaluation_harness.py test_formal_ab_runner.py test_ab_grade_partition.py"],
+      "result": "35 passed",
+      "exit_code": 0
+    },
+    "full_collection": {
+      "description": "All backend test files under the disposable environment.",
+      "result": "1337 collected in 2.07s",
+      "exit_code": 0
+    }
+  },
+  "functional_test_coverage": {
+    "manifest": "07_V0302B_FUNCTIONAL_EVALUATION.json",
+    "meaning": "Source assertions mapped to scenarios. It is distinct from the executed observations below.",
+    "scenario_count": 11
+  },
+  "observed_functional_evaluation_execution": {
+    "scenario_count": 11,
+    "executed_scenarios": 11,
+    "failed_scenarios": 0,
+    "unexecuted_scenarios": 0,
+    "overall_gate": "PASS",
+    "scenarios": [
+      {
+        "id": "grounded-trip-facts",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_pydantic_trip_facts_and_options_use_scoped_handlers_only"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "trip facts followed by Current Plan and options",
+        "expected_business_behavior": "return only scoped facts and advisory option data",
+        "asserted_and_observed": {"tool_trajectory": ["get_trip_facts", "get_current_plan", "propose_options"], "grounding": "scoped item reference", "writes": "none"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "existing-plan-schedule-change",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_suggested_change_requires_same_run_scoped_read_and_has_no_write_authority"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "grounded start-hour suggestion",
+        "expected_business_behavior": "return an advisory scalar patch after a same-run plan read",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan"], "grounding": "scoped-item", "candidate_patch": {"start_hour": 15.5}, "writes": "none"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "specific-two-item-schedule-conflict",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_pydantic_real_options_handler_keeps_a_named_conflict_off_unrelated_longest_item"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel and real scoped handler",
+        "input_category": "two grounded conflict ids plus two suggestions",
+        "expected_business_behavior": "target the named conflict rather than an unrelated longest item",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan", "propose_options"], "handler": "real LegacyReadTripCapability", "result": "Art-targeted 09:00 and 90-minute patches; unrelated 600-minute item absent"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "multiple-targeted-compromises",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_pydantic_options_passes_grounded_conflict_ids_and_typed_suggestions"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "two grounded ids with typed options",
+        "expected_business_behavior": "keep/no-change and two distinct one-item alternatives",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan", "propose_options"], "options": ["keep", "start_hour", "duration_min"], "writes": "none"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "direct-candidate-without-options-tool",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_suggested_change_requires_same_run_scoped_read_and_has_no_write_authority"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "direct runtime_suggested_change",
+        "expected_business_behavior": "remain advisory without invoking propose_options",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan"], "options_tool_called": false, "writes": "none"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "trusted-venue-replacement",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_pydantic_real_scoped_replacement_evidence_reaches_revision_bracketed_preview"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel, real scoped handler, and RevisionBracketedPreview",
+        "input_category": "exact replacement candidate venue patch",
+        "expected_business_behavior": "only successful scoped lookup evidence reaches Preview",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan", "find_replacement_place"], "evidence": "succeeded trusted candidate", "preview": "exact candidate patch accepted", "writes": "none"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "fabricated-venue-replacement-refusal",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_replacement_shaped_suggestion_without_provenance_fails_closed"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "venue-shaped patch without lookup evidence",
+        "expected_business_behavior": "fail closed",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan"], "outcome": "malformed_runtime_output", "accepted_change": false},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "unknown-or-foreign-plan-item",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_pydantic_options_rejects_foreign_conflict_ids_before_handler_call"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "foreign conflict id",
+        "expected_business_behavior": "reject before handler dispatch",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan", "propose_options:guard_rejected"], "handler_calls": 0, "usable_evidence": false},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "revoked-membership-and-stale-revision",
+        "node_ids": ["backend/tests/test_pr06b3_runtime.py::test_membership_revocation_during_runtime_discards_uncommitted_reply", "backend/tests/test_b3_revision_bracketed_preview.py::test_preview_discards_candidate_when_revision_changes_during_runtime"],
+        "runtime": "downstream generic coordinator and RevisionBracketedPreview tests; not a Pydantic FunctionModel execution",
+        "input_category": "membership revocation during fenced work; separate captured-revision mutation",
+        "expected_business_behavior": "discard uncommitted reply and stale candidate",
+        "asserted_and_observed": {"durable": "fenced completion rejected", "preview": "revision-bracketed candidate discarded", "pydantic_runtime_executed": false},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS", "attribution_note": "This is runtime-neutral downstream coverage and must not be represented as direct Pydantic execution."
+      },
+      {
+        "id": "underspecified-clarification",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_typed_reply_and_clarification_map_to_common_runtime_result"],
+        "runtime": "PydanticChatAgentRuntime with FunctionModel",
+        "input_category": "typed clarification output",
+        "expected_business_behavior": "show clarification without candidates, evidence, or writes",
+        "asserted_and_observed": {"tool_trajectory": [], "outcome": "AgentClarification", "candidate_options": [], "evidence": [], "writes": "none"},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      },
+      {
+        "id": "durable-valid-options-no-plan-write",
+        "node_ids": ["backend/tests/test_pydantic_runtime.py::test_pydantic_runtime_persists_preview_options_through_durable_coordinator", "backend/tests/test_pr06b3_runtime.py::test_runtime_coordinator_omits_unsafe_option_metadata_without_failing_completion"],
+        "runtime": "Pydantic FunctionModel -> Preview -> Durable Conversation coordinator",
+        "input_category": "durable advisory options",
+        "expected_business_behavior": "persist only safe previewed options while leaving Plan unchanged",
+        "asserted_and_observed": {"tool_trajectory": ["get_current_plan", "propose_options"], "preview": "advisory options", "durable": "completed fenced submission with captured revision", "plan_write": false},
+        "business": "PASS", "safety": "PASS", "exit_code": 0, "status": "PASS"
+      }
+    ]
+  },
+  "frozen_ab": {
+    "artifact": "03_V0302_FROZEN_AB_EVALUATION.json",
+    "frozen_inputs_or_grader_modified": false,
+    "current_execution": "35 evaluation tests passed with exit code 0",
+    "business_status": "KNOWN BASELINE GAP for ambiguous-time and privacy-injection",
+    "safety_status": "PASS",
+    "pydantic_regression": false
+  },
+  "full_backend_regression": {
+    "method": "five deterministic, alphabetically sorted, non-overlapping 18-file partitions",
+    "partition_rule": "At execution, sort backend/tests/test_*.py by file name (90 files). P0 uses indices 0-17, P1 18-35, P2 36-53, P3 54-71, P4 72-89. Each partition command is python -m pytest -q followed by its exact sorted file slice.",
+    "collection": {"count": 1337, "exit_code": 0},
+    "partitions": [
+      {"id": "P0", "range": "test_ab_grade_partition.py..test_ci_workflow_contract.py", "files": 18, "passed": 328, "warnings": 0, "exit_code": 0},
+      {"id": "P1", "range": "test_db_safety.py..test_live_provider_smoke_adapter.py", "files": 18, "passed": 248, "warnings": 0, "exit_code": 0},
+      {"id": "P2", "range": "test_organizer.py..test_pr06b2_conversation_api.py", "files": 18, "passed": 206, "warnings": 0, "exit_code": 0},
+      {"id": "P3", "range": "test_pr06b2_conversation_concurrency_postgres.py..test_r5_manual_ecr_build_workflow.py", "files": 18, "passed": 260, "warnings": 0, "exit_code": 0},
+      {"id": "P4", "range": "test_runtime_composition.py..test_upsert_fixed_accounts.py", "files": 18, "passed": 295, "warnings": 10, "warning": "existing Alembic path_separator deprecation", "exit_code": 0}
+    ],
+    "total": {"passed": 1337, "warnings": 10, "exit_code": 0},
+    "interpretation": "This is an execution-backed non-overlapping partition sum, not a single pytest-process result."
+  }
+}
