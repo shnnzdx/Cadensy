@@ -36,6 +36,8 @@ from .runtime_contract import (
     RuntimeReadTool,
     RuntimeRequest,
     RuntimeResult,
+    ReplacementCandidateEvidence,
+    ToolExecutionEvidence,
 )
 from .tools import build_read_only_trip_tools
 from ..db.session import SessionLocal
@@ -56,6 +58,15 @@ _SAFE_PATCH_FIELDS = frozenset(
     }
 )
 _LEGACY_MOCK_REPLY = "Mock reply: no live AI analysis was performed."
+_APPROVED_EVIDENCE_TOOLS = frozenset(
+    {
+        "get_current_plan",
+        "get_trip_facts",
+        "classify_change",
+        "propose_options",
+        "find_replacement_place",
+    }
+)
 
 
 ToolInvocationRecorder = Callable[
@@ -89,12 +100,10 @@ class LegacyReadTripCapability:
 
     @property
     def _application_legacy_tool_results(self) -> tuple[dict[str, Any], ...]:
-        """Private evidence for legacy-only application revalidation.
+        """Private raw trace data for older Legacy Chat-service compatibility.
 
-        Replacement previews require the raw, guard-filtered
-        ``find_replacement_place`` provenance.  That evidence is intentionally
-        not part of the framework-neutral Runtime contract because the Pydantic
-        adapter does not support replacement fields in PR-04B.
+        Revision-bracketed Preview consumes detached RuntimeResult evidence;
+        raw result dictionaries are not a Preview provenance channel.
         """
 
         return self._legacy_tool_results
@@ -251,11 +260,9 @@ class LegacyChatAgentRuntime(ChatAgentRuntime):
             )
         except Exception as error:
             return _failure_result(error)
-        # B.3's revision-bracketed capability intentionally has a different
-        # Session lifetime, but it retains this private provenance hook so a
-        # replacement candidate can still be checked against an actual
-        # read-only ``find_replacement_place`` result.  Do not require the
-        # concrete Legacy capability type merely to record that evidence.
+        # Keep the legacy-only raw result hook for the older Chat application
+        # service. Preview does not implement this hook: it consumes only the
+        # detached RuntimeResult evidence returned below.
         recorder = getattr(capability, "_record_legacy_tool_results", None)
         if callable(recorder):
             recorder(legacy_result.tool_results)
@@ -309,7 +316,79 @@ def _map_legacy_result(result: base.AgentRunResult) -> RuntimeResult:
         outcome=suggested or AgentReplyOnly(),
         candidate_options=_candidate_options(result.tool_results),
         observation=_observation(result),
+        tool_execution_evidence=_tool_execution_evidence(result.tool_results),
     )
+
+
+def _tool_execution_evidence(
+    tool_results: tuple[dict[str, Any], ...]
+) -> tuple[ToolExecutionEvidence, ...]:
+    """Detach only approved, completed Legacy dispatch facts.
+
+    ``base.call_agent`` keeps cache lifetime inside one invocation.  A
+    ``cache_hit`` here consequently denotes a value produced earlier in the
+    same AgentRunResult; it is never cross-request evidence.  Exceptions and
+    deadline exits never produce a Legacy result and therefore cannot leave a
+    successful entry in this tuple.
+    """
+
+    evidence: list[ToolExecutionEvidence] = []
+    for result in tool_results:
+        tool_name = result.get("tool")
+        if not isinstance(tool_name, str) or tool_name not in _APPROVED_EVIDENCE_TOOLS:
+            # Never reflect a model-supplied unknown name as trusted evidence.
+            evidence.append(ToolExecutionEvidence(tool_name="unsupported", status="unsupported"))
+            continue
+        if result.get("guard_rejected"):
+            evidence.append(
+                ToolExecutionEvidence(tool_name=tool_name, status="guard_rejected")
+            )
+            continue
+        status = "cache_hit" if result.get("cached") is True else "succeeded"
+        candidates = (
+            _replacement_candidate_evidence(result.get("output"))
+            if tool_name == "find_replacement_place"
+            else ()
+        )
+        evidence.append(
+            ToolExecutionEvidence(
+                tool_name=tool_name,
+                status=status,
+                replacement_candidates=candidates,
+            )
+        )
+    return tuple(evidence)
+
+
+def _replacement_candidate_evidence(
+    output: object,
+) -> tuple[ReplacementCandidateEvidence, ...]:
+    """Validate the narrow replacement facts Preview may later compare."""
+
+    if not isinstance(output, Mapping):
+        return ()
+    candidates = output.get("candidates")
+    if not isinstance(candidates, list):
+        return ()
+    trusted: list[ReplacementCandidateEvidence] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        try:
+            trusted.append(
+                ReplacementCandidateEvidence(
+                    candidate_id=candidate["candidate_id"],  # type: ignore[arg-type]
+                    title=candidate["title"],  # type: ignore[arg-type]
+                    place=candidate["place"],  # type: ignore[arg-type]
+                    lat=candidate["lat"],  # type: ignore[arg-type]
+                    lng=candidate["lng"],  # type: ignore[arg-type]
+                    price_per_person=candidate.get("price_per_person"),  # type: ignore[arg-type]
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            # A malformed provider/tool-shaped object is not provenance.
+            continue
+    return tuple(trusted)
 
 
 def _observation(
@@ -393,16 +472,21 @@ def _normalized_stopped_reason(stopped_reason: str) -> RuntimeFailureKind:
 def _failure_result(error: Exception) -> RuntimeResult:
     normalized_kind: RuntimeFailureKind = "unexpected_exception"
     technical_kind = error.__class__.__name__
+    evidence_status = "failed"
     if isinstance(error, AgentProviderDeadlineExceeded):
         normalized_kind = "provider_timeout"
+        evidence_status = "timed_out"
     elif isinstance(error, AgentToolDeadlineExceeded):
         normalized_kind = "tool_timeout"
+        evidence_status = "timed_out"
     elif isinstance(error, AgentRequestDeadlineExceeded):
         normalized_kind = "request_timeout"
+        evidence_status = "cancelled"
     elif isinstance(error, AgentExecutionCapacityExceeded):
         normalized_kind = "runtime_capacity"
     elif isinstance(error, AgentExecutionDeadlineExceeded):
         normalized_kind = "request_timeout"
+        evidence_status = "cancelled"
     return RuntimeResult(
         reply="",
         outcome=AgentReplyOnly(),
@@ -416,5 +500,8 @@ def _failure_result(error: Exception) -> RuntimeResult:
                 normalized_kind=normalized_kind,
                 technical_kind=technical_kind,
             ),
+        ),
+        tool_execution_evidence=(
+            ToolExecutionEvidence(tool_name="agent_execution", status=evidence_status),
         ),
     )
