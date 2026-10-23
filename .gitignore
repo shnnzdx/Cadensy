@@ -30,3 +30,4 @@ __pycache__/
 
 # Local backend traces and logs
 backend/logs/
+backend/test-results-*

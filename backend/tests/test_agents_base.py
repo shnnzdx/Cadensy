@@ -7,6 +7,7 @@ from datetime import date
 import pytest
 
 from app.agents import base
+from app.observability.telemetry import ModelId
 from app.domain.constraints.engine import classify
 from app.domain.constraints.types import (
     Constraint,
@@ -131,6 +132,45 @@ def test_provider_off_without_credentials_never_invokes_external_provider(monkey
             mock={},
             provider=base.CHAT_ROUTE,
         )
+
+
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
+def test_flash_model_names_use_explicit_thinking_control(monkeypatch, model):
+    monkeypatch.setattr(base, "DEEPSEEK_THINKING", "disabled")
+    config = base.ProviderConfig(
+        name=base.DEEPSEEK_PROVIDER,
+        api_key="offline-placeholder",
+        base_url="https://api.deepseek.com",
+        model=model,
+    )
+
+    assert base._extra_body(config) == {"thinking": {"type": "disabled"}}
+
+
+def test_canonical_flash_model_has_an_approved_telemetry_id():
+    assert base._approved_model("deepseek-flash") is ModelId.DEEPSEEK_FLASH
+
+
+def test_legacy_agent_provider_disables_sdk_retries(monkeypatch):
+    captured = {}
+
+    class OfflineOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("offline stop")
+
+    monkeypatch.setitem(__import__("sys").modules, "openai", type("M", (), {"OpenAI": OfflineOpenAI}))
+    config = base.ProviderConfig(
+        name=base.DEEPSEEK_PROVIDER,
+        api_key="offline-placeholder",
+        base_url="https://api.deepseek.com",
+        model="deepseek-flash",
+    )
+
+    with pytest.raises(RuntimeError, match="offline stop"):
+        base._invoke_agent_provider(config=config, messages=[], tools=(), max_tokens=256)
+
+    assert captured["max_retries"] == 0
 
 
 @pytest.mark.parametrize(

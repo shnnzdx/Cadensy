@@ -1,0 +1,294 @@
+name: CD-02 — Controlled DeepSeek Production Activation
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Activate the reviewed DeepSeek profile, or restore the fixed Runtime-off baseline
+        required: true
+        default: activate
+        type: choice
+        options: [activate, runtime_off_rollback]
+      tooling_sha:
+        description: Reviewed main SHA owning the CD-02 workflow and helper implementation
+        required: true
+        type: string
+      runtime_image_digest:
+        description: Release A backend image digest; required for activate and must equal the current service image
+        required: false
+        type: string
+      release_a_image_source_sha:
+        description: Original source SHA whose ECR provenance tag identifies the deployed Release A backend image; required for activate
+        required: false
+        type: string
+      expected_current_task_definition_arn:
+        description: Exact currently running Task Definition ARN; fail closed if it differs
+        required: true
+        type: string
+      rollback_task_definition_arn:
+        description: Exact independently validated Release A Runtime-off Task Definition ARN
+        required: true
+        type: string
+      deepseek_api_key_secret_arn:
+        description: Existing approved-region/account SSM SecureString or Secrets Manager ARN; required for activate
+        required: false
+        type: string
+      confirmation:
+        description: Type ACTIVATE_DEEPSEEK_DURABLE_RUNTIME or ROLLBACK_DEEPSEEK_DURABLE_RUNTIME
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cd02-deepseek-production-activation-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-backend
+  ECS_CLUSTER: tripsync-cluster
+  ECS_SERVICE: tripsync-backend-service
+  CONTAINER_NAME: tripsync-backend
+  PRODUCTION_API_BASE_URL: https://app.cadensy.top
+
+jobs:
+  assert-approval-gate:
+    name: Require a protected Main approval environment
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless inputs and Main reviewers are valid
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          case "${OPERATION}" in
+            activate) test "${CONFIRMATION}" = "ACTIVATE_DEEPSEEK_DURABLE_RUNTIME" ;;
+            runtime_off_rollback) test "${CONFIRMATION}" = "ROLLBACK_DEEPSEEK_DURABLE_RUNTIME" ;;
+            *) exit 1 ;;
+          esac
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/Main" \
+            > /tmp/main-environment.json
+          jq -e 'any(.protection_rules[]?; .type == "required_reviewers")' /tmp/main-environment.json >/dev/null
+
+  execute:
+    name: Activate DeepSeek or restore Runtime-off
+    needs: assert-approval-gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: Main
+    timeout-minutes: 35
+    steps:
+      - name: Check out reviewed tooling at the approved tooling SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tooling_sha }}
+          fetch-depth: 0
+
+      - name: Require one recorded non-bypassed Main approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals" \
+            > /tmp/main-approvals.json
+          jq -e 'any(.[]?; .state == "approved" and any(.environments[]?; .name == "Main")) and (any(.[]?; .state == "skipped" and any(.environments[]?; .name == "Main")) | not)' /tmp/main-approvals.json >/dev/null
+
+      - name: Validate immutable source and operation inputs
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          TOOLING_SHA: ${{ inputs.tooling_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          RELEASE_A_IMAGE_SOURCE_SHA: ${{ inputs.release_a_image_source_sha }}
+          DEEPSEEK_SECRET_ARN: ${{ inputs.deepseek_api_key_secret_arn }}
+          EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
+          ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}" =~ ^arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task-definition/${CONTAINER_NAME}:[0-9]+$ ]]
+          [[ "${ROLLBACK_TASK_DEFINITION_ARN}" =~ ^arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task-definition/${CONTAINER_NAME}:[0-9]+$ ]]
+          test "$(git rev-parse HEAD)" = "${TOOLING_SHA}"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${TOOLING_SHA}" origin/main
+          test -f scripts/cd01/prepare_deepseek_activation_task_definition.py
+          if [[ "${OPERATION}" == "activate" ]]; then
+            [[ "${RUNTIME_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "${RELEASE_A_IMAGE_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+            [[ "${DEEPSEEK_SECRET_ARN}" =~ ^arn:aws:(ssm|secretsmanager):${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}: ]]
+          else
+            test "${OPERATION}" = "runtime_off_rollback"
+          fi
+
+      - name: Configure AWS credentials from the approved Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify current service and safe Release A rollback baseline
+        id: current
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
+          ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/service.json
+          jq -e '.services | length == 1 and .[0].status == "ACTIVE" and .[0].desiredCount >= 1 and .[0].runningCount >= 1 and .[0].pendingCount == 0 and .[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .[0].deploymentConfiguration.minimumHealthyPercent == 100 and .[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/service.json)"
+          test "${current_task_definition}" = "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/current-task-definition.json
+          aws ecs describe-task-definition --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --output json > /tmp/rollback-task-definition.json
+          python scripts/cd01/prepare_deepseek_activation_task_definition.py --input /tmp/rollback-task-definition.json --validate-release-a-baseline
+          if [[ "${OPERATION}" == "activate" ]]; then
+            # An activation can only replace the exact independently verified
+            # Release A baseline.  It may never skip over an unknown service revision.
+            test "${current_task_definition}" = "${ROLLBACK_TASK_DEFINITION_ARN}"
+            release_a_image="$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/current-task-definition.json)"
+            [[ "${release_a_image}" =~ ^${APPROVED_AWS_ACCOUNT_ID}\.dkr\.ecr\.${APPROVED_AWS_REGION}\.amazonaws\.com/${ECR_REPOSITORY}@sha256:[0-9a-f]{64}$ ]]
+            test "${release_a_image##*@}" = "${RUNTIME_DIGEST}"
+            echo "release_a_image=${release_a_image}" >> "${GITHUB_OUTPUT}"
+          else
+            # Emergency Runtime-off rollback deliberately does not need a
+            # DeepSeek Secret reference.  It does require that the operator
+            # pin the currently active controlled profile exactly.
+            python scripts/cd01/prepare_deepseek_activation_task_definition.py --input /tmp/current-task-definition.json --validate-activation-profile
+          fi
+          echo "current_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify DeepSeek image and secret-reference metadata without resolving a value
+        if: inputs.operation == 'activate'
+        shell: bash
+        env:
+          RELEASE_A_IMAGE_SOURCE_SHA: ${{ inputs.release_a_image_source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          DEEPSEEK_SECRET_ARN: ${{ inputs.deepseek_api_key_secret_arn }}
+        run: |
+          set -euo pipefail
+          aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${RUNTIME_DIGEST}" --output json > /tmp/runtime-image.json
+          jq -e --arg tag "${RELEASE_A_IMAGE_SOURCE_SHA}" '(.imageDetails | length == 1) and (.imageDetails[0].imageTags | index($tag))' /tmp/runtime-image.json >/dev/null
+          execution_role_arn="$(jq -r '.taskDefinition.executionRoleArn' /tmp/current-task-definition.json)"
+          test -n "${execution_role_arn}" && test "${execution_role_arn}" != "null"
+          case "${DEEPSEEK_SECRET_ARN}" in
+            arn:aws:ssm:*)
+              parameter_name="/${DEEPSEEK_SECRET_ARN##*:parameter/}"
+              aws ssm describe-parameters --parameter-filters "Key=Name,Option=Equals,Values=${parameter_name}" --output json > /tmp/deepseek-secret-metadata.json
+              jq -e --arg arn "${DEEPSEEK_SECRET_ARN}" '.Parameters | length == 1 and .[0].ARN == $arn and .[0].Type == "SecureString"' /tmp/deepseek-secret-metadata.json >/dev/null
+              aws iam simulate-principal-policy --policy-source-arn "${execution_role_arn}" --action-names ssm:GetParameters --resource-arns "${DEEPSEEK_SECRET_ARN}" --output json > /tmp/deepseek-secret-access.json
+              kms_key_id="$(jq -r '.Parameters[0].KeyId // empty' /tmp/deepseek-secret-metadata.json)"
+              ;;
+            arn:aws:secretsmanager:*)
+              aws secretsmanager describe-secret --secret-id "${DEEPSEEK_SECRET_ARN}" --output json > /tmp/deepseek-secret-metadata.json
+              jq -e --arg arn "${DEEPSEEK_SECRET_ARN}" '.ARN == $arn' /tmp/deepseek-secret-metadata.json >/dev/null
+              aws iam simulate-principal-policy --policy-source-arn "${execution_role_arn}" --action-names secretsmanager:GetSecretValue --resource-arns "${DEEPSEEK_SECRET_ARN}" --output json > /tmp/deepseek-secret-access.json
+              kms_key_id="$(jq -r '.KmsKeyId // empty' /tmp/deepseek-secret-metadata.json)"
+              ;;
+            *) exit 1 ;;
+          esac
+          jq -e 'all(.EvaluationResults[]?; .EvalDecision == "allowed") and (.EvaluationResults | length > 0)' /tmp/deepseek-secret-access.json >/dev/null
+          if [[ -n "${kms_key_id}" && "${kms_key_id}" != alias/aws/* ]]; then
+            aws kms describe-key --key-id "${kms_key_id}" --output json > /tmp/deepseek-kms-metadata.json
+            kms_key_arn="$(jq -r '.KeyMetadata.Arn' /tmp/deepseek-kms-metadata.json)"
+            jq -e '.KeyMetadata.KeyManager == "CUSTOMER"' /tmp/deepseek-kms-metadata.json >/dev/null
+            aws iam simulate-principal-policy --policy-source-arn "${execution_role_arn}" --action-names kms:Decrypt --resource-arns "${kms_key_arn}" --output json > /tmp/deepseek-kms-access.json
+            jq -e 'all(.EvaluationResults[]?; .EvalDecision == "allowed") and (.EvaluationResults | length > 0)' /tmp/deepseek-kms-access.json >/dev/null
+          fi
+
+      - name: Execute controlled activation or Runtime-off rollback
+        id: execute
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          DEEPSEEK_SECRET_ARN: ${{ inputs.deepseek_api_key_secret_arn }}
+          ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+        run: |
+          set -euo pipefail
+          verify_healthy_service() {
+            expected_task_definition="$1"
+            aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
+            aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/post-service.json
+            jq -e --arg expected "${expected_task_definition}" '.services | length == 1 and .[0].taskDefinition == $expected and .[0].runningCount >= 1 and .[0].pendingCount == 0' /tmp/post-service.json >/dev/null
+            target_group_arn="$(jq -r '.services[0].loadBalancers[0].targetGroupArn // empty' /tmp/post-service.json)"
+            test -n "${target_group_arn}"
+            aws elbv2 describe-target-health --target-group-arn "${target_group_arn}" --output json > /tmp/target-health.json
+            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/target-health.json >/dev/null
+            curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /dev/null
+          }
+          if [[ "${OPERATION}" == "runtime_off_rollback" ]]; then
+            aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --force-new-deployment --output json > /tmp/rollback-update.json
+            verify_healthy_service "${ROLLBACK_TASK_DEFINITION_ARN}"
+            aws ecs describe-task-definition --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --output json > /tmp/post-task-definition.json
+            python scripts/cd01/prepare_deepseek_activation_task_definition.py --input /tmp/post-task-definition.json --validate-release-a-baseline
+            echo "final_task_definition=${ROLLBACK_TASK_DEFINITION_ARN}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          image="${{ steps.current.outputs.release_a_image }}"
+          deployment_started=0
+          rollback_on_error() {
+            exit_status="$?"
+            trap - ERR
+            if [[ "${deployment_started}" == "1" ]]; then
+              rollback_failed=0
+              aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --force-new-deployment --output json > /tmp/automatic-runtime-off-rollback.json || rollback_failed=1
+              verify_healthy_service "${ROLLBACK_TASK_DEFINITION_ARN}" || rollback_failed=1
+              aws ecs describe-task-definition --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --output json > /tmp/automatic-rollback-task-definition.json || rollback_failed=1
+              python scripts/cd01/prepare_deepseek_activation_task_definition.py --input /tmp/automatic-rollback-task-definition.json --validate-release-a-baseline || rollback_failed=1
+              if [[ "${rollback_failed}" != "0" ]]; then
+                echo '::error::Automatic Runtime-off rollback could not be fully verified; stop and investigate before any retry.'
+              fi
+            fi
+            exit "${exit_status}"
+          }
+          trap rollback_on_error ERR
+          python scripts/cd01/prepare_deepseek_activation_task_definition.py --input /tmp/current-task-definition.json --output /tmp/activation-task-definition.json --image "${image}" --deepseek-api-key-secret-arn "${DEEPSEEK_SECRET_ARN}"
+          activation_task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/activation-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          test -n "${activation_task_definition}" && test "${activation_task_definition}" != "None"
+          deployment_started=1
+          aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --task-definition "${activation_task_definition}" --output json > /tmp/activation-update.json
+          verify_healthy_service "${activation_task_definition}"
+          aws ecs describe-task-definition --task-definition "${activation_task_definition}" --output json > /tmp/post-task-definition.json
+          python scripts/cd01/prepare_deepseek_activation_task_definition.py --input /tmp/post-task-definition.json --validate-activation-profile
+          echo "final_task_definition=${activation_task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write non-sensitive CD-02 summary
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          TOOLING_SHA: ${{ inputs.tooling_sha }}
+          RELEASE_A_IMAGE_SOURCE_SHA: ${{ inputs.release_a_image_source_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## CD-02 controlled DeepSeek production operation'
+            echo
+            echo "- Operation: ${OPERATION}"
+            echo "- Reviewed tooling SHA: ${TOOLING_SHA}"
+            if [[ "${OPERATION}" == "activate" ]]; then
+              echo "- Release A image source SHA: ${RELEASE_A_IMAGE_SOURCE_SHA}"
+            fi
+            echo "- Final task definition: ${{ steps.execute.outputs.final_task_definition }}"
+            echo '- Secret values, prompts, tool results, and request payloads are never read or emitted by this workflow.'
+            echo '- Activation establishes infrastructure readiness only; bounded real-provider verification requires separate authorization.'
+          } >> "${GITHUB_STEP_SUMMARY}"

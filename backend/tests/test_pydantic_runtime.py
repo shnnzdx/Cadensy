@@ -180,6 +180,7 @@ def test_typed_reply_and_clarification_map_to_common_runtime_result(
     assert isinstance(result.outcome, outcome_type)
     assert result.reply == payload["reply"]
     assert result.candidate_options == ()
+    assert result.tool_execution_evidence == ()
     assert result.observation.failure is None
 
 
@@ -217,6 +218,10 @@ def test_suggested_change_requires_same_run_scoped_read_and_has_no_write_authori
     assert result.outcome.safe_patch == {"start_hour": 15.5}
     assert result.reply
     assert result.observation.failure is None
+    assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
+        ("get_current_plan", "succeeded"),
+    ]
+    assert isinstance(result.tool_execution_evidence, tuple)
 
 
 @pytest.mark.parametrize(
@@ -457,6 +462,9 @@ def test_blocking_scoped_tool_maps_to_tool_timeout_without_consuming_late_result
     assert tool.calls == [{"day": "all"}]
     assert result.observation.failure is not None
     assert result.observation.failure.normalized_kind == "tool_timeout"
+    assert [(entry.tool_name, entry.status, entry.replacement_candidates) for entry in result.tool_execution_evidence] == [
+        ("agent_execution", "timed_out", ()),
+    ]
 
 
 def test_post_return_deadline_keeps_pydantic_wrapper_return_telemetry(monkeypatch):
@@ -646,6 +654,9 @@ def test_request_timeout_discards_late_pydantic_result(monkeypatch):
         result = result_holder["result"]
         assert result.observation.failure is not None
         assert result.observation.failure.normalized_kind == "request_timeout"
+        assert [(entry.tool_name, entry.status, entry.replacement_candidates) for entry in result.tool_execution_evidence] == [
+            ("agent_execution", "cancelled", ()),
+        ]
     finally:
         release.set()
 

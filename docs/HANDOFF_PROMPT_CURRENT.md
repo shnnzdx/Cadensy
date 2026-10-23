@@ -100,13 +100,11 @@ Do not casually move these responsibilities back into UI components or `FinalApp
 
 9. AI provider realities:
 
-- current runtime shape is dual-provider, not single-provider
-- recommended routing:
-  - `CHAT_AI_PROVIDER=ollama_cloud`
-  - `PLANNER_AI_PROVIDER=deepseek`
-  - `EXPLAINER_AI_PROVIDER=deepseek`
-- `MOCK_AI=1` is still the safest local default
-- do not assume “AI is broken” before checking provider env vars and backend traceback
+- the current real-provider route is DeepSeek-only; `DEEPSEEK_*` controls it
+- Chat Runtime defaults to `CHAT_AGENT_RUNTIME=legacy`; `pydantic` remains explicit opt-in
+- `MOCK_AI=1` is still the safest non-production local default
+- production activation uses the protected CD-02 workflow, never legacy provider selectors
+- do not assume “AI is broken” before checking runtime gates, provider configuration, and backend traceback
 
 10. Current repo truths worth preserving unless intentionally changing them:
 

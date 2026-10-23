@@ -1,10 +1,13 @@
 # Cadensy 项目交接文档
 
-最后更新：2026-08-14
+最后更新：2026-10-22（Release B 生产验收关闭）
 
 当前工作目录：`C:\Users\zdxzh\Desktop\capstone\New`
 
-当前分支：`main`（跟踪 `origin/main`）
+权威生产工具基线：`origin/main` 的
+`72eda0d919d75a7ed40561313203d52f39ecffd7`。本机 checkout 是操作员相关状态，
+接手时必须重新运行 `git status --short --branch` 和 `git rev-parse origin/main`，
+不要假设当前分支就是 `main`。
 
 给其他 AI 的最新可复用交接 prompt 在：
 
@@ -12,6 +15,25 @@
 - `docs/HANDOFF_PROMPT_BACKEND_REFACTOR_CURRENT.md`（仅限 backend / repo refactor 任务）
 
 > 项目历史文档中可能仍出现 `TripSync`。在当前产品语境中，它指的就是 Cadensy，不要因此复制或新建第二套项目结构。
+
+## Release B 当前生产状态（2026-10-22）
+
+**Release B — ACCEPTED AND CLOSED。** 当前生产部署是已经通过真实 DeepSeek
+受限验收的稳定基线，而不是待继续试验的阶段性环境。
+
+- 活跃 Backend Task Definition：`tripsync-backend:26`；紧急 Runtime-off
+  回滚基线：`tripsync-backend:25`。
+- Durable Conversation 两个生产 Gate 均为 `1`；运行时为 Legacy +
+  DeepSeek `deepseek-flash`，Thinking disabled，`MOCK_AI=0`、Fake E2E Runtime=`0`。
+- 生产验收已确认真实 Provider 回复、持久化 Conversation、重新认证后的服务端
+  Context Reconstruction、Idempotency、脱敏 Telemetry 及 ECS/ALB/API 健康。
+- 不要为了整理历史 Ollama 字段而修改 `:25`、回滚、创建新 ECS revision，或触发
+  CD-02。历史 Ollama AWS 退役是 **DEFERRED — NON-BLOCKING**，必须另行批准。
+- `AI_enhanced/PR-08_Controlled-DeepSeek-Production-Activation/02_RELEASE_B_FINAL_PRODUCTION_ACCEPTANCE_AND_CLOSEOUT.md`
+  是本次生产验收和后续边界的正式记录。
+
+这不是 Chromium UI E2E 的新验收记录：Context Recovery 是通过真实生产 API 的
+重新认证会话验证。跨请求 token/cost 停止阈值是人工控制，不是已实现的硬性费用上限。
 
 ## 1. 接手后的第一步
 
@@ -34,7 +56,7 @@ C:\Users\zdxzh\Desktop\capstone\New
 
 ## 2. 当前工作区非常重要
 
-当前工作树有大量尚未提交的修改，包含近期功能实现和生成后的 Trip preview assets。它们属于当前开发成果，不要执行：
+工作树可能包含尚未提交的开发成果或生成后的 Trip preview assets。它们属于当前开发成果，不要执行：
 
 ```bash
 git reset --hard
@@ -50,7 +72,7 @@ git status --short --branch
 git diff --check
 ```
 
-当前修改横跨 `backend/`、`trip/`、`frontend/` 和本文档。提交前应按功能审查 diff，不要把所有文件盲目打包成一个无法解释的提交。
+提交前应按功能审查实际 diff，不要把所有文件盲目打包成一个无法解释的提交。
 
 ## 3. Repository 结构
 
@@ -183,31 +205,38 @@ POST /api/trips/{trip_id}/plans/generate
 → backend/app/agents/base.py
 ```
 
-provider routing 当前由以下环境变量控制：
+当前真实 AI Provider 路由为 **DeepSeek-only**，由 `DEEPSEEK_*` 配置控制；不使用
+任何历史 Provider selector 作为当前运行时选择路径。Chat Runtime 默认是 `CHAT_AGENT_RUNTIME=legacy`；
+`pydantic` 仍是显式 opt-in，且不会回退到 Legacy。
 
-```env
-CHAT_AI_PROVIDER=ollama_cloud
-PLANNER_AI_PROVIDER=deepseek
-EXPLAINER_AI_PROVIDER=deepseek
-```
+仓库本地配置示例的默认 `DEEPSEEK_MODEL` 是兼容别名
+`deepseek-v4-flash`。Stage 3B 的受限本地真实 Provider 验证则显式使用
+`deepseek-flash`、Thinking disabled；该验证配置不等于更改仓库或生产默认值。
 
-`.env.example` 中的推荐模型：
+Durable Chat 的运行权限是明确的：
 
-```text
-Planner Agent
-Provider = DeepSeek
-Model = deepseek-v4-flash
-Local or Cloud = Cloud
-```
+- 非生产 `legacy` + `MOCK_AI=1` + Durable Base Gate=`1` + Fake E2E Runtime=`0`
+  可走确定性的本地 Mock Reply；它不会调用 DeepSeek、不会伪造建议或 Preview。
+- 真实 DeepSeek 需要 `MOCK_AI=0`、官方 HTTPS endpoint、有效 Provider 配置与
+  Durable Base Gate=`1`。
+- `APP_ENV=production` 还必须同时拥有独立 Production Activation Latch 与生产签名
+  material；`MOCK_AI=1` 和 Fake E2E Runtime 都不能绕过这一限制。
 
-Chat 默认走 Ollama Cloud 的 `qwen3.5:cloud`。本地 Ollama 只通过 legacy OpenAI-compatible 配置兼容，例如 `OPENAI_BASE_URL=http://localhost:11434/v1/`；它不是当前 Planner 的默认路径。
+发布边界保持不变：**Release A** 仅发布代码，两个 Durable Runtime gate 都固定为
+`0`，不附加 Provider credential；**Release B** 必须经过单独授权，才可配置
+DeepSeek secret reference、Legacy selector、Thinking-off/model 与双 gate。不要输出、
+复制或提交任何真实 API Key；Provider 失败时，核心 deterministic rules 与 decision
+flow 必须保持可运行。
 
-特别注意：
+### Release B 已完成的生产验收
 
-- `MOCK_AI=1` 时不会真实调用 DeepSeek；Planner 会进入 deterministic fallback
-- 真实运行时最终 provider 仍以 `backend/.env` 为准
-- 不要输出或提交任何真实 API Key
-- provider 失败时，核心 deterministic rules 和 decision flow 必须保持可运行
+Release B 已在 2026-10-22 经受保护的 CD-02 工作流和 `Main` Environment 审批激活，
+随后完成有界真实 DeepSeek 验收。最终生产 Profile 与证据、Token/费用计算方法、
+回滚边界及未完成的非阻断运营事项，均记录在
+`AI_enhanced/PR-08_Controlled-DeepSeek-Production-Activation/02_RELEASE_B_FINAL_PRODUCTION_ACCEPTANCE_AND_CLOSEOUT.md`。
+
+不要把此前“Release B 必须单独授权”的实现期说明当作当前仍未上线；后续任何
+Activation、Runtime-off Rollback、Secret/IAM/KMS 变更仍需新的明确生产授权。
 
 ## 8. Planner 最新 scheduling 行为
 
@@ -574,7 +603,8 @@ unknown metadata 不能仅因为未知就被判 invalid；只有 hard constraint
 - Preferences 当前表达的是一个连续 availability range，不支持多个离散可用日期区间
 - arrival/departure time 尚未建模，首尾日仍按 full day 处理
 - Alembic migrations 尚未建立，当前依赖 additive `init_schema`
-- chat history 尚未持久化
+- Durable Chat history 已持久化并完成生产 Context Recovery 验收；其浏览器 UI
+  体验、用量监控、rate limiting 和硬性 token/cost budget 仍是后续产品/运营工作
 - magic-link 和 guest-to-account binding 仍未完全完成
 - automatic trip state transitions 尚未完全完成
 - deeper `frontend` / `trip` runtime merge 仍暂停
@@ -583,9 +613,13 @@ unknown metadata 不能仅因为未知就被判 invalid；只有 hard constraint
 
 优先级建议：
 
-1. 保护当前 dirty worktree，按功能审查并拆分 commits。
-2. 跑完整 backend tests、frontend tests 和 `build:trip-preview`。
-3. 使用真实 runtime 配置重新生成至少一个非 Chicago trip，记录：
+Release B 已关闭后，后续工作不应重新打开 AI 基础设施发布范围。建议独立排期：
+
+1. 产品：优化 AI Chat UI、Conversation History、Suggestion 展示与 Plan Assistant
+   协作流程。
+2. 运营安全：增加 Provider Usage Monitoring、rate limiting、严格 token/cost
+   budget 与真实用户上线前的滥用防护。
+3. Planner 产品验证：使用真实 runtime 配置重新生成至少一个非 Chicago trip，记录：
    - Geoapify candidate count
    - PostgreSQL cached count
    - Planner final candidate count
@@ -593,7 +627,8 @@ unknown metadata 不能仅因为未知就被判 invalid；只有 hard constraint
    - generate HTTP status 与 blocked reason
    - GET plan activities
 4. 浏览器检查 My Trips、Create Trip、Preferences 和 Plan 页面。
-5. 在真实验收通过前，不进行 Planner、Session、Navigation 或 PlanFeature 的大规模重构。
+5. 历史 Ollama AWS 清理仅在独立批准、建立 DeepSeek-only Runtime-off 回滚基线后进行；
+   它不是 Release B 阻断项。
 
 ## 18. 最后原则
 

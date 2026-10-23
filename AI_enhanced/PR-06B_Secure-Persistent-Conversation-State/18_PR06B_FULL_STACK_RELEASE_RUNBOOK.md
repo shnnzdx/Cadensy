@@ -161,3 +161,8 @@ use the corresponding previous backend ARN only after confirming compatibility
 with the forward-only PR-06B schema. No automated workflow rolls back or
 downgrades the database. Real Provider and Durable Runtime activation remain a
 separate, unapproved production round.
+
+Actual Gate M/R/F production evidence and final Runtime-off browser acceptance
+are kept in `19_PR06B_PRODUCTION_ACTIVATION_EXECUTION_RECORD.md`. The read-only
+release-closeout inventory, ongoing-cost estimate, and future cleanup boundary
+are kept in `20_PR06B_RELEASE_CLOSEOUT_AWS_INVENTORY.md`.

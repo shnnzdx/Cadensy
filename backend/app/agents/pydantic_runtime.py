@@ -47,6 +47,7 @@ from .runtime_contract import (
     RuntimeReadTool,
     RuntimeRequest,
     RuntimeResult,
+    ToolExecutionEvidence,
 )
 from . import trace
 from ..observability.telemetry import (
@@ -145,6 +146,7 @@ class _PydanticRunDeps:
     deadline: AgentExecutionContext
     read_item_refs: set[str] = field(default_factory=set)
     tool_trajectory: list[str] = field(default_factory=list)
+    tool_execution_evidence: list[ToolExecutionEvidence] = field(default_factory=list)
     tool_timeout_observed: bool = False
 
 
@@ -326,6 +328,9 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 "get_current_plan",
                 ToolDispatchStatus.HANDLER_SUCCEEDED,
             )
+            ctx.deps.tool_execution_evidence.append(
+                ToolExecutionEvidence(tool_name="get_current_plan", status="succeeded")
+            )
             return output
 
         @agent.output_validator
@@ -368,6 +373,7 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 outcome=AgentClarification(),
                 candidate_options=(),
                 observation=observation,
+                tool_execution_evidence=tuple(deps.tool_execution_evidence),
             )
         if isinstance(output, _RuntimeSuggestedChange):
             return RuntimeResult(
@@ -378,12 +384,14 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 ),
                 candidate_options=(),
                 observation=observation,
+                tool_execution_evidence=tuple(deps.tool_execution_evidence),
             )
         return RuntimeResult(
             reply=output.reply,
             outcome=AgentReplyOnly(),
             candidate_options=(),
             observation=observation,
+            tool_execution_evidence=tuple(deps.tool_execution_evidence),
         )
 
 
@@ -462,7 +470,7 @@ def _emit_pydantic_model_call(
             model_invocation_index=invocation_index,
             invocation_source=source,
             provider=ProviderName.DEEPSEEK if "deepseek" in model_name.lower() else ProviderName.UNAPPROVED_PROVIDER,
-            model_id=(ModelId.DEEPSEEK_V4_FLASH if model_name == "deepseek-v4-flash" else ModelId.DEEPSEEK_V4_PRO if model_name == "deepseek-v4-pro" else ModelId.UNAPPROVED_MODEL),
+            model_id=(ModelId.DEEPSEEK_FLASH if model_name == "deepseek-flash" else ModelId.DEEPSEEK_V4_FLASH if model_name == "deepseek-v4-flash" else ModelId.DEEPSEEK_V4_PRO if model_name == "deepseek-v4-pro" else ModelId.UNAPPROVED_MODEL),
             invocation_outcome=outcome,
             failure_category=None if error is None else _pydantic_failure_category(error),
             elapsed_ms=round(max(elapsed_ms, 0), 2),
@@ -521,6 +529,11 @@ def _safe_observation_detail(tool_trajectory: list[str]) -> str:
 
 def _failure_result(error: Exception) -> RuntimeResult:
     normalized_kind = _normalized_failure_kind(error)
+    evidence_status = "failed"
+    if isinstance(error, (AgentProviderDeadlineExceeded, AgentToolDeadlineExceeded, TimeoutError)):
+        evidence_status = "timed_out"
+    elif isinstance(error, AgentExecutionDeadlineExceeded):
+        evidence_status = "cancelled"
     return RuntimeResult(
         reply="",
         outcome=AgentReplyOnly(),
@@ -534,6 +547,9 @@ def _failure_result(error: Exception) -> RuntimeResult:
                 normalized_kind=normalized_kind,
                 technical_kind=error.__class__.__name__,
             ),
+        ),
+        tool_execution_evidence=(
+            ToolExecutionEvidence(tool_name="agent_execution", status=evidence_status),
         ),
     )
 

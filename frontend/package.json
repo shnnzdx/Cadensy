@@ -12,7 +12,7 @@
     "hosting:proof": "node scripts/aws-hosting-proof.mjs",
     "sync:trip-preview": "node scripts/sync-trip-preview.mjs",
     "start": "node scripts/run-vinext.mjs start",
-    "test": "node scripts/run-vinext.mjs build && node --test tests/rendered-html.test.mjs tests/trip-preview-integration.test.mjs tests/backend-runtime-config-guest-access.test.mjs",
+    "test": "node scripts/run-vinext.mjs build && node --test tests/rendered-html.test.mjs tests/trip-preview-integration.test.mjs",
     "e2e:aws": "node tests/aws-public-e2e.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

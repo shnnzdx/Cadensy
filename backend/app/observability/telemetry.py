@@ -58,6 +58,7 @@ class ProviderName(str, Enum):
 
 
 class ModelId(str, Enum):
+    DEEPSEEK_FLASH = "deepseek-flash"
     DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
     DEEPSEEK_V4_PRO = "deepseek-v4-pro"
     UNAPPROVED_MODEL = "unapproved_model"

@@ -299,6 +299,29 @@ def test_call_agent_passes_only_the_remaining_provider_budget_to_the_provider(mo
     assert seen_timeouts == [0.25]
 
 
+def test_output_token_cap_is_preserved_across_a_basic_tool_call(monkeypatch):
+    monkeypatch.setenv("MOCK_AI", "0")
+    seen_caps = []
+
+    def fake_provider(*, max_tokens, **_kwargs):
+        seen_caps.append(max_tokens)
+        if len(seen_caps) == 1:
+            return _reply(calls=(_call("read-1", "read"),))
+        return _reply("final answer")
+
+    monkeypatch.setattr(base, "_invoke_agent_provider", fake_provider)
+
+    result = base.call_agent(
+        system="s",
+        user="u",
+        tools=(_tool("read", lambda: "safe result"),),
+        max_tokens=4096,
+    )
+
+    assert result.content == "final answer"
+    assert seen_caps == [4096, 4096]
+
+
 def test_tool_result_past_its_deadline_is_not_sent_to_another_provider_round(monkeypatch):
     monkeypatch.setenv("MOCK_AI", "0")
     provider_calls = []

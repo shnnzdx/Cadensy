@@ -19,15 +19,20 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agents import base as agent_base
 from app.agents.execution import AgentExecutionConfig
+from app.agents import tools as agent_tools
+from app.agents.legacy_runtime import LegacyChatAgentRuntime
 from app.agents.runtime_contract import (
     AgentCandidateOption,
     AgentReplyOnly,
     AgentSuggestedChange,
+    ReplacementCandidateEvidence,
     RuntimeFailure,
     RuntimeObservation,
     RuntimeRequest,
     RuntimeResult,
+    ToolExecutionEvidence,
 )
 from app.api import main as api
 from app.db import session as db_session
@@ -44,6 +49,7 @@ from app.db.models import (
 )
 from app.domain import auth as auth_service
 from app.domain.decisions import orchestrator as orch
+from app.domain.places.service import PlannerPlace
 from app.domain.preview_apply import (
     PreviewCandidate,
     PreviewRequest,
@@ -583,19 +589,274 @@ def test_preview_omits_options_not_scoped_to_the_captured_current_plan(test_engi
 
 def test_replacement_provenance_retains_the_legacy_full_replacement_contract():
     candidate = {
+        "candidate_id": "river-north-1",
         "title": "New lunch",
         "place": "River North",
         "lat": 41.9,
         "lng": -87.6,
         "price_per_person": 21.0,
     }
-    trusted = ({"tool": "find_replacement_place", "output": {"candidates": [candidate]}},)
+    trusted = (
+        ToolExecutionEvidence(
+            tool_name="find_replacement_place",
+            status="succeeded",
+            replacement_candidates=(ReplacementCandidateEvidence(**candidate),),
+        ),
+    )
 
     assert _replacement_provenance_allows({"start_hour": 13.0}, ()) is True
     assert _replacement_provenance_allows({"title": "New lunch"}, trusted) is False
     assert _replacement_provenance_allows({"price_per_person": 21.0}, trusted) is False
     assert _replacement_provenance_allows(candidate, trusted) is True
     assert _replacement_provenance_allows(candidate, ()) is False
+    assert _replacement_provenance_allows(candidate, ({"tool": "find_replacement_place"},)) is False  # type: ignore[arg-type]
+
+    for field, forged_value in {
+        "title": "Invented lunch",
+        "place": "Invented place",
+        "lat": 40.0,
+        "lng": -88.0,
+        "price_per_person": 99.0,
+    }.items():
+        forged = dict(candidate)
+        forged[field] = forged_value
+        assert _replacement_provenance_allows(forged, trusted) is False
+
+
+def test_preview_accepts_only_replacement_values_matching_run_scoped_evidence(test_engine):
+    seed = _seed(test_engine)
+    candidate = ReplacementCandidateEvidence(
+        candidate_id="river-north-1",
+        title="New lunch",
+        place="River North",
+        lat=41.9,
+        lng=-87.6,
+        price_per_person=21.0,
+    )
+
+    class ReplacementRuntime:
+        def __init__(self, proposed_title: str) -> None:
+            self.proposed_title = proposed_title
+
+        def run(self, _request, _capability, *, execution: AgentExecutionConfig) -> RuntimeResult:
+            return RuntimeResult(
+                reply="I prepared a replacement preview.",
+                outcome=AgentSuggestedChange(
+                    item_ref=seed.item_id,
+                    safe_patch={
+                        "title": self.proposed_title,
+                        "place": "River North",
+                        "lat": 41.9,
+                        "lng": -87.6,
+                        "price_per_person": 21.0,
+                    },
+                ),
+                candidate_options=(),
+                observation=RuntimeObservation(
+                    trace_id="replacement-evidence", round_count=1, total_tokens=1, total_elapsed_ms=1
+                ),
+                tool_execution_evidence=(
+                    ToolExecutionEvidence(
+                        tool_name="find_replacement_place",
+                        status="succeeded",
+                        replacement_candidates=(candidate,),
+                    ),
+                ),
+            )
+
+    accepted = _preview(
+        RevisionBracketedPreview(
+            session_factory=_factory(test_engine), runtime=ReplacementRuntime("New lunch")
+        ),
+        seed,
+    )
+    forged = _preview(
+        RevisionBracketedPreview(
+            session_factory=_factory(test_engine), runtime=ReplacementRuntime("Invented lunch")
+        ),
+        seed,
+    )
+
+    assert accepted.candidate is not None
+    assert accepted.candidate.patch["title"] == "New lunch"
+    assert forged.candidate is None
+
+
+def test_preview_rejects_candidate_injected_into_mutated_evidence_source_lists(test_engine):
+    seed = _seed(test_engine)
+    trusted_candidate = ReplacementCandidateEvidence(
+        candidate_id="trusted-cafe",
+        title="Trusted Cafe",
+        place="River North",
+        lat=41.9,
+        lng=-87.6,
+        price_per_person=None,
+    )
+    fabricated_candidate = ReplacementCandidateEvidence(
+        candidate_id="fabricated-cafe",
+        title="Fabricated Cafe",
+        place="River North",
+        lat=41.9,
+        lng=-87.6,
+        price_per_person=None,
+    )
+    caller_candidates = [trusted_candidate]
+    tool_evidence = ToolExecutionEvidence(
+        tool_name="find_replacement_place",
+        status="succeeded",
+        replacement_candidates=caller_candidates,
+    )
+    caller_evidence = [tool_evidence]
+    runtime_result = RuntimeResult(
+        reply="I prepared a replacement preview.",
+        outcome=AgentSuggestedChange(
+            item_ref=seed.item_id,
+            safe_patch={
+                "title": "Fabricated Cafe",
+                "place": "River North",
+                "lat": 41.9,
+                "lng": -87.6,
+            },
+        ),
+        candidate_options=(),
+        observation=RuntimeObservation(
+            trace_id="mutated-evidence-source", round_count=1, total_tokens=1, total_elapsed_ms=1
+        ),
+        tool_execution_evidence=caller_evidence,
+    )
+    caller_candidates.append(fabricated_candidate)
+    caller_evidence.append(
+        ToolExecutionEvidence(
+            tool_name="find_replacement_place",
+            status="succeeded",
+            replacement_candidates=(fabricated_candidate,),
+        )
+    )
+
+    class StaticRuntime:
+        def run(self, _request, _capability, *, execution: AgentExecutionConfig) -> RuntimeResult:
+            return runtime_result
+
+    preview = _preview(
+        RevisionBracketedPreview(session_factory=_factory(test_engine), runtime=StaticRuntime()),
+        seed,
+    )
+
+    assert tool_evidence.replacement_candidates == (trusted_candidate,)
+    assert runtime_result.tool_execution_evidence == (tool_evidence,)
+    assert preview.candidate is None
+
+
+def test_preview_accepts_real_scoped_legacy_replacement_evidence_without_writing_plan(
+    test_engine, monkeypatch
+):
+    """Exercise the actual Legacy loop, scoped handlers, evidence, and Preview gate."""
+
+    seed = _seed(test_engine)
+    candidate = PlannerPlace(
+        candidate_id="test:trusted-cafe",
+        name="Trusted Cafe",
+        location="River North",
+        latitude=41.9,
+        longitude=-87.6,
+        category="catering.cafe",
+        address="River North",
+        image_url=None,
+        opening_hours="Mo-Su 07:00-22:00",
+        tags=("cafe",),
+    )
+    monkeypatch.setenv("MOCK_AI", "0")
+    monkeypatch.setattr(
+        agent_tools.place_service,
+        "places_for_replacement",
+        lambda *_args, **_kwargs: (candidate,),
+    )
+    replies = iter(
+        (
+            agent_base.AgentProviderReply(
+                content="",
+                tool_calls=(
+                    agent_base.AgentToolCall("plan", "get_current_plan", {"day": "all"}),
+                ),
+            ),
+            agent_base.AgentProviderReply(
+                content="",
+                tool_calls=(
+                    agent_base.AgentToolCall(
+                        "replacement",
+                        "find_replacement_place",
+                        {"item_id": seed.item_id, "keywords": ["cafe"]},
+                    ),
+                ),
+            ),
+            agent_base.AgentProviderReply(
+                content="",
+                tool_calls=(
+                    agent_base.AgentToolCall(
+                        "classify",
+                        "classify_change",
+                        {
+                            "item_id": seed.item_id,
+                            "item_title": "Preview lunch",
+                            "day": "all",
+                            "new_title": candidate.name,
+                            "new_place": candidate.location,
+                            "new_lat": candidate.latitude,
+                            "new_lng": candidate.longitude,
+                        },
+                    ),
+                ),
+            ),
+            agent_base.AgentProviderReply(content="I prepared an advisory replacement preview."),
+        )
+    )
+    monkeypatch.setattr(agent_base, "_invoke_agent_provider", lambda **_kwargs: next(replies))
+
+    class RecordingLegacyRuntime:
+        def __init__(self) -> None:
+            self.delegate = LegacyChatAgentRuntime(system_prompt="test system")
+            self.result: RuntimeResult | None = None
+
+        def run(self, request, capability, *, execution: AgentExecutionConfig) -> RuntimeResult:
+            self.result = self.delegate.run(request, capability, execution=execution)
+            return self.result
+
+    runtime = RecordingLegacyRuntime()
+    preview = _preview(
+        RevisionBracketedPreview(session_factory=_factory(test_engine), runtime=runtime),
+        seed,
+    )
+
+    assert runtime.result is not None
+    evidence = next(
+        entry
+        for entry in runtime.result.tool_execution_evidence
+        if entry.tool_name == "find_replacement_place"
+    )
+    assert evidence.status == "succeeded"
+    assert isinstance(evidence.replacement_candidates, tuple)
+    assert evidence.replacement_candidates == (
+        ReplacementCandidateEvidence(
+            candidate_id="test:trusted-cafe",
+            title="Trusted Cafe",
+            place="River North",
+            lat=41.9,
+            lng=-87.6,
+            price_per_person=None,
+        ),
+    )
+    assert preview.candidate is not None
+    assert preview.candidate.patch == {
+        "title": "Trusted Cafe",
+        "place": "River North",
+        "lat": 41.9,
+        "lng": -87.6,
+    }
+    with _factory(test_engine)() as db:
+        plan = db.get(Plan, seed.plan_id)
+        item = db.get(PlanItem, seed.item_id)
+        assert plan is not None and plan.revision == 0
+        assert item is not None and item.title == "Preview lunch"
 
 
 def test_b3_http_omits_foreign_and_removed_candidate_options(test_engine, monkeypatch):

@@ -9,12 +9,16 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.agents.legacy_runtime import LegacyChatAgentRuntime
+from app.agents.e2e_runtime import LocalE2ERuntime
+from app.agents.execution import AgentExecutionConfig
 from app.agents.runtime_contract import (
     AgentCandidateOption,
     AgentReplyOnly,
     AgentSuggestedChange,
     RuntimeFailure,
+    RuntimeLimits,
     RuntimeObservation,
+    RuntimeRequest,
     RuntimeResult,
 )
 from app.agents.runtime_factory import (
@@ -121,9 +125,45 @@ def test_local_e2e_runtime_is_explicit_and_refused_in_production(monkeypatch):
     runtime = build_chat_runtime(system_prompt="test prompt")
 
     assert runtime.__class__.__name__ == "LocalE2ERuntime"
+    monkeypatch.setenv("APP_ENV", "development")
+    with pytest.raises(ChatRuntimeConfigurationError):
+        build_chat_runtime(system_prompt="test prompt")
     monkeypatch.setenv("APP_ENV", "production")
     with pytest.raises(ChatRuntimeConfigurationError):
         build_chat_runtime(system_prompt="test prompt")
+
+
+def test_local_e2e_runtime_exposes_direct_candidate_only_for_explicit_marker():
+    class Capability:
+        calls = 0
+
+        def run_with_read_only_tools(self, operation):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return operation(())
+
+    capability = Capability()
+    result = LocalE2ERuntime().run(
+        RuntimeRequest(
+            message="[E2E-DIRECT-CANDIDATE] move the selected activity",
+            history=(),
+            selected_item_ref="fixture-item",
+            request_id="e2e-direct-candidate",
+            limits=RuntimeLimits(max_rounds=1),
+        ),
+        capability,
+        execution=AgentExecutionConfig(
+            request_timeout_seconds=1,
+            provider_timeout_seconds=1,
+            tool_timeout_seconds=1,
+        ),
+    )
+
+    assert capability.calls == 1
+    assert result.outcome == AgentSuggestedChange(
+        item_ref="fixture-item",
+        safe_patch={"start_hour": 15.0},
+    )
+    assert result.candidate_options == ()
 
 
 @pytest.mark.parametrize("selector", ["old", "pydantic_ai", "experimental", "nope"])
@@ -338,3 +378,13 @@ def test_deterministic_preflight_returns_before_runtime_composition(
     )
 
     assert "What time would you like to move it to?" in result.reply
+
+
+def test_durable_composition_adds_only_the_durable_output_cap():
+    coordinator = chat_service.build_durable_conversation_runtime_coordinator(
+        session_factory=lambda: None
+    )
+
+    assert coordinator._runtime_limits.max_rounds == chat_service.CHAT_AGENT_MAX_ROUNDS
+    assert coordinator._runtime_limits.max_total_tokens == chat_service.CHAT_AGENT_MAX_TOTAL_TOKENS
+    assert coordinator._runtime_limits.max_tokens == chat_service.DURABLE_CHAT_MAX_OUTPUT_TOKENS

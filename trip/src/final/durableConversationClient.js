@@ -14,6 +14,21 @@ export const createIdempotencyKey = () => (
   globalThis.crypto?.randomUUID?.() || `conversation-${Date.now()}-${Math.random().toString(36).slice(2)}`
 )
 
+export const claimPendingRequest = (pendingRef, request) => {
+  if (pendingRef.current) return false
+  pendingRef.current = request
+  return true
+}
+
+export const submissionDisposition = (submission, nowMs = Date.now()) => {
+  if (!submission?.submissionId) return 'network_unknown'
+  if (submission.state === 'completed') return 'completed'
+  if (submission.state === 'failed') return 'failed'
+  if (submission.state !== 'running') return 'unknown'
+  const leaseMs = submission.leaseExpiresAt ? Date.parse(submission.leaseExpiresAt) : Number.NaN
+  return Number.isFinite(leaseMs) && leaseMs <= nowMs ? 'recoverable' : 'running'
+}
+
 export const normalizeConversationMessages = payload => (
   [...(payload?.messages || [])]
     .sort((left, right) => left.sequence - right.sequence)
@@ -50,6 +65,16 @@ export const pendingSubmissionFromMessages = (messages, conversationId) => {
     restored: true,
   } : null
 }
+
+export const latestSubmissionFromMessages = messages => (
+  [...messages].reverse().find(message => message.submission)?.submission || null
+)
+
+export const failedSubmissionError = () => ({
+  kind: 'failed',
+  terminal: true,
+  text: 'Cadensy could not complete this saved request. Your message remains in the conversation; send a new message if you want to try again.',
+})
 
 export const createDurableConversationClient = ({ requestJson, tripId }) => {
   const root = `/api/trips/${encodeURIComponent(tripId)}/conversations`
@@ -88,11 +113,11 @@ export const createDurableConversationClient = ({ requestJson, tripId }) => {
 }
 
 export const durableConversationError = error => {
-  if (error?.status === 401) return { terminal: true, text: 'Your session has expired. Please sign in again.' }
-  if (error?.status === 404) return { terminal: true, text: 'This private conversation is no longer available.' }
-  if (error?.status === 409 && error?.message === 'conversation_busy') return { retryable: true, text: 'Cadensy is still working on this conversation.' }
-  if (error?.status === 409) return { retryable: true, text: 'This request is already being processed. Reconnecting…' }
-  if (error?.status === 422) return { terminal: true, text: 'This message cannot be processed safely.' }
-  if (!error?.status) return { retryable: true, text: 'Connection interrupted. We will check the saved request before retrying.' }
-  return { retryable: true, text: 'Conversation service is temporarily unavailable.' }
+  if (error?.status === 401) return { kind: 'terminal', terminal: true, text: 'Your session has expired. Please sign in again.' }
+  if (error?.status === 404) return { kind: 'terminal', terminal: true, text: 'This private conversation is no longer available.' }
+  if (error?.status === 409 && error?.message === 'conversation_busy') return { kind: 'running', retryable: true, text: 'Cadensy is still working on this conversation.' }
+  if (error?.status === 409) return { kind: 'running', retryable: true, text: 'This request is already being processed. Reconnecting…' }
+  if (error?.status === 422) return { kind: 'terminal', terminal: true, text: 'This message cannot be processed safely.' }
+  if (!error?.status) return { kind: 'network_unknown', retryable: true, text: 'Connection interrupted. The delivery status is unknown; retry will safely reuse the original request identity.' }
+  return { kind: 'service_unavailable', retryable: true, text: 'Conversation service is temporarily unavailable.' }
 }

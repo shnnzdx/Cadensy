@@ -810,8 +810,8 @@ function AssistantDrawer({ item, mode, onClose, onCommand, onResolvedOutcome, in
           <CandidateOptionList message={message} onSelect={actions.selectCandidateOption} />
         </div>)}
         {view.durable.nextBefore !== null && <button type="button" className="changeCancelAction" onClick={actions.loadOlderMessages}>Load earlier messages</button>}
-        {view.sending && <PlanChatBubble from="tripSync">Request saved. Waiting for Cadensy…</PlanChatBubble>}
-        {view.durable.error && <div className="assistantError"><p>{view.durable.error.text}</p>{view.durable.error.retryable && <button type="button" className="changeCancelAction" onClick={actions.retrySavedRequest}>Retry saved request</button>}{view.durable.pending?.submissionId && <button type="button" className="changeCancelAction" onClick={actions.recoverSavedRequest}>Recover expired request</button>}</div>}
+        {view.sending && <PlanChatBubble from="tripSync">{view.durable.pending?.submissionId ? 'Request saved. Waiting for Cadensy…' : 'Sending request…'}</PlanChatBubble>}
+        {view.durable.error && <div className="assistantError"><p>{view.durable.error.text}</p>{view.durable.error.retryable && <button type="button" className="changeCancelAction" onClick={actions.retrySavedRequest}>Check saved request</button>}{view.durable.error.recoverable && view.durable.pending?.submissionId && <button type="button" className="changeCancelAction" onClick={actions.recoverSavedRequest}>Recover expired request</button>}</div>}
         {!view.durable.loading && !view.durable.runtimeAvailable && <p className="assistantOptionNote">Assistant delivery is unavailable here. You can review saved history, but new messages cannot be sent.</p>}
         {mode === 'details' && <div className="detailSheet">{detailSections.map(group => <section key={group.section}><h3>{group.section}</h3><dl>{group.rows.map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl></section>)}</div>}
         {mode === 'replacePlace' && <ReplacePlacePanel item={item} onCommand={onCommand} onResolvedOutcome={onResolvedOutcome}/>}
