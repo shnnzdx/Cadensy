@@ -14,16 +14,19 @@ from app.agents.execution import (
     AgentExecutionCapacityExceeded,
     AgentExecutionConfig,
     AgentRequestDeadlineExceeded,
+    AgentToolDeadlineExceeded,
 )
 from app.agents.runtime_contract import (
     AgentClarification,
     AgentReplyOnly,
     AgentSuggestedChange,
+    ReplacementCandidateEvidence,
     RuntimeHistoryTurn,
     RuntimeLimits,
     RuntimeObservation,
     RuntimeRequest,
     RuntimeResult,
+    ToolExecutionEvidence,
 )
 from app.agents.legacy_runtime import LegacyChatAgentRuntime, LegacyReadTripCapability
 from app.domain.chat import service as chat_service
@@ -71,6 +74,89 @@ def test_runtime_request_has_no_authoritative_scope_or_request_session_fields():
     assert "trip_id" not in field_names
     assert "actor_membership_id" not in field_names
     assert "session" not in field_names
+
+
+def test_evidence_dtos_detach_mutable_inputs_and_reject_nested_mutation():
+    class MutableText(str):
+        pass
+
+    candidate = ReplacementCandidateEvidence(
+        candidate_id="trusted-cafe",
+        title="Trusted Cafe",
+        place="River North",
+        lat=41.9,
+        lng=-87.6,
+        price_per_person=21.0,
+    )
+    fabricated = ReplacementCandidateEvidence(
+        candidate_id="fabricated-cafe",
+        title="Fabricated Cafe",
+        place="River North",
+        lat=41.9,
+        lng=-87.6,
+        price_per_person=21.0,
+    )
+    caller_candidates = [candidate]
+    evidence = ToolExecutionEvidence(
+        tool_name="find_replacement_place",
+        status="succeeded",
+        replacement_candidates=caller_candidates,
+    )
+
+    caller_candidates.append(fabricated)
+
+    assert evidence.replacement_candidates == (candidate,)
+    assert isinstance(evidence.replacement_candidates, tuple)
+    with pytest.raises(AttributeError):
+        evidence.replacement_candidates.append(fabricated)  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        evidence.replacement_candidates[0].title = "Changed"  # type: ignore[misc]
+    with pytest.raises(ValueError, match="identity and location text"):
+        ReplacementCandidateEvidence(
+            candidate_id=MutableText("mutable-text"),
+            title="Trusted Cafe",
+            place="River North",
+            lat=41.9,
+            lng=-87.6,
+            price_per_person=21.0,
+        )
+
+
+def test_runtime_result_detaches_evidence_collection_and_rejects_unvalidated_entries():
+    evidence = ToolExecutionEvidence(tool_name="get_current_plan", status="succeeded")
+    caller_evidence = [evidence]
+    result = RuntimeResult(
+        reply="Scoped plan read completed.",
+        outcome=AgentReplyOnly(),
+        candidate_options=(),
+        observation=RuntimeObservation(
+            trace_id="immutable-evidence", round_count=1, total_tokens=1, total_elapsed_ms=1
+        ),
+        tool_execution_evidence=caller_evidence,
+    )
+
+    caller_evidence.append(ToolExecutionEvidence(tool_name="get_trip_facts", status="succeeded"))
+
+    assert result.tool_execution_evidence == (evidence,)
+    assert isinstance(result.tool_execution_evidence, tuple)
+    with pytest.raises(AttributeError):
+        result.tool_execution_evidence.append(evidence)  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="validated DTOs"):
+        ToolExecutionEvidence(
+            tool_name="find_replacement_place",
+            status="succeeded",
+            replacement_candidates=[object()],  # type: ignore[list-item]
+        )
+    with pytest.raises(ValueError, match="validated DTOs"):
+        RuntimeResult(
+            reply="Invalid evidence is rejected.",
+            outcome=AgentReplyOnly(),
+            candidate_options=(),
+            observation=RuntimeObservation(
+                trace_id="invalid-evidence", round_count=1, total_tokens=1, total_elapsed_ms=1
+            ),
+            tool_execution_evidence=[object()],  # type: ignore[list-item]
+        )
 
 
 def _imported_modules(source: str) -> set[str]:
@@ -201,6 +287,109 @@ def test_legacy_adapter_keeps_reply_suggested_change_and_candidates_together(mon
     assert len(result.candidate_options) == 1
     assert result.candidate_options[0].id == "shorten"
     assert result.candidate_options[0].safe_patch == {"duration_min": 90}
+
+
+def test_legacy_adapter_detaches_only_completed_approved_tool_evidence(monkeypatch):
+    capability = _RecordingCapability()
+    replacement = {
+        "candidate_id": "place-river-north",
+        "title": "New lunch",
+        "place": "River North",
+        "lat": 41.9,
+        "lng": -87.6,
+        "price_per_person": 21.0,
+    }
+    invalid_replacement = {**replacement, "candidate_id": "invalid-price", "price_per_person": -1.0}
+    monkeypatch.setattr(
+        base,
+        "call_agent",
+        lambda **_kwargs: base.AgentRunResult(
+            content="I found a scoped alternative.",
+            trace_id="trace-evidence",
+            rounds=(),
+            tool_results=(
+                {
+                    "tool": "find_replacement_place",
+                    "guard_rejected": False,
+                    "cached": False,
+                    "output": {"candidates": [replacement, invalid_replacement]},
+                },
+                {
+                    "tool": "find_replacement_place",
+                    "guard_rejected": False,
+                    "cached": True,
+                    "output": {"candidates": [replacement]},
+                },
+                {
+                    "tool": "find_replacement_place",
+                    "guard_rejected": True,
+                    "cached": False,
+                    "output": {"candidates": [replacement]},
+                },
+                {"tool": "model_invented_tool", "guard_rejected": False, "output": {}},
+            ),
+            total_tokens=13,
+            total_elapsed_ms=4.0,
+        ),
+    )
+
+    result = LegacyChatAgentRuntime(system_prompt="test system").run(
+        _request(), capability, execution=_execution()
+    )
+
+    assert [entry.status for entry in result.tool_execution_evidence] == [
+        "succeeded",
+        "cache_hit",
+        "guard_rejected",
+        "unsupported",
+    ]
+    assert [entry.tool_name for entry in result.tool_execution_evidence] == [
+        "find_replacement_place",
+        "find_replacement_place",
+        "find_replacement_place",
+        "unsupported",
+    ]
+    assert result.tool_execution_evidence[0].replacement_candidates[0].candidate_id == "place-river-north"
+    assert len(result.tool_execution_evidence[0].replacement_candidates) == 1
+    assert result.tool_execution_evidence[1].replacement_candidates[0].title == "New lunch"
+    assert result.tool_execution_evidence[2].replacement_candidates == ()
+    assert result.tool_execution_evidence[3].replacement_candidates == ()
+
+
+def test_legacy_adapter_marks_deadline_without_returning_usable_tool_evidence(monkeypatch):
+    monkeypatch.setattr(
+        base,
+        "call_agent",
+        lambda **_kwargs: (_ for _ in ()).throw(AgentToolDeadlineExceeded("late")),
+    )
+
+    result = LegacyChatAgentRuntime(system_prompt="test system").run(
+        _request(), _RecordingCapability(), execution=_execution()
+    )
+
+    assert result.observation.failure is not None
+    assert result.observation.failure.normalized_kind == "tool_timeout"
+    assert [(entry.tool_name, entry.status, entry.replacement_candidates) for entry in result.tool_execution_evidence] == [
+        ("agent_execution", "timed_out", ()),
+    ]
+
+
+def test_legacy_adapter_marks_unclassified_execution_failure_without_tool_facts(monkeypatch):
+    monkeypatch.setattr(
+        base,
+        "call_agent",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic handler failure")),
+    )
+
+    result = LegacyChatAgentRuntime(system_prompt="test system").run(
+        _request(), _RecordingCapability(), execution=_execution()
+    )
+
+    assert result.observation.failure is not None
+    assert result.observation.failure.normalized_kind == "unexpected_exception"
+    assert [(entry.tool_name, entry.status, entry.replacement_candidates) for entry in result.tool_execution_evidence] == [
+        ("agent_execution", "failed", ()),
+    ]
 
 
 def test_legacy_adapter_maps_stopped_result_to_redacted_failure_without_reply(monkeypatch):

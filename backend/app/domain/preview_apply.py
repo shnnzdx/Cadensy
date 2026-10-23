@@ -39,6 +39,7 @@ from ..agents.runtime_contract import (
     RuntimeReadTool,
     RuntimeRequest,
     RuntimeResult,
+    ToolExecutionEvidence,
 )
 from ..agents.tools import build_read_only_trip_tools
 from ..db.models import Plan, PlanItem, Trip, TripMembership
@@ -185,20 +186,10 @@ class RevisionBracketedReadTripCapability:
         self._session_factory = session_factory
         self._captured = captured
         self._stale = False
-        self._legacy_tool_results: tuple[dict[str, Any], ...] = ()
 
     @property
     def stale(self) -> bool:
         return self._stale
-
-    @property
-    def _application_legacy_tool_results(self) -> tuple[dict[str, Any], ...]:
-        """Private Legacy provenance retained without widening RuntimeResult."""
-
-        return self._legacy_tool_results
-
-    def _record_legacy_tool_results(self, results: tuple[dict[str, Any], ...]) -> None:
-        self._legacy_tool_results = results
 
     def run_with_read_only_tools(
         self, operation: Callable[[tuple[RuntimeReadTool, ...]], Any]
@@ -331,13 +322,11 @@ class RevisionBracketedPreview:
         if capability.stale:
             raise StalePreview("A scoped tool observed newer planning facts")
 
-        candidate = self._classify_candidate(
-            captured, runtime_result, capability, request.telemetry_context
-        )
+        candidate = self._classify_candidate(captured, runtime_result, request.telemetry_context)
         candidate_options = self._safe_options(
             captured,
             runtime_result.candidate_options,
-            capability._application_legacy_tool_results,
+            runtime_result.tool_execution_evidence,
             request.telemetry_context,
         )
         self._verify_final(captured)
@@ -389,7 +378,6 @@ class RevisionBracketedPreview:
         self,
         captured: _CapturedRevisions,
         runtime_result: RuntimeResult,
-        capability: RevisionBracketedReadTripCapability,
         telemetry_context: TelemetryContext | None = None,
     ) -> PreviewCandidate | None:
         if not isinstance(runtime_result.outcome, AgentSuggestedChange):
@@ -397,13 +385,10 @@ class RevisionBracketedPreview:
         patch = _safe_patch(runtime_result.outcome.safe_patch)
         if not patch:
             return None
-        if not _replacement_provenance_allows(
-            patch, capability._application_legacy_tool_results
-        ):
-            # The common Runtime contract deliberately carries no raw Legacy
-            # provider/tool provenance.  A replacement without matching
-            # trusted tool evidence therefore fails closed instead of becoming
-            # an apparently valid Preview.
+        if not _replacement_provenance_allows(patch, runtime_result.tool_execution_evidence):
+            # Replacement values must match a detached result from the scoped
+            # execution bracket. Model text and raw Legacy trace data are not
+            # provenance and cannot become an apparently valid Preview.
             return None
         with self._bounded_read() as db:
             _assert_captured_current(db, captured)
@@ -435,7 +420,7 @@ class RevisionBracketedPreview:
         self,
         captured: _CapturedRevisions,
         options: tuple[AgentCandidateOption, ...],
-        tool_results: tuple[dict[str, Any], ...],
+        tool_execution_evidence: tuple[ToolExecutionEvidence, ...],
         telemetry_context: TelemetryContext | None = None,
     ) -> tuple[PreviewOption, ...]:
         """Return only options whose target is still public and Plan-scoped.
@@ -462,7 +447,7 @@ class RevisionBracketedPreview:
                 patch = _validated_option_patch(option.safe_patch)
                 if item is None or patch is None:
                     continue
-                if patch and not _replacement_provenance_allows(patch, tool_results):
+                if patch and not _replacement_provenance_allows(patch, tool_execution_evidence):
                     continue
                 if patch:
                     try:
@@ -616,9 +601,9 @@ def _preview_terminal(runtime_result: RuntimeResult) -> TerminalCategory:
 
 
 def _replacement_provenance_allows(
-    patch: Mapping[str, object], tool_results: tuple[dict[str, Any], ...]
+    patch: Mapping[str, object], tool_execution_evidence: tuple[ToolExecutionEvidence, ...]
 ) -> bool:
-    """Retain PR-04's Legacy-only replacement provenance restriction."""
+    """Admit replacement fields only from matching scoped execution evidence."""
 
     core_fields = ("title", "place", "lat", "lng")
     replacement_fields = (*core_fields, "price_per_person")
@@ -627,25 +612,30 @@ def _replacement_provenance_allows(
     requested_core = tuple(patch.get(field) for field in core_fields)
     if any(value is None for value in requested_core):
         return False
-    candidates: list[Mapping[str, object]] = []
-    for result in tool_results:
-        if result.get("tool") != "find_replacement_place" or result.get("guard_rejected"):
+    for evidence in tool_execution_evidence:
+        # RuntimeResult is a semantic boundary, not a permissive transport
+        # envelope. A raw dict (including model-shaped provenance) is never
+        # upgraded into trusted evidence.
+        if not isinstance(evidence, ToolExecutionEvidence):
             continue
-        output = result.get("output")
-        if not isinstance(output, Mapping):
+        if (
+            evidence.tool_name != "find_replacement_place"
+            or evidence.status not in {"succeeded", "cache_hit"}
+        ):
             continue
-        raw_candidates = output.get("candidates")
-        if not isinstance(raw_candidates, list):
-            continue
-        candidates.extend(candidate for candidate in raw_candidates if isinstance(candidate, Mapping))
-    for candidate in candidates:
-        if tuple(candidate.get(field) for field in core_fields) != requested_core:
-            continue
-        if "price_per_person" in patch:
-            if candidate.get("price_per_person") == patch["price_per_person"]:
+        for candidate in evidence.replacement_candidates:
+            if (
+                candidate.title,
+                candidate.place,
+                candidate.lat,
+                candidate.lng,
+            ) != requested_core:
+                continue
+            if "price_per_person" in patch:
+                if candidate.price_per_person == patch["price_per_person"]:
+                    return True
+            elif candidate.price_per_person is None:
                 return True
-        elif candidate.get("price_per_person") is None:
-            return True
     return False
 
 
