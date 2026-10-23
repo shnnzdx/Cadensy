@@ -1,0 +1,195 @@
+{
+  "evidence_version": "v0303a-p1-evidence-closure-v1",
+  "executed_at": "2026-10-23",
+  "source_identity": {
+    "reviewed_stage_02_base": "8012dce80d5d8ecd30906192311d685ed1d9e13f",
+    "branch": "codex/v0303a-pydantic-durable-acceptance",
+    "scope": "test-only Stage 03A P1 evidence closure; no production business code modified",
+    "source_hashes": {
+      "backend/tests/test_pydantic_durable_runtime_acceptance.py": "sha256:f7f9dd41f97b9c2e02bb47594628dcbc9cb78bc0defec8bda4ab55d070344ef0",
+      "AI_enhanced/PR-09_Pydantic-Production-Migration/13_V0303A_DURABLE_LIFECYCLE_ACCEPTANCE.md": "sha256:c6493c8263937d1b7a4cc788489a48d7cc6f7e5b4c8c214720858d156df4daa0",
+      "AI_enhanced/PR-09_Pydantic-Production-Migration/15_V0303A_INDEPENDENT_CODE_REVIEW.md": "sha256:d501e38b125db5a492a4750487bbfb267ba5576fd696799910fad1a1f926d60d",
+      "AI_enhanced/PR-09_Pydantic-Production-Migration/16_V0303A_P1_EVIDENCE_CLOSURE.md": "sha256:3f777d2f062975dc88695d3f34806d50a6871f104f0903aef7dd1b18520d3bea"
+    }
+  },
+  "environment": {
+    "database": {
+      "category": "new task-owned disposable PostgreSQL 18 cluster",
+      "listener": "loopback only (::1 and 127.0.0.1)",
+      "port": 55440,
+      "database_name": "cadensy_v0303a_fix_test",
+      "data_directory": "task-owned local Temp path; not repository content",
+      "is_production_or_shared_database": false
+    },
+    "test_gates": {
+      "APP_ENV": "test",
+      "MOCK_AI": "1",
+      "DISABLE_SCHEDULER": "1",
+      "DEV_ALLOW_MEMBERSHIP_HEADER": "0",
+      "provider_and_aws_credentials": "removed from pytest child process"
+    },
+    "model": "local Pydantic AI FunctionModel with model requests disabled",
+    "production_change": false
+  },
+  "p1_01_physical_connection_attribution": {
+    "test_design": {
+      "engine": "test-only SQLAlchemy Engine using NullPool",
+      "physical_identity": "psycopg Connection.info.backend_pid observed by a test-only Session after_begin hook",
+      "session_identity": "recorded separately as in-process SQLAlchemy Session id; backend PID is the asserted identity",
+      "no_connection_reuse": "NullPool closes each DBAPI connection when its Session closes",
+      "preview_lifetime": "unchanged; no Preview read transaction is held during FunctionModel latency"
+    },
+    "scenarios": [
+      {
+        "id": "A4",
+        "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_revocation_during_runtime_discards_late_durable_result",
+        "attribution": {
+          "function_model": true,
+          "preview": true,
+          "durable_coordinator": true,
+          "postgresql_persistence": true,
+          "independent_physical_connections": true
+        },
+        "backend_pids": {
+          "worker_before_model_barrier": [11064, 12800],
+          "committed_membership_mutator": [47840],
+          "worker_after_commit": [7028, 43740],
+          "independent_observer": [29348]
+        },
+        "ordering": [
+          "worker Preview/context begins before FunctionModel Event barrier",
+          "separate backend commits membership.status=removed",
+          "commit marker is set before FunctionModel release",
+          "worker starts post-commit Preview/Durable work",
+          "observer independently reads removed membership",
+          "Runtime returns discarded/membership_revoked with zero Assistant and Option rows"
+        ],
+        "observed": {
+          "result_state": "discarded",
+          "failure_category": "membership_revoked",
+          "assistant_rows": 0,
+          "option_rows": 0,
+          "plan_mutation": false
+        }
+      },
+      {
+        "id": "A6-plan",
+        "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_preview_rejects_revision_changed_during_model_execution[plan_revision]",
+        "backend_pids": {
+          "worker_before_model_barrier": [29296, 48276],
+          "committed_plan_revision_mutator": [12880],
+          "worker_after_commit": [39328, 48596],
+          "independent_observer": [23232]
+        },
+        "ordering": [
+          "worker captures current state and completes scoped get_current_plan before barrier",
+          "separate backend commits Plan.revision increment",
+          "commit marker is set before release",
+          "post-commit Preview verification detects stale context",
+          "observer independently reads updated Plan revision"
+        ],
+        "observed": {
+          "result_state": "failed",
+          "failure_category": "stale_context",
+          "assistant_rows": 0,
+          "option_rows": 0,
+          "ai_plan_mutation": false
+        }
+      },
+      {
+        "id": "A6-facts",
+        "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_preview_rejects_revision_changed_during_model_execution[planning_facts_revision]",
+        "backend_pids": {
+          "worker_before_model_barrier": [6336, 38340],
+          "committed_facts_revision_mutator": [34932],
+          "worker_after_commit": [46908, 52684],
+          "independent_observer": [43236]
+        },
+        "ordering": [
+          "worker captures current state and completes scoped get_current_plan before barrier",
+          "separate backend commits Trip.planning_facts_revision increment",
+          "commit marker is set before release",
+          "post-commit Preview verification detects stale context",
+          "observer independently reads updated planning facts revision"
+        ],
+        "observed": {
+          "result_state": "failed",
+          "failure_category": "stale_context",
+          "assistant_rows": 0,
+          "option_rows": 0,
+          "ai_plan_mutation": false
+        }
+      }
+    ]
+  },
+  "p1_02_historical_option_stale_rejection": {
+    "nodes": [
+      "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_durable_options_are_reconstructed_then_rejected_when_stale[plan_revision]",
+      "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_durable_options_are_reconstructed_then_rejected_when_stale[planning_facts_revision]"
+    ],
+    "attribution": {
+      "function_model": true,
+      "preview": true,
+      "durable_coordinator": true,
+      "authorized_history_projection": true,
+      "actual_service_boundary": "conversation_service.resolve_historical_option"
+    },
+    "original_option_metadata": {
+      "captured_plan_revision": "unchanged after persistence",
+      "captured_planning_facts_revision": "unchanged after persistence",
+      "option_identity": "same persisted assistant and option IDs are used before and after mutation"
+    },
+    "observed": {
+      "before_mutation": {
+        "allowed": true,
+        "code": "historical_option_ready",
+        "safe_patch": {"start_hour": 12.0}
+      },
+      "after_plan_revision_mutation": {
+        "allowed": false,
+        "code": "historical_option_stale"
+      },
+      "after_planning_facts_revision_mutation": {
+        "allowed": false,
+        "code": "historical_option_stale"
+      },
+      "assistant_and_option_persisted": true,
+      "ai_plan_mutation": false
+    }
+  },
+  "validation": {
+    "commands": [
+      {
+        "description": "Focused A2/A4/A6 closure acceptance nodes with safe backend-PID output",
+        "command": "python -m pytest -q -s tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_durable_options_are_reconstructed_then_rejected_when_stale tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_revocation_during_runtime_discards_late_durable_result tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_preview_rejects_revision_changed_during_model_execution",
+        "result": "5 passed in 3.04s",
+        "exit_code": 0
+      },
+      {
+        "description": "Complete direct Stage 03A acceptance module",
+        "command": "python -m pytest -q tests/test_pydantic_durable_runtime_acceptance.py",
+        "result": "8 passed in 3.16s",
+        "exit_code": 0
+      },
+      {
+        "description": "Relevant Pydantic, Preview, Durable, authorization, concurrency, telemetry, and Legacy regression set",
+        "command": "python -m pytest -q tests/test_pydantic_runtime.py tests/test_b3_revision_bracketed_preview.py tests/test_pr06b3_runtime.py tests/test_pr06b3_context.py tests/test_pr06b2_conversation_concurrency_postgres.py tests/test_pr06b2_conversation_api.py tests/test_runtime_contract.py tests/test_agents_tools.py tests/test_agents_call_agent.py tests/test_telemetry_privacy.py tests/test_telemetry_execution_wiring.py tests/test_telemetry_contract.py",
+        "result": "192 passed in 7.66s",
+        "exit_code": 0
+      },
+      {
+        "description": "Python compilation and JSON parsing",
+        "command": "python -m py_compile backend/tests/test_pydantic_durable_runtime_acceptance.py; python -c \"import json; from pathlib import Path; [json.loads(Path(p).read_text(encoding='utf-8')) for p in ['AI_enhanced/PR-09_Pydantic-Production-Migration/14_V0303A_DURABLE_LIFECYCLE_EVIDENCE.json', 'AI_enhanced/PR-09_Pydantic-Production-Migration/17_V0303A_P1_EVIDENCE_CLOSURE.json']]; print('json-parse: PASS')\"",
+        "result": "json-parse: PASS",
+        "exit_code": 0
+      }
+    ],
+    "full_backend_regression": "not required: no shared production source or test infrastructure was changed"
+  },
+  "known_limitations": [
+    "This closure is not a full Stage 03 acceptance claim.",
+    "Lease-recovery/fencing, timeout/cancellation persistence, end-to-end telemetry sequence evaluation, and formal Pydantic-versus-Legacy comparison remain out of scope.",
+    "Recorded backend PIDs are safe, ephemeral test diagnostics and are not credentials or production identifiers."
+  ],
+  "production_change_authorization": "NOT GRANTED"
+}

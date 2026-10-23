@@ -1,0 +1,195 @@
+{
+  "evidence_version": "v0303a-durable-lifecycle-acceptance-v1",
+  "executed_at": "2026-10-23",
+  "source_revision": {
+    "candidate_baseline_commit": "8012dce80d5d8ecd30906192311d685ed1d9e13f",
+    "branch": "codex/v0303a-pydantic-durable-acceptance",
+    "base_relationship": "PR #31 remains open; Stage 03A is tested against its reviewed candidate commit, not main",
+    "non_self_modified_file_hashes": {
+      "backend/tests/test_pydantic_durable_runtime_acceptance.py": "sha256:e4950714f0916e14ab39573a811b6e847139d1e4a439f40e7b2e5d10d0ef7580",
+      "AI_enhanced/PR-09_Pydantic-Production-Migration/13_V0303A_DURABLE_LIFECYCLE_ACCEPTANCE.md": "sha256:b150c41c9edc455755d29c90ca659a92baa7f638f12a4613ed38833a74579eb6"
+    }
+  },
+  "environment": {
+    "database": {
+      "category": "new task-owned disposable PostgreSQL 18 cluster",
+      "host": "localhost",
+      "listener_verification": "IPv6 ::1 and IPv4 127.0.0.1",
+      "port": 55438,
+      "database_name": "cadensy_v0303a_test",
+      "data_directory": "task-owned local Temp path; not repository content",
+      "database_scope": "explicit TEST_DATABASE_URL and DATABASE_URL were set only to the disposable test database"
+    },
+    "test_gates": {
+      "APP_ENV": "test",
+      "MOCK_AI": "1",
+      "DISABLE_SCHEDULER": "1",
+      "DEV_ALLOW_MEMBERSHIP_HEADER": "0",
+      "provider_and_aws_credentials": "removed from pytest child process"
+    },
+    "model": "Pydantic AI FunctionModel with model network access disabled",
+    "production_change": false
+  },
+  "acceptance_scenarios": [
+    {
+      "id": "A1",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_two_turn_durable_conversation_reconstructs_server_history",
+      "attribution": {
+        "function_model": true,
+        "preview": true,
+        "durable_coordinator": true,
+        "postgresql_persistence": true,
+        "independent_session_factory": true
+      },
+      "observed": {
+        "durable_message_order": ["user", "assistant", "user", "assistant"],
+        "historical_turns_reconstructed": true,
+        "duplicate_assistant_messages": 0,
+        "plan_mutation": false
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "A2",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_durable_options_are_reconstructed_and_remain_advisory",
+      "attribution": {
+        "function_model": true,
+        "preview": true,
+        "durable_coordinator": true,
+        "postgresql_persistence": true,
+        "independent_session_factory": true,
+        "actual_scoped_options_handler": true
+      },
+      "observed": {
+        "assistant_options_persisted": true,
+        "authorized_history_projection": true,
+        "historical_option_resolution_rechecks_state": true,
+        "plan_mutation": false
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "A3",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_revocation_before_context_admission_never_calls_model",
+      "attribution": {
+        "function_model": false,
+        "preview": false,
+        "durable_coordinator_context_admission": true,
+        "postgresql_persistence": true,
+        "independent_committed_revocation": true
+      },
+      "observed": {
+        "disposition": "ConversationUnavailable before model execution",
+        "model_invocations": 0,
+        "unauthorized_assistant_rows": 0,
+        "unauthorized_option_rows": 0,
+        "plan_mutation": false
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "A4",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_revocation_during_runtime_discards_late_durable_result",
+      "attribution": {
+        "function_model": true,
+        "preview": true,
+        "durable_coordinator": true,
+        "postgresql_persistence": true,
+        "independent_committed_revocation": true,
+        "deterministic_event_barrier": true
+      },
+      "observed": {
+        "disposition": "discarded",
+        "failure_category": "membership_revoked",
+        "unauthorized_assistant_rows": 0,
+        "unauthorized_option_rows": 0,
+        "plan_mutation": false
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "A5",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_cross_trip_conversation_is_denied_before_model_execution",
+      "attribution": {
+        "function_model": false,
+        "preview": false,
+        "durable_coordinator_context_admission": true,
+        "postgresql_persistence": true,
+        "distinct_trip_and_membership_roots": true
+      },
+      "observed": {
+        "disposition": "ConversationUnavailable before model execution",
+        "model_invocations": 0,
+        "foreign_assistant_rows": 0,
+        "foreign_option_rows": 0,
+        "foreign_history_exposed": false,
+        "plan_mutation": false
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "A6-plan",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_preview_rejects_revision_changed_during_model_execution[plan_revision]",
+      "attribution": {
+        "function_model": true,
+        "preview": true,
+        "durable_coordinator": true,
+        "postgresql_persistence": true,
+        "independent_committed_revision_change": true,
+        "deterministic_event_barrier": true
+      },
+      "observed": {
+        "disposition": "failed",
+        "failure_category": "stale_context",
+        "assistant_rows": 0,
+        "option_rows": 0,
+        "ai_plan_mutation": false
+      },
+      "status": "PASS"
+    },
+    {
+      "id": "A6-facts",
+      "node_id": "backend/tests/test_pydantic_durable_runtime_acceptance.py::test_pydantic_preview_rejects_revision_changed_during_model_execution[planning_facts_revision]",
+      "attribution": {
+        "function_model": true,
+        "preview": true,
+        "durable_coordinator": true,
+        "postgresql_persistence": true,
+        "independent_committed_revision_change": true,
+        "deterministic_event_barrier": true
+      },
+      "observed": {
+        "disposition": "failed",
+        "failure_category": "stale_context",
+        "assistant_rows": 0,
+        "option_rows": 0,
+        "ai_plan_mutation": false
+      },
+      "status": "PASS"
+    }
+  ],
+  "validation": {
+    "commands": [
+      {
+        "description": "Stage 03A direct acceptance module",
+        "command": "python -m pytest -q backend/tests/test_pydantic_durable_runtime_acceptance.py",
+        "result": "7 passed in 1.71s",
+        "exit_code": 0
+      },
+      {
+        "description": "Pydantic, Preview, Durable, conversation authorization/concurrency, telemetry/privacy, and relevant Legacy regression",
+        "command": "python -m pytest -q backend/tests/test_pydantic_runtime.py backend/tests/test_b3_revision_bracketed_preview.py backend/tests/test_pr06b3_runtime.py backend/tests/test_pr06b3_context.py backend/tests/test_pr06b2_conversation_concurrency_postgres.py backend/tests/test_pr06b2_conversation_api.py backend/tests/test_runtime_contract.py backend/tests/test_agents_tools.py backend/tests/test_agents_call_agent.py backend/tests/test_telemetry_privacy.py backend/tests/test_telemetry_execution_wiring.py backend/tests/test_telemetry_contract.py",
+        "result": "192 passed in 7.35s",
+        "exit_code": 0
+      }
+    ],
+    "full_backend_regression": "deferred by the approved Stage 03A scope; no shared production source changed"
+  },
+  "remaining_gaps": [
+    "Direct Pydantic lease-recovery/fencing race coverage",
+    "Direct Pydantic timeout/cancellation durable persistence coverage",
+    "End-to-end Pydantic telemetry/privacy event-sequence capture",
+    "Separate formal Pydantic-versus-Legacy durable evaluation"
+  ],
+  "production_change_authorization": "NOT GRANTED"
+}
