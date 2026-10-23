@@ -187,5 +187,60 @@
     ],
     "total": {"passed": 1337, "warnings": 10, "exit_code": 0},
     "interpretation": "This is an execution-backed non-overlapping partition sum, not a single pytest-process result."
+  },
+  "pr31_review_fix_validation": {
+    "review_id": 5631508233,
+    "executed_at": "2026-10-23",
+    "scope": "Cache-hit telemetry contract and same-run grounding of Pydantic model-authored option suggestion item ids.",
+    "source_identity": {
+      "parent_head": "ce74137424741779517eb2393ea0bd20afbe1c3f",
+      "worktree_state": "post-review-fix validation before the local correction commit",
+      "implementation_files": {
+        "backend/app/agents/pydantic_runtime.py": "sha256:d36dee9c4da0860be25bc7809367f7fbcb33533c363ee38950268fe711eb0877",
+        "backend/tests/test_pydantic_runtime.py": "sha256:2acd28e09d35182d926f0da8217f71eb6dbe61ec03258fb6425fdec5fa905548"
+      }
+    },
+    "environment": {
+      "category": "fresh task-owned disposable PostgreSQL",
+      "host": "localhost (IPv4 and IPv6 loopback only)",
+      "port": 55437,
+      "test_database": "cadensy_v0302_pr31_test",
+      "environment_gates": {
+        "APP_ENV": "test",
+        "MOCK_AI": "1",
+        "DISABLE_SCHEDULER": "1",
+        "DEV_ALLOW_MEMBERSHIP_HEADER": "0"
+      },
+      "provider_and_aws_credentials": "not used; FunctionModel and injected handlers only",
+      "production_change": false
+    },
+    "targeted_regressions": {
+      "command": "python -m pytest -q tests/test_pydantic_runtime.py -k 'ungrounded_suggestion or tool_cache'",
+      "result": "5 passed, 42 deselected in 1.53s",
+      "exit_code": 0,
+      "assertions": [
+        "same-run cache hit emits ToolCallCompleted with cache_hit=true and handler_executed=false while the handler runs once",
+        "same-trip unread, foreign, cross-day, and mixed grounded/ungrounded suggestion ids reject before the scoped options handler"
+      ]
+    },
+    "focused_core": {
+      "command": "python -m pytest -q test_pydantic_runtime.py test_pydantic_composition.py test_agents_tools.py test_runtime_contract.py test_b3_revision_bracketed_preview.py test_pr06b3_runtime.py test_pr06b3_context.py test_pr06b2_conversation_concurrency_postgres.py test_durable_idempotency_kernel.py test_telemetry_privacy.py test_telemetry_execution_wiring.py test_telemetry_contract.py",
+      "result": "211 passed in 7.11s",
+      "exit_code": 0
+    },
+    "full_backend_regression": {
+      "collection": {"count": 1341, "exit_code": 0},
+      "partition_rule": "Sort backend/tests/test_*.py by file name. P0/P1/P3/P4 use non-overlapping 18-file slices; P2 is the same 18-file slice executed as two non-overlapping 9-file commands because the interactive terminal foreground limit is 30 seconds.",
+      "partitions": [
+        {"id": "P0", "range": "test_ab_grade_partition.py..test_ci_workflow_contract.py", "files": 18, "passed": 328, "warnings": 0, "exit_code": 0},
+        {"id": "P1", "range": "test_db_safety.py..test_live_provider_smoke_adapter.py", "files": 18, "passed": 248, "warnings": 0, "exit_code": 0},
+        {"id": "P2a", "range": "test_organizer.py..test_pr01b_guest_session_migration_contract.py", "files": 9, "passed": 142, "warnings": 0, "exit_code": 0},
+        {"id": "P2b", "range": "test_pr01c_agent_lifecycle.py..test_pr06b2_conversation_api.py", "files": 9, "passed": 64, "warnings": 0, "exit_code": 0},
+        {"id": "P3", "range": "test_pr06b2_conversation_concurrency_postgres.py..test_r5_manual_ecr_build_workflow.py", "files": 18, "passed": 264, "warnings": 0, "exit_code": 0},
+        {"id": "P4", "range": "test_runtime_composition.py..test_upsert_fixed_accounts.py", "files": 18, "passed": 295, "warnings": 10, "warning": "existing Alembic path_separator deprecation", "exit_code": 0}
+      ],
+      "total": {"passed": 1341, "warnings": 10, "exit_code": 0},
+      "interpretation": "This is an execution-backed non-overlapping partition sum, not a single pytest-process result."
+    }
   }
 }

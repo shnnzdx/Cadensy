@@ -510,6 +510,9 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             ) -> dict[str, object]:
                 """Return bounded advisory options for a scoped planning conflict."""
                 grounded_conflict_ids = tuple(conflict_item_ids or ())
+                grounded_suggestion_item_ids = tuple(
+                    suggestion.item_id for suggestion in (suggestions or [])
+                )
                 output = _invoke_scoped_tool(
                     ctx.deps,
                     "propose_options",
@@ -524,7 +527,14 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                     },
                     telemetry_context,
                     require_plan=True,
-                    required_item_ids=grounded_conflict_ids,
+                    # A model-authored suggestion is no less consequential than
+                    # a declared conflict id: the downstream handler can turn
+                    # either into an advisory option. Both must be facts the
+                    # scoped Current Plan returned during this execution.
+                    required_item_ids=(
+                        *grounded_conflict_ids,
+                        *grounded_suggestion_item_ids,
+                    ),
                 )
                 if not isinstance(output, dict):
                     raise ModelRetry("The scoped option result was invalid.")
@@ -724,7 +734,7 @@ def _emit_pydantic_tool_call(
                 ToolDispatchStatus.HANDLER_FAILED,
                 ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED,
             },
-            cache_hit=False,
+            cache_hit=status is ToolDispatchStatus.CACHE_HIT,
         ))
     except Exception:
         return

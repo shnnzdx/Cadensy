@@ -534,6 +534,82 @@ def test_pydantic_options_rejects_specific_conflict_outside_its_read_day():
     assert not any(entry.tool_name == "propose_options" and entry.status in {"succeeded", "cache_hit"} for entry in result.tool_execution_evidence)
 
 
+@pytest.mark.parametrize(
+    ("case", "day", "suggestions"),
+    [
+        (
+            "same_trip_unread",
+            "all",
+            [{
+                "item_id": "same-trip-but-unread", "label": "Move it", "title": "Move it",
+                "body": "This item was not returned by Current Plan.", "tradeoff": "None.",
+                "start_hour": 12.0,
+            }],
+        ),
+        (
+            "foreign",
+            "all",
+            [{
+                "item_id": "foreign-trip-item", "label": "Move it", "title": "Move it",
+                "body": "This id is not grounded.", "tradeoff": "None.", "start_hour": 12.0,
+            }],
+        ),
+        (
+            "cross_day",
+            "day 2",
+            [{
+                "item_id": "scoped-item", "label": "Move it", "title": "Move it",
+                "body": "A whole-plan read cannot ground a named day.", "tradeoff": "None.",
+                "start_hour": 12.0,
+            }],
+        ),
+        (
+            "one_of_many_ungrounded",
+            "all",
+            [
+                {
+                    "item_id": "scoped-item", "label": "Grounded", "title": "Grounded",
+                    "body": "This id is safe.", "tradeoff": "None.", "start_hour": 12.0,
+                },
+                {
+                    "item_id": "unread-item", "label": "Ungrounded", "title": "Ungrounded",
+                    "body": "One unsafe id rejects the complete call.", "tradeoff": "None.",
+                    "start_hour": 13.0,
+                },
+            ],
+        ),
+    ],
+)
+def test_pydantic_options_rejects_ungrounded_suggestion_items_before_handler_call(
+    case: str, day: str, suggestions: list[dict[str, object]],
+):
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart("propose_options", {
+            "conflict_description": f"Ungrounded suggestion: {case}.",
+            "day": day,
+            "suggestions": suggestions,
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(), capability, execution=_execution(),
+    )
+
+    assert options.calls == []
+    assert result.observation.failure is not None
+    assert not any(
+        entry.tool_name == "propose_options" and entry.status in {"succeeded", "cache_hit"}
+        for entry in result.tool_execution_evidence
+    )
+
+
 def test_pydantic_options_rejects_oversized_payload_before_handler_call():
     options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
     capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
@@ -609,13 +685,6 @@ def test_pydantic_real_options_handler_keeps_a_named_conflict_off_unrelated_long
                         "body": "Keep the museum but reduce its duration to 90 minutes.",
                         "tradeoff": "The group has less time inside the museum.",
                         "duration_min": 90,
-                    }, {
-                        "item_id": "not-a-current-plan-item",
-                        "label": "Invalid target",
-                        "title": "Move an unknown item",
-                        "body": "This must be discarded by the existing Domain validator.",
-                        "tradeoff": "No safe target exists.",
-                        "start_hour": 9.0,
                     }],
                 })])
             return ModelResponse(parts=[ToolCallPart(
@@ -643,9 +712,15 @@ def test_pydantic_real_options_handler_keeps_a_named_conflict_off_unrelated_long
     assert any(option.safe_patch == {"duration_min": 90} for option in result.candidate_options)
 
 
-def test_pydantic_tool_cache_is_limited_to_valid_same_run_projections():
+def test_pydantic_tool_cache_is_limited_to_valid_same_run_projections(monkeypatch):
     plan = _SyntheticReadTool()
     capability = _SyntheticCapability(tools=(plan,))
+    emitted: list[object] = []
+    monkeypatch.setattr(
+        pydantic_runtime,
+        "emit_event_safely",
+        lambda factory: emitted.append(factory()) or True,
+    )
     calls = 0
 
     def scripted_model(_messages, _info):
@@ -661,13 +736,33 @@ def test_pydantic_tool_cache_is_limited_to_valid_same_run_projections():
             },
         )])
 
-    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(),
+        capability,
+        execution=AgentExecutionConfig(
+            request_timeout_seconds=0.5,
+            provider_timeout_seconds=0.25,
+            tool_timeout_seconds=0.1,
+            telemetry_context=TelemetryContext(
+                request_id="request_12345678",
+                trace_id="trace_12345678",
+                execution_id="execution_12345678",
+            ),
+        ),
+    )
 
     assert plan.calls == [{"day": "all"}]
     assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
         ("get_current_plan", "succeeded"),
         ("get_current_plan", "cache_hit"),
     ]
+    tool_events = [event for event in emitted if isinstance(event, ToolCallCompleted)]
+    cache_event = next(
+        event for event in tool_events
+        if event.tool_dispatch_status.value == "cache_hit"
+    )
+    assert cache_event.cache_hit is True
+    assert cache_event.handler_executed is False
 
 
 def test_pydantic_replacement_before_plan_is_guard_rejected_without_handler_call():
