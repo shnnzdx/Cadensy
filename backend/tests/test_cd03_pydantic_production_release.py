@@ -261,6 +261,7 @@ def test_activation_post_deployment_verification_is_covered_by_legacy_rollback_t
     activate = next(step for step in steps if step.get("id") == "activate")
     activate_script = activate["run"].casefold()
 
+    assert activate["env"]["RUNTIME_DIGEST"] == "${{ inputs.runtime_image_digest }}"
     assert "trap rollback_on_error err" in activate_script
     for required_post_deploy_check in (
         "describe-services",

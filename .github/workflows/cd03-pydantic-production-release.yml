@@ -203,6 +203,7 @@ jobs:
         shell: bash
         env:
           ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
         run: |
           set -euo pipefail
           deployment_started=0
