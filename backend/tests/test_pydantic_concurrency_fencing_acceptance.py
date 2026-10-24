@@ -41,8 +41,8 @@ from tests.test_pydantic_durable_runtime_acceptance import (
     _factory,
     _identity,
     _runtime,
-    _seed_committed_trip,
     _submit,
+    committed_stage03_seed_graph,
     independent_postgres_sessions,
 )
 
@@ -113,10 +113,12 @@ def _capture_execution_lifecycle(monkeypatch):  # type: ignore[no-untyped-def]
     yield events, late_worker_finished
 
 
-def test_pydantic_same_key_replay_and_different_content_conflict(test_engine):
+def test_pydantic_same_key_replay_and_different_content_conflict(
+    test_engine, committed_stage03_seed_graph
+):
     """B1: only an execution claim runs Pydantic; same-key replay stays durable-idempotent."""
 
-    ids, factory = _seed_committed_trip(test_engine), _factory(test_engine)
+    ids, factory = committed_stage03_seed_graph.seed(), _factory(test_engine)
     conversation_id = _conversation(factory, ids)
     first = _submit(factory, ids, conversation_id=conversation_id, key="same-key", text="Safe request.")
     entered, release = threading.Event(), threading.Event()
@@ -163,12 +165,12 @@ def test_pydantic_same_key_replay_and_different_content_conflict(test_engine):
 
 
 def test_pydantic_different_key_is_busy_while_first_execution_runs(
-    test_engine, independent_postgres_sessions
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph
 ):
     """B2: a different key cannot create a second running durable submission."""
 
     factory, trace = independent_postgres_sessions
-    ids = _seed_committed_trip(test_engine, session_factory=factory)
+    ids = committed_stage03_seed_graph.seed(session_factory=factory)
     conversation_id = _conversation(factory, ids)
     first = _submit(factory, ids, conversation_id=conversation_id, key="first", text="First request.")
     entered, release = threading.Event(), threading.Event()
@@ -224,10 +226,12 @@ def test_pydantic_different_key_is_busy_while_first_execution_runs(
     )
 
 
-def test_expired_lease_replay_and_recovery_key_advance_authority(test_engine):
+def test_expired_lease_replay_and_recovery_key_advance_authority(
+    test_engine, committed_stage03_seed_graph
+):
     """B3: service-owned expiry transitions preserve one submission and one user row."""
 
-    ids, factory = _seed_committed_trip(test_engine), _factory(test_engine)
+    ids, factory = committed_stage03_seed_graph.seed(), _factory(test_engine)
     conversation_id = _conversation(factory, ids)
     admitted = _submit(factory, ids, conversation_id=conversation_id, key="lease-key", text="Lease request.")
     assert admitted.execution_claimed and (admitted.attempt_number, admitted.fence) == (1, 1)
@@ -270,12 +274,12 @@ def test_expired_lease_replay_and_recovery_key_advance_authority(test_engine):
 
 
 def test_concurrent_recovery_claims_grant_only_one_current_attempt(
-    test_engine, independent_postgres_sessions
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph
 ):
     """B5 support: only one independently connected recovery claim wins an expired lease."""
 
     factory, trace = independent_postgres_sessions
-    ids = _seed_committed_trip(test_engine, session_factory=factory)
+    ids = committed_stage03_seed_graph.seed(session_factory=factory)
     conversation_id = _conversation(factory, ids)
     admitted = _submit(factory, ids, conversation_id=conversation_id, key="race", text="Recover once.")
     reclaim_at = admitted.lease_expires_at
@@ -344,12 +348,12 @@ def test_concurrent_recovery_claims_grant_only_one_current_attempt(
 
 
 def _run_recovery_fence_scenario(
-    test_engine, independent_postgres_sessions, *, old_model, expected_old_state: str
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph, *, old_model, expected_old_state: str
 ):  # type: ignore[no-untyped-def]
     """Run a real old Pydantic execution around an independently committed recovery."""
 
     factory, trace = independent_postgres_sessions
-    ids = _seed_committed_trip(test_engine, session_factory=factory)
+    ids = committed_stage03_seed_graph.seed(session_factory=factory)
     conversation_id = _conversation(factory, ids)
     first = _submit(factory, ids, conversation_id=conversation_id, key="recover", text="Recover safely.")
     entered, release = threading.Event(), threading.Event()
@@ -413,7 +417,7 @@ def _run_recovery_fence_scenario(
 
 
 def test_stale_pydantic_completion_cannot_overwrite_recovery(
-    test_engine, independent_postgres_sessions
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph
 ):
     """B4: the old real FunctionModel result is fenced before durable completion."""
 
@@ -423,12 +427,13 @@ def test_stale_pydantic_completion_cannot_overwrite_recovery(
         })])
 
     _run_recovery_fence_scenario(
-        test_engine, independent_postgres_sessions, old_model=old_success, expected_old_state="discarded"
+        test_engine, independent_postgres_sessions, committed_stage03_seed_graph,
+        old_model=old_success, expected_old_state="discarded"
     )
 
 
 def test_stale_pydantic_failure_cannot_overwrite_recovery(
-    test_engine, independent_postgres_sessions
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph
 ):
     """B5: a resumed old Pydantic failure cannot mark the recovered attempt failed."""
 
@@ -436,14 +441,17 @@ def test_stale_pydantic_failure_cannot_overwrite_recovery(
         raise RuntimeError("controlled stale failure")
 
     _run_recovery_fence_scenario(
-        test_engine, independent_postgres_sessions, old_model=old_failure, expected_old_state="discarded"
+        test_engine, independent_postgres_sessions, committed_stage03_seed_graph,
+        old_model=old_failure, expected_old_state="discarded"
     )
 
 
-def test_pydantic_request_timeout_discards_late_function_model_result(test_engine, monkeypatch):
+def test_pydantic_request_timeout_discards_late_function_model_result(
+    test_engine, monkeypatch, committed_stage03_seed_graph
+):
     """B6: a timed-out Pydantic worker has no late durable completion."""
 
-    ids, factory = _seed_committed_trip(test_engine), _factory(test_engine)
+    ids, factory = committed_stage03_seed_graph.seed(), _factory(test_engine)
     conversation_id = _conversation(factory, ids)
     submission = _submit(factory, ids, conversation_id=conversation_id, key="timeout", text="Bounded request.")
     entered, release, returned = threading.Event(), threading.Event(), threading.Event()

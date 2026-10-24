@@ -1,0 +1,128 @@
+{
+  "schema_version": "cadensy.v0303c.test-isolation-fix.v1",
+  "repository": {
+    "branch": "codex/v0303c-pydantic-formal-evaluation",
+    "source_head_before_fix": "ae030a9b1f0c2e765a5c925b128fcfaafc40f7ae",
+    "stage03a_parent": "b1981d849e24e9c88a4ccf997c8831addbd4a48b",
+    "production_code_modified": false,
+    "commit_created": false,
+    "push_performed": false
+  },
+  "sanitization": {
+    "contains_credentials": false,
+    "contains_database_urls": false,
+    "contains_raw_prompts": false,
+    "contains_private_constraints": false,
+    "contains_provider_payloads": false
+  },
+  "environment": {
+    "python": "3.13.5",
+    "pytest": "9.1.1",
+    "pydantic_ai": "2.54.0",
+    "postgres": "task-owned PostgreSQL 18; loopback-only; port 55445; fresh test-named databases",
+    "settings": {
+      "APP_ENV": "test",
+      "MOCK_AI": "1",
+      "DISABLE_SCHEDULER": "1",
+      "DEV_ALLOW_MEMBERSHIP_HEADER": "0"
+    },
+    "provider_network_calls": false,
+    "aws_operations": false
+  },
+  "original_failure": {
+    "command": "python -m pytest -q",
+    "passed": 1353,
+    "failed": 3,
+    "warnings": 10,
+    "exit_code": 1,
+    "node_ids": [
+      "tests/test_upsert_demo_login.py::test_upsert_demo_login_keeps_legacy_account_without_recreating_demo_trip",
+      "tests/test_upsert_demo_seed.py::test_upsert_demo_seed_is_idempotent",
+      "tests/test_upsert_fixed_accounts.py::test_upsert_fixed_accounts_is_idempotent"
+    ],
+    "leak_attribution": {
+      "committed_stage03_roots": {"trips": 16, "users": 32},
+      "source": "Stage 03A/03B independent committed seed graph",
+      "classification": "confirmed_test_isolation_issue"
+    }
+  },
+  "fix": {
+    "scope": "test-only committed Stage 03 graph ownership and function-scoped teardown",
+    "root_registration": "exact IDs registered before the setup transaction commits",
+    "cleanup_order": [
+      "ConversationSubmissionRecovery",
+      "ConversationMessageOption",
+      "ConversationSubmission",
+      "ConversationMessage",
+      "Conversation",
+      "PlanItem",
+      "Plan",
+      "TripMembership",
+      "Trip",
+      "User"
+    ],
+    "cleanup_guard": "fresh Session observer asserts registered Conversation, PlanItem, Plan, TripMembership, Trip, and User rows are absent",
+    "cleanup_errors_suppressed": false,
+    "physical_independent_sessions_preserved": true,
+    "worker_release_and_join_preserved": true
+  },
+  "executions": [
+    {
+      "name": "stage03_and_original_failure_nodes_same_process",
+      "command": "python -m pytest tests/test_pydantic_durable_runtime_acceptance.py tests/test_pydantic_concurrency_fencing_acceptance.py tests/test_upsert_demo_login.py tests/test_upsert_demo_seed.py tests/test_upsert_fixed_accounts.py -q",
+      "collected": 20,
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 7.56
+    },
+    {
+      "name": "post_fix_single_process_full_backend",
+      "command": "python -m pytest -q",
+      "collected": 1356,
+      "passed": 1356,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "deselected": 0,
+      "warnings": 10,
+      "exit_code": 0,
+      "elapsed_seconds": 73.88
+    },
+    {
+      "name": "frozen_formal_ab",
+      "command": "python -m evals.formal_ab_runner --output <sanitized task-local temporary JSON>",
+      "legacy": {"observations": 8, "safety_passed": 8, "business_passed": 6},
+      "pydantic": {"observations": 8, "safety_passed": 8, "business_passed": 6},
+      "historical_business_gaps": ["ambiguous-time", "privacy-injection"],
+      "exit_code": 0
+    },
+    {
+      "name": "pydantic_preview_telemetry",
+      "passed": 115,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 4.5
+    }
+  ],
+  "source_sha256_canonical_lf": {
+    "backend/tests/test_pydantic_durable_runtime_acceptance.py": "684d33afa360cf383dc385149bb3cefcaa20022624016a27203362e2d436b304",
+    "backend/tests/test_pydantic_concurrency_fencing_acceptance.py": "8103db07d2f75449cbdf425bb1e1e85b1dbf570670b8cbd2a973b2ff3aed62a5",
+    "backend/evals/datasets/chat_change_preview_v1.json": "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f",
+    "backend/evals/graders.py": "afdfda3266e86f61dd3289c911e82569414384940fd44a874f38f6985cd96be3",
+    "backend/evals/formal_ab_runner.py": "abb5188aa03249416c8b02455148ab6d1070350efe3357a189cd10365da7afed",
+    "backend/evals/symmetric_harness.py": "232f35e0f90783b6b5d676b96835ffa769cd1ceb3e7ee15ecaa8c292b85ca737"
+  },
+  "final": {
+    "original_full_suite": "FAILED",
+    "post_fix_full_suite": "PASS",
+    "migration_introduced_p0_p1_defects": "NONE",
+    "production_pydantic_activation": "NOT_AUTHORIZED",
+    "local_commit": "NOT_PERFORMED",
+    "push": "NOT_PERFORMED"
+  }
+}

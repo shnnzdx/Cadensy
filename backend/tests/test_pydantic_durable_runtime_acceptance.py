@@ -14,7 +14,7 @@ import threading
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, delete, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -26,7 +26,18 @@ from pydantic_ai.models.function import FunctionModel
 from app.agents.execution import AgentExecutionConfig
 from app.agents.pydantic_runtime import PydanticChatAgentRuntime
 from app.agents.runtime_contract import RuntimeLimits
-from app.db.models import ConversationMessage, ConversationMessageOption, Plan, PlanItem, Trip, TripMembership, User
+from app.db.models import (
+    Conversation,
+    ConversationMessage,
+    ConversationMessageOption,
+    ConversationSubmission,
+    ConversationSubmissionRecovery,
+    Plan,
+    PlanItem,
+    Trip,
+    TripMembership,
+    User,
+)
 from app.domain.conversations import context as conversation_context
 from app.domain.conversations import service as conversation_service
 from app.domain.conversations.runtime import ConversationRuntimeCoordinator
@@ -126,49 +137,142 @@ def _assert_independent_postgres_race(trace: _ConnectionTrace) -> None:
     )
 
 
-def _seed_committed_trip(test_engine, *, session_factory=None) -> dict[str, str | int]:  # type: ignore[no-untyped-def]
-    """Create one committed owner-scoped trip for independent worker sessions."""
+class _CommittedStage03SeedGraph:
+    """Own exactly the committed graph needed by one Stage 03A/B test."""
 
-    factory = session_factory or _factory(test_engine)
-    with factory.begin() as db:
-        nonce = uuid4().hex
-        owner = User(name="Stage 03 Owner", email=f"stage03-owner-{nonce}@example.test")
-        other = User(name="Stage 03 Other", email=f"stage03-other-{nonce}@example.test")
-        db.add_all((owner, other))
-        db.flush()
-        trip = Trip(name="Stage 03 trip", destination="Chicago", created_by_user_id=owner.id)
-        db.add(trip)
-        db.flush()
-        membership = TripMembership(
-            trip_id=trip.id, user_id=owner.id, role="organizer", status="joined"
+    def __init__(self, test_engine) -> None:  # type: ignore[no-untyped-def]
+        self._test_engine = test_engine
+        self._roots: list[dict[str, str | int]] = []
+
+    def seed(self, *, session_factory=None) -> dict[str, str | int]:  # type: ignore[no-untyped-def]
+        """Commit one graph for real independent sessions and register it first."""
+
+        factory = session_factory or _factory(self._test_engine)
+        with factory.begin() as db:
+            nonce = uuid4().hex
+            owner = User(name="Stage 03 Owner", email=f"stage03-owner-{nonce}@example.test")
+            other = User(name="Stage 03 Other", email=f"stage03-other-{nonce}@example.test")
+            db.add_all((owner, other))
+            db.flush()
+            trip = Trip(name="Stage 03 trip", destination="Chicago", created_by_user_id=owner.id)
+            db.add(trip)
+            db.flush()
+            membership = TripMembership(
+                trip_id=trip.id, user_id=owner.id, role="organizer", status="joined"
+            )
+            other_membership = TripMembership(
+                trip_id=trip.id, user_id=other.id, role="participant", status="joined"
+            )
+            db.add_all((membership, other_membership))
+            plan = Plan(trip_id=trip.id)
+            db.add(plan)
+            db.flush()
+            item = PlanItem(
+                plan_id=plan.id,
+                day_index=0,
+                day_date=date(2026, 8, 15),
+                start_hour=14.0,
+                duration_min=120,
+                title="Stage 03 museum",
+                place="Michigan Avenue",
+            )
+            db.add(item)
+            db.flush()
+            ids: dict[str, str | int] = {
+                "trip_id": trip.id,
+                "membership_id": membership.id,
+                "other_membership_id": other_membership.id,
+                "owner_user_id": owner.id,
+                "other_user_id": other.id,
+                "plan_id": plan.id,
+                "item_id": item.id,
+                "plan_revision": plan.revision,
+                "facts_revision": trip.planning_facts_revision,
+            }
+            # Register before the context manager commits. A setup exception
+            # rolls back; a successful commit is always teardown-owned.
+            self._roots.append(ids)
+            return ids
+
+    def cleanup(self) -> None:
+        """Delete only registered graphs, then prove a fresh observer sees none."""
+
+        if not self._roots:
+            return
+        trip_ids = tuple(str(root["trip_id"]) for root in self._roots)
+        membership_ids = tuple(
+            str(identifier)
+            for root in self._roots
+            for identifier in (root["membership_id"], root["other_membership_id"])
         )
-        other_membership = TripMembership(
-            trip_id=trip.id, user_id=other.id, role="participant", status="joined"
+        user_ids = tuple(
+            str(identifier)
+            for root in self._roots
+            for identifier in (root["owner_user_id"], root["other_user_id"])
         )
-        db.add_all((membership, other_membership))
-        plan = Plan(trip_id=trip.id)
-        db.add(plan)
-        db.flush()
-        item = PlanItem(
-            plan_id=plan.id,
-            day_index=0,
-            day_date=date(2026, 8, 15),
-            start_hour=14.0,
-            duration_min=120,
-            title="Stage 03 museum",
-            place="Michigan Avenue",
-        )
-        db.add(item)
-        db.flush()
-        return {
-            "trip_id": trip.id,
-            "membership_id": membership.id,
-            "other_membership_id": other_membership.id,
-            "plan_id": plan.id,
-            "item_id": item.id,
-            "plan_revision": plan.revision,
-            "facts_revision": trip.planning_facts_revision,
-        }
+        plan_ids = tuple(str(root["plan_id"]) for root in self._roots)
+        item_ids = tuple(str(root["item_id"]) for root in self._roots)
+        factory = _factory(self._test_engine)
+
+        with factory.begin() as db:
+            conversation_ids = select(Conversation.id).where(Conversation.trip_id.in_(trip_ids))
+            message_ids = select(ConversationMessage.id).where(
+                ConversationMessage.conversation_id.in_(conversation_ids)
+            )
+            submission_ids = select(ConversationSubmission.id).where(
+                ConversationSubmission.conversation_id.in_(conversation_ids)
+            )
+            db.execute(delete(ConversationSubmissionRecovery).where(
+                ConversationSubmissionRecovery.submission_id.in_(submission_ids)
+            ))
+            db.execute(delete(ConversationMessageOption).where(
+                ConversationMessageOption.assistant_message_id.in_(message_ids)
+            ))
+            db.execute(delete(ConversationSubmission).where(
+                ConversationSubmission.conversation_id.in_(conversation_ids)
+            ))
+            db.execute(delete(ConversationMessage).where(
+                ConversationMessage.conversation_id.in_(conversation_ids)
+            ))
+            db.execute(delete(Conversation).where(Conversation.id.in_(conversation_ids)))
+            db.execute(delete(PlanItem).where(PlanItem.id.in_(item_ids)))
+            db.execute(delete(Plan).where(Plan.id.in_(plan_ids)))
+            db.execute(delete(TripMembership).where(TripMembership.id.in_(membership_ids)))
+            db.execute(delete(Trip).where(Trip.id.in_(trip_ids)))
+            db.execute(delete(User).where(User.id.in_(user_ids)))
+
+        # A new Session, rather than the deleting Session's identity map, is
+        # the teardown guard. Any missed row is a visible teardown failure.
+        with factory() as observer:
+            assert observer.scalar(select(func.count()).select_from(Conversation).where(
+                Conversation.trip_id.in_(trip_ids)
+            )) == 0
+            assert observer.scalar(select(func.count()).select_from(PlanItem).where(
+                PlanItem.id.in_(item_ids)
+            )) == 0
+            assert observer.scalar(select(func.count()).select_from(Plan).where(
+                Plan.id.in_(plan_ids)
+            )) == 0
+            assert observer.scalar(select(func.count()).select_from(TripMembership).where(
+                TripMembership.id.in_(membership_ids)
+            )) == 0
+            assert observer.scalar(select(func.count()).select_from(Trip).where(
+                Trip.id.in_(trip_ids)
+            )) == 0
+            assert observer.scalar(select(func.count()).select_from(User).where(
+                User.id.in_(user_ids)
+            )) == 0
+
+
+@pytest.fixture
+def committed_stage03_seed_graph(test_engine):  # type: ignore[no-untyped-def]
+    """Function-scoped ownership for committed multi-connection acceptance data."""
+
+    graph = _CommittedStage03SeedGraph(test_engine)
+    try:
+        yield graph
+    finally:
+        graph.cleanup()
 
 
 def _runtime(script):  # type: ignore[no-untyped-def]
@@ -224,10 +328,12 @@ def _conversation_option_count(db: Session, conversation_id: str) -> int:
     ).count()
 
 
-def test_pydantic_two_turn_durable_conversation_reconstructs_server_history(test_engine):
+def test_pydantic_two_turn_durable_conversation_reconstructs_server_history(
+    test_engine, committed_stage03_seed_graph
+):
     """A1: two real Pydantic turns persist once and replay only server history."""
 
-    ids = _seed_committed_trip(test_engine)
+    ids = committed_stage03_seed_graph.seed()
     factory = _factory(test_engine)
     with factory.begin() as db:
         conversation = conversation_service.create_or_discover(
@@ -288,10 +394,12 @@ def test_pydantic_two_turn_durable_conversation_reconstructs_server_history(test
 
 
 @pytest.mark.parametrize("change", ["plan_revision", "planning_facts_revision"])
-def test_pydantic_durable_options_are_reconstructed_then_rejected_when_stale(test_engine, change: str):
+def test_pydantic_durable_options_are_reconstructed_then_rejected_when_stale(
+    test_engine, committed_stage03_seed_graph, change: str
+):
     """A2: a persisted Pydantic Option is usable now but stale after either revision changes."""
 
-    ids = _seed_committed_trip(test_engine)
+    ids = committed_stage03_seed_graph.seed()
     factory = _factory(test_engine)
     with factory.begin() as db:
         conversation = conversation_service.create_or_discover(
@@ -408,10 +516,12 @@ def test_pydantic_durable_options_are_reconstructed_then_rejected_when_stale(tes
     assert item is not None and item.start_hour == 14.0
 
 
-def test_pydantic_revocation_before_context_admission_never_calls_model(test_engine):
+def test_pydantic_revocation_before_context_admission_never_calls_model(
+    test_engine, committed_stage03_seed_graph
+):
     """A3: revoked ownership stops before Pydantic can observe conversation data."""
 
-    ids = _seed_committed_trip(test_engine)
+    ids = committed_stage03_seed_graph.seed()
     factory = _factory(test_engine)
     with factory.begin() as db:
         conversation = conversation_service.create_or_discover(
@@ -457,12 +567,12 @@ def test_pydantic_revocation_before_context_admission_never_calls_model(test_eng
 
 
 def test_pydantic_revocation_during_runtime_discards_late_durable_result(
-    test_engine, independent_postgres_sessions
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph
 ):
     """A4: an independently committed revocation defeats a blocked FunctionModel result."""
 
     factory, trace = independent_postgres_sessions
-    ids = _seed_committed_trip(test_engine, session_factory=factory)
+    ids = committed_stage03_seed_graph.seed(session_factory=factory)
     with factory.begin() as db:
         conversation = conversation_service.create_or_discover(
             db,
@@ -532,11 +642,13 @@ def test_pydantic_revocation_during_runtime_discards_late_durable_result(
     _assert_independent_postgres_race(trace)
 
 
-def test_pydantic_cross_trip_conversation_is_denied_before_model_execution(test_engine):
+def test_pydantic_cross_trip_conversation_is_denied_before_model_execution(
+    test_engine, committed_stage03_seed_graph
+):
     """A5: a foreign Trip identity cannot turn another Trip's history into model input."""
 
-    owner_ids = _seed_committed_trip(test_engine)
-    foreign_ids = _seed_committed_trip(test_engine)
+    owner_ids = committed_stage03_seed_graph.seed()
+    foreign_ids = committed_stage03_seed_graph.seed()
     factory = _factory(test_engine)
     with factory.begin() as db:
         conversation = conversation_service.create_or_discover(
@@ -586,12 +698,12 @@ def test_pydantic_cross_trip_conversation_is_denied_before_model_execution(test_
 
 @pytest.mark.parametrize("change", ["plan_revision", "planning_facts_revision"])
 def test_pydantic_preview_rejects_revision_changed_during_model_execution(
-    test_engine, independent_postgres_sessions, change: str
+    test_engine, independent_postgres_sessions, committed_stage03_seed_graph, change: str
 ):
     """A6: Preview discards a Pydantic candidate after either captured revision changes."""
 
     factory, trace = independent_postgres_sessions
-    ids = _seed_committed_trip(test_engine, session_factory=factory)
+    ids = committed_stage03_seed_graph.seed(session_factory=factory)
     with factory.begin() as db:
         conversation = conversation_service.create_or_discover(
             db,
