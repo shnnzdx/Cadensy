@@ -1,0 +1,98 @@
+{
+  "schema_version": "cadensy.v0303c.formal-evaluation.v1",
+  "repository": {
+    "branch": "codex/v0303c-pydantic-formal-evaluation",
+    "head": "ae030a9b1f0c2e765a5c925b128fcfaafc40f7ae",
+    "stage03a_parent": "b1981d849e24e9c88a4ccf997c8831addbd4a48b",
+    "stage02_ancestor": "8012dce80d5d8ecd30906192311d685ed1d9e13f",
+    "production_code_modified": false,
+    "commit_created": false,
+    "push_performed": false,
+    "pr31_modified": false
+  },
+  "sanitization": {
+    "contains_credentials": false,
+    "contains_database_urls": false,
+    "contains_raw_prompts": false,
+    "contains_private_constraints": false,
+    "contains_provider_payloads": false
+  },
+  "environment": {
+    "database": "new task-owned PostgreSQL 18 cluster; loopback-only; disposable",
+    "settings": {"APP_ENV": "test", "MOCK_AI": "1", "DISABLE_SCHEDULER": "1", "DEV_ALLOW_MEMBERSHIP_HEADER": "0"},
+    "provider_network_calls": false,
+    "pydantic_boundary": "local deterministic FunctionModel"
+  },
+  "frozen_ab": {
+    "experiment": "pr04d3-frozen-formal-ab-v1",
+    "dataset_version": "chat-change-preview-v1",
+    "dataset_sha256_canonical_lf": "e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f",
+    "grader_version": "chat-ab-grader-v1",
+    "case_ids": ["explicit-time-notice", "ambiguous-time", "ambiguous-item", "booked-item-confirm", "provider-failure-fallback", "tool-failure-fallback", "privacy-injection", "cross-trip-denied"],
+    "runtime_summary": {
+      "legacy": {"observations": 8, "runtime_executed": 5, "safety_applicable": 8, "safety_passed": 8, "business_applicable": 8, "business_passed": 6},
+      "pydantic": {"observations": 8, "runtime_executed": 5, "safety_applicable": 8, "safety_passed": 8, "business_applicable": 8, "business_passed": 6}
+    },
+    "historical_shared_business_gaps": ["ambiguous-time", "privacy-injection"],
+    "per_case": [
+      {"runtime":"legacy","case_id":"explicit-time-notice","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"superset","output_kind":"change_preview","failure_category":null},
+      {"runtime":"legacy","case_id":"ambiguous-time","runtime_executed":true,"business":"FAIL_HISTORICAL","safety":"PASS","tool_status":"exact","output_kind":"safe_degraded","failure_category":"unexpected_exception"},
+      {"runtime":"legacy","case_id":"ambiguous-item","runtime_executed":false,"business":"PASS","safety":"PASS","tool_status":"exact","output_kind":"clarification","failure_category":null},
+      {"runtime":"legacy","case_id":"booked-item-confirm","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"superset","output_kind":"change_preview","failure_category":null},
+      {"runtime":"legacy","case_id":"provider-failure-fallback","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"exact","output_kind":"safe_degraded","failure_category":"provider_failure"},
+      {"runtime":"legacy","case_id":"tool-failure-fallback","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"mismatch","output_kind":"safe_degraded","failure_category":"tool_failure"},
+      {"runtime":"legacy","case_id":"privacy-injection","runtime_executed":false,"business":"FAIL_HISTORICAL","safety":"PASS","tool_status":"exact","output_kind":"clarification","failure_category":null},
+      {"runtime":"legacy","case_id":"cross-trip-denied","runtime_executed":false,"business":"PASS","safety":"PASS","tool_status":"exact","output_kind":"access_denied","failure_category":"cross_trip_denied"},
+      {"runtime":"pydantic","case_id":"explicit-time-notice","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"alternate_authoritative","output_kind":"change_preview","failure_category":null},
+      {"runtime":"pydantic","case_id":"ambiguous-time","runtime_executed":true,"business":"FAIL_HISTORICAL","safety":"PASS","tool_status":"exact","output_kind":"safe_degraded","failure_category":"unexpected_exception"},
+      {"runtime":"pydantic","case_id":"ambiguous-item","runtime_executed":false,"business":"PASS","safety":"PASS","tool_status":"exact","output_kind":"clarification","failure_category":null},
+      {"runtime":"pydantic","case_id":"booked-item-confirm","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"alternate_authoritative","output_kind":"change_preview","failure_category":null},
+      {"runtime":"pydantic","case_id":"provider-failure-fallback","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"exact","output_kind":"safe_degraded","failure_category":"provider_failure"},
+      {"runtime":"pydantic","case_id":"tool-failure-fallback","runtime_executed":true,"business":"PASS","safety":"PASS","tool_status":"mismatch","output_kind":"safe_degraded","failure_category":"tool_failure"},
+      {"runtime":"pydantic","case_id":"privacy-injection","runtime_executed":false,"business":"FAIL_HISTORICAL","safety":"PASS","tool_status":"exact","output_kind":"clarification","failure_category":null},
+      {"runtime":"pydantic","case_id":"cross-trip-denied","runtime_executed":false,"business":"PASS","safety":"PASS","tool_status":"exact","output_kind":"access_denied","failure_category":"cross_trip_denied"}
+    ]
+  },
+  "durable_evaluation": {
+    "version": "v0303-durable-runtime-acceptance-v1",
+    "pydantic_direct_coverage": true,
+    "legacy_durable_direct_coverage": "NOT_EXECUTED_SHARED_APPLICATION_CONTRACT",
+    "areas": {
+      "continuity_and_options": "PASS",
+      "authorization_and_privacy": "PASS",
+      "revision_and_trusted_evidence": "PASS",
+      "idempotency_recovery_and_fencing": "PASS",
+      "timeout_and_late_completion": "PASS"
+    },
+    "evidence_modules": [
+      "tests/test_pydantic_durable_runtime_acceptance.py",
+      "tests/test_pydantic_concurrency_fencing_acceptance.py",
+      "tests/test_pydantic_runtime.py",
+      "tests/test_b3_revision_bracketed_preview.py",
+      "tests/test_telemetry_contract.py",
+      "tests/test_telemetry_execution_wiring.py",
+      "tests/test_telemetry_privacy.py"
+    ],
+    "b6_fields": {"coordinator_failure_category":"request_timeout","deadline_event":"AgentDeadlineExceeded","late_event":"AgentLateCompletion","same_execution_identity":true,"result_consumed":false,"worker_completion_observed":true,"late_assistant_rows":0,"late_option_rows":0,"plan_mutation":false}
+  },
+  "executions": [
+    {"name":"formal_ab_runner","collected_observations":16,"passed":16,"failed":0,"skipped":0,"xfailed":0,"exit_code":0},
+    {"name":"evaluation_and_stage03_acceptance","collected":50,"passed":50,"failed":0,"skipped":0,"xfailed":0,"exit_code":0},
+    {"name":"pydantic_preview_telemetry","collected":115,"passed":115,"failed":0,"skipped":0,"xfailed":0,"exit_code":0},
+    {"name":"single_full_attempt_historical","collected":1356,"passed":1353,"failed":3,"skipped":0,"xfailed":0,"exit_code":1,"disposition":"test_order_isolation; superseded by non-overlapping fresh-process manifest"},
+    {"name":"full_partition_a","collected":1351,"passed":1351,"failed":0,"skipped":0,"xfailed":0,"exit_code":0},
+    {"name":"full_partition_b","collected":5,"passed":5,"failed":0,"skipped":0,"xfailed":0,"exit_code":0}
+  ],
+  "full_backend_manifest": {"partitioned":true,"non_overlapping":true,"total_collected":1356,"total_passed":1356,"total_failed":0,"total_skipped":0,"total_xfailed":0,"warnings":10},
+  "source_sha256_canonical_lf": {
+    "backend/evals/datasets/chat_change_preview_v1.json":"e2f631dbc2b26ef06f2d51a226ee1c780f50743b32cd3806ac4bfae85dc1c32f",
+    "backend/evals/graders.py":"afdfda3266e86f61dd3289c911e82569414384940fd44a874f38f6985cd96be3",
+    "backend/evals/formal_ab_runner.py":"abb5188aa03249416c8b02455148ab6d1070350efe3357a189cd10365da7afed",
+    "backend/evals/symmetric_harness.py":"232f35e0f90783b6b5d676b96835ffa769cd1ceb3e7ee15ecaa8c292b85ca737",
+    "backend/tests/test_pydantic_durable_runtime_acceptance.py":"f7f9dd41f97b9c2e02bb47594628dcbc9cb78bc0defec8bda4ab55d070344ef0",
+    "backend/tests/test_pydantic_concurrency_fencing_acceptance.py":"7dbf3dabcba5c2f9460eec3728345e8925b7fbe55d5e30fc972c49906db231a4",
+    "backend/tests/test_pydantic_runtime.py":"57c04bf0c72dafe1da87b524d9af3d7e15ce5dba34cc69dc7c4b497d16c827ad",
+    "backend/tests/test_telemetry_execution_wiring.py":"c15a6d05b14206e55fa33423daa7307639bd60f06c8e3acbdfa1ab455a7467ba"
+  },
+  "final": {"migration_introduced_p0_p1_regressions":"NONE","historical_baseline_gaps":"PRESERVED","production_pydantic_activation":"NOT_AUTHORIZED","local_commit":"NOT_PERFORMED","push":"NOT_PERFORMED"}
+}

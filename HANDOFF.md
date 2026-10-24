@@ -238,6 +238,21 @@ Release B 已在 2026-10-22 经受保护的 CD-02 工作流和 `Main` Environmen
 不要把此前“Release B 必须单独授权”的实现期说明当作当前仍未上线；后续任何
 Activation、Runtime-off Rollback、Secret/IAM/KMS 变更仍需新的明确生产授权。
 
+### v0.3.0 Agent migration status (local review only)
+
+- v0.2.0 Legacy + DeepSeek remains the last verified production configuration described
+  above. Do not reinterpret local Pydantic tests as a live ECS, RDS, or provider change.
+- v0.3.0-01 adds the Trusted Tool Execution Evidence boundary. Its design and final local
+  review are `AI_enhanced/PR-09_Pydantic-Production-Migration/00_*` and `01_*`.
+- v0.3.0-02 adds local Pydantic scoped Trip Facts, replacement lookup, and targeted advisory
+  options behind the existing runtime-neutral Preview/Durable boundaries. It remains under
+  local review; production selector/defaults remain Legacy.
+- PR-09 source design and local review records are `02_*` through `08_*`; execution-backed
+  evidence and documentation closure are `09_V0302D_FUNCTIONAL_EVALUATION_EVIDENCE.json`
+  and `10_V0302D_EVIDENCE_AND_DOCUMENTATION_CLOSURE.md` in the same folder.
+- No follow-on migration stage, production activation, selector change, or infrastructure
+  operation is authorized until v0.3.0-02 has a separately accepted final review.
+
 ## 8. Planner 最新 scheduling 行为
 
 主要文件：

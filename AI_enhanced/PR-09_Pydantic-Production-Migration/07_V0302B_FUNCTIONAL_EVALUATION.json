@@ -1,0 +1,107 @@
+{
+  "evaluation_version": "v0302b-functional-parity-v1",
+  "method": "deterministic FunctionModel with real scoped handlers where identified; no network or real provider",
+  "environment": {
+    "database": "verified disposable PostgreSQL test_cadensy_v0302 on localhost:55434",
+    "runtime": "Pydantic adapter behind the existing read-only capability seam",
+    "production_changes": false
+  },
+  "summary": {"scenarios": 11, "passed": 11, "failed": 0},
+  "scenarios": [
+    {
+      "id": "grounded-trip-facts",
+      "input": "FunctionModel calls get_trip_facts, then get_current_plan.",
+      "expected": "Only scoped handler projections are returned; no unscoped data or writes.",
+      "checks": ["facts handler arguments are {}", "plan read is recorded", "candidate option has scoped item id"],
+      "evidence": "test_pydantic_trip_facts_and_options_use_scoped_handlers_only",
+      "result": "pass"
+    },
+    {
+      "id": "existing-plan-schedule-change",
+      "input": "Read scoped plan, then emit a start_hour change for the returned item.",
+      "expected": "A typed advisory candidate is grounded and the runtime does not write a Plan.",
+      "checks": ["item id was read this run", "safe_patch is scalar", "Plan/Proposal/Vote counts unchanged"],
+      "evidence": "test_suggested_change_requires_same_run_scoped_read_and_has_no_write_authority; test_adapter_uses_common_capability_with_independent_session_and_no_durable_write",
+      "result": "pass"
+    },
+    {
+      "id": "specific-two-item-conflict",
+      "input": "Read Current Plan, then submit Art Institute and Birthday dinner ids to propose_options.",
+      "expected": "Existing handler focuses on named conflict rather than an unrelated 600-minute item.",
+      "checks": ["candidate item refs equal Art Institute", "unrelated longest item absent", "valid 09:00 and 90-minute patches present"],
+      "evidence": "test_pydantic_real_options_handler_keeps_a_named_conflict_off_unrelated_longest_item",
+      "result": "pass"
+    },
+    {
+      "id": "multiple-targeted-compromises",
+      "input": "Two grounded ids with move-earlier and shorten-duration suggestions.",
+      "expected": "Keep/no-change plus two executable, distinct single-item alternatives.",
+      "checks": ["three candidate options", "two exact target ids", "safe patches are start_hour and duration_min"],
+      "evidence": "test_pydantic_options_passes_grounded_conflict_ids_and_typed_suggestions",
+      "result": "pass"
+    },
+    {
+      "id": "direct-candidate-without-options-tool",
+      "input": "Read plan, then return runtime_suggested_change without propose_options.",
+      "expected": "Grounded direct candidate remains advisory and has no write authority.",
+      "checks": ["Current Plan read precedes suggestion", "no Plan mutation"],
+      "evidence": "test_suggested_change_requires_same_run_scoped_read_and_has_no_write_authority",
+      "result": "pass"
+    },
+    {
+      "id": "trusted-venue-replacement",
+      "input": "Read plan, call real replacement handler, then return exact candidate venue patch.",
+      "expected": "Detached trusted evidence reaches RevisionBracketedPreview and produces a candidate.",
+      "checks": ["succeeded evidence", "immutable candidate id", "Preview patch exact-match"],
+      "evidence": "test_pydantic_real_scoped_replacement_evidence_reaches_revision_bracketed_preview",
+      "result": "pass"
+    },
+    {
+      "id": "fabricated-venue-refusal",
+      "input": "Return a venue-shaped suggestion without same-run replacement evidence.",
+      "expected": "Runtime output fails closed and no suggested change is accepted.",
+      "checks": ["malformed_runtime_output", "no accepted AgentSuggestedChange"],
+      "evidence": "test_replacement_shaped_suggestion_without_provenance_fails_closed",
+      "result": "pass"
+    },
+    {
+      "id": "unknown-or-foreign-plan-item",
+      "input": "Read plan, then call propose_options with foreign conflict_item_ids.",
+      "expected": "Guard rejection occurs before the handler and no successful evidence exists.",
+      "checks": ["handler call list is empty", "no succeeded/cache_hit evidence"],
+      "evidence": "test_pydantic_options_rejects_foreign_conflict_ids_before_handler_call",
+      "result": "pass"
+    },
+    {
+      "id": "revoked-membership-and-stale-revision",
+      "input": "Revoke membership during fenced execution; separately mutate revision during Preview.",
+      "expected": "No uncommitted reply is persisted and stale preview candidate is discarded.",
+      "checks": ["fenced completion rejected", "revision-bracketed candidate discarded"],
+      "evidence": "test_membership_revocation_during_runtime_discards_uncommitted_reply; test_preview_discards_candidate_when_revision_changes_during_runtime",
+      "result": "pass"
+    },
+    {
+      "id": "underspecified-clarification",
+      "input": "Typed runtime clarification reply for an unanswered scheduling question.",
+      "expected": "Clarification is visible and has no candidate options/evidence/writes.",
+      "checks": ["AgentClarification mapping", "empty options", "empty tool evidence"],
+      "evidence": "test_typed_reply_and_clarification_map_to_common_runtime_result",
+      "result": "pass"
+    },
+    {
+      "id": "durable-valid-options-no-plan-write",
+      "input": "Durable Context -> Pydantic -> Preview -> existing propose_options handler.",
+      "expected": "Only valid advisory options persist with captured revision; Plan remains unmodified.",
+      "checks": ["completed fenced submission", "persisted target item id", "captured plan revision", "unsafe metadata omission covered by Durable validation"],
+      "evidence": "test_pydantic_runtime_persists_preview_options_through_durable_coordinator; test_runtime_coordinator_omits_unsafe_option_metadata_without_failing_completion",
+      "result": "pass"
+    }
+  ],
+  "additional_security_checks": {
+    "candidate_order_and_price_matching": "test_replacement_evidence_price_matching_is_order_independent",
+    "domain_rejects_invalid_model_suggestion": "test_pydantic_real_options_handler_keeps_a_named_conflict_off_unrelated_longest_item",
+    "tool_payload_budgets": "test_pydantic_options_rejects_oversized_payload_before_handler_call",
+    "specific_conflict_wrong_day_rejection": "test_pydantic_options_rejects_specific_conflict_outside_its_read_day",
+    "durable_deduplication": "test_runtime_coordinator_deduplicates_direct_candidate_against_existing_options"
+  }
+}

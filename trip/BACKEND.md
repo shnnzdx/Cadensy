@@ -178,6 +178,27 @@ The local merged workspace already depends on these backend behaviors:
 - preference dates are validated against the trip date window
 - item date moves update both `day_date` and `day_index`
 
+## Assistant Runtime Boundary
+
+Conversation and Preview are runtime-neutral boundaries. A Chat runtime may request only
+approved scoped read-only tools; it receives neither a database session, arbitrary SQL,
+write capability, provider credentials, nor an unrestricted network client. Current Plan
+reads ground item references for the execution, and per-execution guards, cache entries, and
+deadline checks prevent rejected, failed, timed-out, or late tool calls from becoming usable
+results.
+
+Trusted Tool Execution Evidence is created only from successful scoped handler projections.
+Venue replacement fields must exact-match an evidenced replacement candidate, including the
+price when one is supplied. Preview independently rechecks membership, trip/Plan scope,
+captured revisions, evidence, and deterministic Domain classification before producing an
+advisory candidate. It remains the authority; a runtime suggestion is not already approved
+or applied.
+
+Targeted option suggestions are validated against the real Current Plan and persist only as
+safe advisory options through the existing Durable Conversation path. Protected Apply and the
+Conversation schema are unchanged. The default production Chat Runtime remains Legacy;
+the Pydantic implementation is local review work and has no production activation.
+
 ## Key Endpoints
 
 Representative endpoints:

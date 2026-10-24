@@ -220,6 +220,19 @@ AI does not own:
 - canonical place names: itinerary generation selects an opaque candidate ID, while the
   Place Library supplies the English and local names shown in the Current Plan
 
+### Assistant suggestions and Current Plan
+
+The assistant can answer trip-fact questions, prepare a grounded replacement suggestion,
+and offer targeted compromise options for a known scheduling conflict. These are advisory:
+they do not immediately alter the authoritative Current Plan. Existing backend decision
+mechanisms still determine which members must decide and whether a change is a notice,
+round, reopened round, or confirmation.
+
+Suggestions remain scoped to the member's trip and use privacy-safe plan information; they
+do not disclose another member's private constraint wording or ownership data. The expanded
+Pydantic assistant behavior has local validation evidence only. It is not production-activated;
+the production Chat Runtime remains the established Legacy path.
+
 For a normal full travel day, itinerary quality should follow this priority order:
 
 1. hard constraints
