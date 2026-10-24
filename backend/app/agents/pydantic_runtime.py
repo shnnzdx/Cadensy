@@ -10,6 +10,8 @@ module and is not part of PR-04B.
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -17,7 +19,7 @@ from dataclasses import replace
 from datetime import date
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_ai import Agent, ModelRetry, RunContext, ToolOutput, UsageLimits
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -36,6 +38,7 @@ from .execution import (
 )
 from .runtime_contract import (
     AgentClarification,
+    AgentCandidateOption,
     AgentReplyOnly,
     AgentSuggestedChange,
     ChatAgentRuntime,
@@ -47,6 +50,7 @@ from .runtime_contract import (
     RuntimeReadTool,
     RuntimeRequest,
     RuntimeResult,
+    ReplacementCandidateEvidence,
     ToolExecutionEvidence,
 )
 from . import trace
@@ -68,12 +72,14 @@ from ..observability.telemetry import (
 )
 
 
-# PR-04B has scoped Current Plan reads only. Replacement-sensitive fields need
-# separately reviewed candidate provenance and therefore cannot be suggested
-# by this minimal adapter.
-_PYDANTIC_PR04B_PATCH_FIELDS = frozenset(
-    {"start_hour", "day_date", "duration_min"}
+_PYDANTIC_PATCH_FIELDS = frozenset(
+    {"start_hour", "day_date", "duration_min", "title", "place", "lat", "lng", "price_per_person"}
 )
+_MAX_CONFLICT_ITEM_IDS = 4
+_MAX_OPTION_SUGGESTIONS = 4
+_MAX_OPTION_TEXT_LENGTH = 4_000
+_MAX_CONFLICT_DESCRIPTION_LENGTH = 1_000
+_MAX_OPTION_DAY_LENGTH = 64
 
 
 class _RuntimeReply(BaseModel):
@@ -95,47 +101,130 @@ class _RuntimeSuggestedChange(BaseModel):
     @field_validator("safe_patch")
     @classmethod
     def validate_safe_patch(cls, value: dict[str, object]) -> dict[str, object]:
-        if not value:
-            raise ValueError("safe_patch must contain at least one allowed field")
-        unexpected = set(value) - _PYDANTIC_PR04B_PATCH_FIELDS
-        if unexpected:
-            raise ValueError("safe_patch contains unsupported fields")
-        if any(item in (None, "") for item in value.values()):
-            raise ValueError("safe_patch values must not be blank")
+        return _validated_safe_patch(value)
 
-        if "start_hour" in value:
-            start_hour = value["start_hour"]
-            if (
-                isinstance(start_hour, bool)
-                or not isinstance(start_hour, (int, float))
-                or not 0 <= float(start_hour) < 24
+
+class _RuntimeOptionSuggestion(BaseModel):
+    """Bounded model-authored input for the existing options validator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: Annotated[str, Field(strict=True, min_length=1, max_length=128)]
+    title: Annotated[str, Field(strict=True, min_length=1, max_length=300)]
+    body: Annotated[str, Field(strict=True, min_length=1, max_length=_MAX_OPTION_TEXT_LENGTH)]
+    tradeoff: Annotated[str, Field(strict=True, min_length=1, max_length=_MAX_OPTION_TEXT_LENGTH)]
+    label: Annotated[str, Field(strict=True, min_length=1, max_length=80)] = "Suggested"
+    start_hour: Annotated[float, Field(strict=True)] | None = None
+    day_date: Annotated[str, Field(strict=True, min_length=1, max_length=10)] | None = None
+    duration_min: Annotated[int, Field(strict=True)] | None = None
+
+
+def _validated_safe_patch(value: Mapping[str, object]) -> dict[str, object]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError("safe_patch must contain at least one allowed field")
+    if set(value) - _PYDANTIC_PATCH_FIELDS or any(item in (None, "") for item in value.values()):
+        raise ValueError("safe_patch contains unsupported or blank values")
+    if any(isinstance(item, (dict, list, tuple, set)) for item in value.values()):
+        raise ValueError("safe_patch values must be scalar")
+    def number(field: str, low: float, high: float | None = None, exclusive: bool = False) -> bool:
+        item = value[field]
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+            return False
+        return float(item) >= low and (high is None or (float(item) < high if exclusive else float(item) <= high))
+    if "start_hour" in value and not number("start_hour", 0, 24, True):
+        raise ValueError("start_hour must be within one calendar day")
+    if "duration_min" in value and (isinstance(value["duration_min"], bool) or not isinstance(value["duration_min"], int) or value["duration_min"] <= 0):
+        raise ValueError("duration_min must be a positive integer")
+    if "price_per_person" in value and not number("price_per_person", 0):
+        raise ValueError("price_per_person must be non-negative")
+    if "lat" in value and not number("lat", -90, 90):
+        raise ValueError("lat must be within geographic bounds")
+    if "lng" in value and not number("lng", -180, 180):
+        raise ValueError("lng must be within geographic bounds")
+    venue = {"title", "place", "lat", "lng"}
+    if venue & set(value) and not venue.issubset(value):
+        raise ValueError("replacement venue fields must be complete")
+    if any(field in value and (type(value[field]) is not str or not value[field].strip()) for field in {"title", "place"}):
+        raise ValueError("replacement title and place must be non-empty strings")
+    if "day_date" in value:
+        if type(value["day_date"]) is not str:
+            raise ValueError("day_date must be an ISO date")
+        try:
+            date.fromisoformat(value["day_date"])
+        except ValueError as error:
+            raise ValueError("day_date must be an ISO date") from error
+    return dict(value)
+
+
+def _replacement_evidence(output: object) -> tuple[ReplacementCandidateEvidence, ...]:
+    if not isinstance(output, Mapping) or not isinstance(output.get("candidates"), list):
+        return ()
+    candidates: list[ReplacementCandidateEvidence] = []
+    for raw in output["candidates"]:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            candidates.append(ReplacementCandidateEvidence(
+                candidate_id=raw["candidate_id"], title=raw["title"], place=raw["place"],
+                lat=raw["lat"], lng=raw["lng"], price_per_person=raw.get("price_per_person"),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(candidates)
+
+
+def _options_from_tool(
+    output: object, tool_execution_evidence: list[ToolExecutionEvidence],
+) -> tuple[AgentCandidateOption, ...]:
+    if not isinstance(output, Mapping) or not isinstance(output.get("options"), list):
+        return ()
+    options: list[AgentCandidateOption] = []
+    for raw in output["options"]:
+        if not isinstance(raw, Mapping):
+            continue
+        patch = raw.get("patch")
+        try:
+            safe_patch = {} if patch == {} else _validated_safe_patch(patch if isinstance(patch, dict) else {})
+        except ValueError:
+            continue
+        # ``propose_options`` has no replacement authority of its own. Even a
+        # malformed or future handler response cannot smuggle venue fields into
+        # RuntimeResult without an earlier, same-run approved lookup.
+        if not _replacement_patch_is_evidenced(safe_patch, tool_execution_evidence):
+            continue
+        required = ("id", "label", "title", "body", "tradeoff", "item_id")
+        if not all(type(raw.get(key)) is str and raw[key].strip() for key in required):
+            continue
+        options.append(AgentCandidateOption(
+            id=raw["id"], label=raw["label"], title=raw["title"], body=raw["body"],
+            tradeoff=raw["tradeoff"], item_ref=raw["item_id"], safe_patch=safe_patch,
+        ))
+    return tuple(options)
+
+
+def _replacement_patch_is_evidenced(
+    patch: Mapping[str, object], evidence: list[ToolExecutionEvidence]
+) -> bool:
+    fields = ("title", "place", "lat", "lng", "price_per_person")
+    if not any(field in patch for field in fields):
+        return True
+    if not all(field in patch for field in ("title", "place", "lat", "lng")):
+        return False
+    for entry in evidence:
+        if entry.tool_name != "find_replacement_place" or entry.status not in {"succeeded", "cache_hit"}:
+            continue
+        for candidate in entry.replacement_candidates:
+            if (candidate.title, candidate.place, candidate.lat, candidate.lng) != (
+                patch["title"], patch["place"], patch["lat"], patch["lng"],
             ):
-                raise ValueError("start_hour must be within one calendar day")
-        if "duration_min" in value:
-            duration = value["duration_min"]
-            if isinstance(duration, bool) or not isinstance(duration, int) or duration <= 0:
-                raise ValueError("duration_min must be a positive integer")
-        if "price_per_person" in value:
-            price = value["price_per_person"]
-            if isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0:
-                raise ValueError("price_per_person must be non-negative")
-        if "lat" in value and not _numeric_in_range(value["lat"], -90, 90):
-            raise ValueError("lat must be within geographic bounds")
-        if "lng" in value and not _numeric_in_range(value["lng"], -180, 180):
-            raise ValueError("lng must be within geographic bounds")
-        if "day_date" in value:
-            day_date = value["day_date"]
-            if not isinstance(day_date, str):
-                raise ValueError("day_date must be an ISO date")
-            try:
-                date.fromisoformat(day_date)
-            except ValueError as error:
-                raise ValueError("day_date must be an ISO date") from error
-        return value
-
-
-def _numeric_in_range(value: object, lower: float, upper: float) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and lower <= value <= upper
+                continue
+            if "price_per_person" not in patch:
+                if candidate.price_per_person is None:
+                    return True
+                continue
+            if candidate.price_per_person == patch["price_per_person"]:
+                return True
+    return False
 
 
 @dataclass
@@ -145,9 +234,82 @@ class _PydanticRunDeps:
     tools_by_name: Mapping[str, RuntimeReadTool]
     deadline: AgentExecutionContext
     read_item_refs: set[str] = field(default_factory=set)
+    read_item_refs_by_day_query: dict[str, set[str]] = field(default_factory=dict)
     tool_trajectory: list[str] = field(default_factory=list)
     tool_execution_evidence: list[ToolExecutionEvidence] = field(default_factory=list)
+    candidate_options: list[AgentCandidateOption] = field(default_factory=list)
+    cache: dict[str, object] = field(default_factory=dict)
     tool_timeout_observed: bool = False
+
+
+def _tool_cache_key(name: str, arguments: Mapping[str, object]) -> str:
+    return name + ":" + json.dumps(dict(arguments), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _day_query_key(day: object) -> str:
+    return day.strip().casefold() if isinstance(day, str) else ""
+
+
+def _invoke_scoped_tool(
+    deps: _PydanticRunDeps, name: str, arguments: dict[str, object], telemetry_context: TelemetryContext | None,
+    *, require_plan: bool = False, require_item: bool = False, required_item_ids: tuple[str, ...] = (),
+) -> object:
+    """One per-run guarded and deadline-bound read dispatch for Pydantic."""
+
+    def reject_guard(message: str) -> None:
+        deps.tool_execution_evidence.append(ToolExecutionEvidence(tool_name=name, status="guard_rejected"))
+        _emit_pydantic_tool_call(telemetry_context, name, ToolDispatchStatus.GUARD_REJECTED)
+        raise ModelRetry(message)
+
+    tool = deps.tools_by_name.get(name)
+    if tool is None:
+        deps.tool_execution_evidence.append(ToolExecutionEvidence(tool_name="unsupported", status="unsupported"))
+        raise ModelRetry("That scoped tool is unavailable.")
+    if require_plan and not deps.read_item_refs:
+        reject_guard("Read the Current Plan before using this tool.")
+    if require_item and (not isinstance(arguments.get("item_id"), str) or arguments["item_id"] not in deps.read_item_refs):
+        reject_guard("Use an item id returned by the Current Plan in this run.")
+    if any(item_id not in deps.read_item_refs for item_id in required_item_ids):
+        reject_guard("Use only conflict item ids returned by the Current Plan in this run.")
+    day_query = _day_query_key(arguments.get("day"))
+    if required_item_ids and day_query not in {"", "all", "entire trip", "whole trip"}:
+        ids_for_day = deps.read_item_refs_by_day_query.get(day_query, set())
+        if any(item_id not in ids_for_day for item_id in required_item_ids):
+            reject_guard("Read the requested day and use only conflict item ids returned for that day.")
+    key = _tool_cache_key(name, arguments)
+    try:
+        started = deps.deadline.before_tool()
+        if key in deps.cache:
+            output = deps.cache[key]
+            status = "cache_hit"
+            dispatch_status = ToolDispatchStatus.CACHE_HIT
+        else:
+            output = tool.invoke(**arguments)
+            status = "succeeded"
+            dispatch_status = ToolDispatchStatus.HANDLER_SUCCEEDED
+        deps.deadline.after_tool(started)
+    except AgentToolDeadlineExceeded:
+        deps.tool_timeout_observed = True
+        _emit_pydantic_tool_call(telemetry_context, name, ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED)
+        raise
+    except Exception:
+        _emit_pydantic_tool_call(telemetry_context, name, ToolDispatchStatus.HANDLER_FAILED)
+        raise
+    if not isinstance(output, dict):
+        _emit_pydantic_tool_call(telemetry_context, name, ToolDispatchStatus.HANDLER_FAILED)
+        raise ModelRetry("The scoped tool returned an invalid safe projection.")
+    if status == "succeeded":
+        # Cache only a projection that has passed the adapter's public type
+        # boundary. A malformed handler return must never become a reusable
+        # same-run value.
+        deps.cache[key] = output
+    candidates = _replacement_evidence(output) if name == "find_replacement_place" else ()
+    deps.tool_execution_evidence.append(ToolExecutionEvidence(
+        tool_name=name, status=status, replacement_candidates=candidates,
+    ))
+    deps.tool_trajectory.append(name)
+    _emit_pydantic_tool_call(telemetry_context, name, dispatch_status)
+    return output
 
 
 class _DeadlineBoundModel(WrapperModel):
@@ -258,6 +420,11 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
 
         deps = _PydanticRunDeps(tools_by_name=tools_by_name, deadline=deadline)
         deadline_model = _DeadlineBoundModel(self.model, deadline, telemetry_context)
+        selected_item_hint = (
+            " The client selected item " + json.dumps(request.selected_item_ref)
+            + " as context only; it is not authorization and may be stale or invalid."
+            if request.selected_item_ref is not None else ""
+        )
         agent = Agent(
             deadline_model,
             deps_type=_PydanticRunDeps,
@@ -268,10 +435,13 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             ],
             instructions=(
                 f"{self.system_prompt}\n"
-                "Use only the scoped read-only get_current_plan tool for plan facts. "
+                "Use only the scoped read-only tools for safe trip and plan facts. "
                 "Read a plan item during this run before suggesting a change. "
+                "Before finding a replacement, read the Current Plan and use a returned item id. "
+                "Replacement fields must exactly match a replacement tool candidate. "
                 "Return a typed reply, clarification, or suggested change. "
                 "Never write data or claim a change was applied."
+                f"{selected_item_hint}"
             ),
             retries=request.limits.guard_reject_limit,
             # PR-01C owns tool timing. Do not layer Pydantic AI's independent
@@ -287,51 +457,91 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
         ) -> dict[str, object]:
             """Read the Current Plan for a day in the capability-bound trip."""
 
-            tool = ctx.deps.tools_by_name["get_current_plan"]
             try:
-                tool_started_at = ctx.deps.deadline.before_tool()
-            except Exception:
-                # The handler has not started.  Do not turn a deadline-gate
-                # rejection into a handler failure.
-                _emit_pydantic_tool_call(
-                    telemetry_context,
-                    "get_current_plan",
-                    ToolDispatchStatus.DISPATCH_FAILED,
-                )
-                raise
-            try:
-                output = tool.invoke(day=day)
-                # If a blocking read completed late, this raises before Pydantic
-                # can incorporate its result into a subsequent model request.
-                ctx.deps.deadline.after_tool(tool_started_at)
+                output = _invoke_scoped_tool(ctx.deps, "get_current_plan", {"day": day}, telemetry_context)
             except AgentToolDeadlineExceeded:
-                # A PR-01C deadline is terminal for this run. Pydantic's own
-                # tool timeout is disabled and this tool has no Pydantic retry
-                # budget, so the adapter re-surfaces this as tool_timeout.
-                ctx.deps.tool_timeout_observed = True
-                _emit_pydantic_tool_call(telemetry_context, "get_current_plan", ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED)
                 raise
-            except Exception:
-                _emit_pydantic_tool_call(telemetry_context, "get_current_plan", ToolDispatchStatus.HANDLER_FAILED)
-                raise
-            _record_read_item_refs(output, ctx.deps.read_item_refs)
-            ctx.deps.tool_trajectory.append("get_current_plan")
             if not isinstance(output, dict):
-                _emit_pydantic_tool_call(
-                    telemetry_context,
-                    "get_current_plan",
-                    ToolDispatchStatus.HANDLER_FAILED,
-                )
                 raise ModelRetry("The scoped plan read returned an invalid safe projection.")
-            _emit_pydantic_tool_call(
-                telemetry_context,
-                "get_current_plan",
-                ToolDispatchStatus.HANDLER_SUCCEEDED,
-            )
-            ctx.deps.tool_execution_evidence.append(
-                ToolExecutionEvidence(tool_name="get_current_plan", status="succeeded")
-            )
+            read_item_refs = _record_read_item_refs(output, ctx.deps.read_item_refs)
+            ctx.deps.read_item_refs_by_day_query[_day_query_key(day)] = read_item_refs
             return output
+
+        if "get_trip_facts" in tools_by_name:
+            @agent.tool(retries=0)
+            def get_trip_facts(ctx: RunContext[_PydanticRunDeps]) -> dict[str, object]:
+                """Read only safe facts for the capability-bound trip."""
+                output = _invoke_scoped_tool(ctx.deps, "get_trip_facts", {}, telemetry_context)
+                if not isinstance(output, dict):
+                    raise ModelRetry("The scoped trip facts projection was invalid.")
+                return output
+
+        if "find_replacement_place" in tools_by_name:
+            @agent.tool(retries=0)
+            def find_replacement_place(
+                ctx: RunContext[_PydanticRunDeps],
+                item_id: Annotated[str, Field(strict=True, min_length=1)],
+                keywords: list[Annotated[str, Field(strict=True, min_length=1)]] | None = None,
+            ) -> dict[str, object]:
+                """Find approved replacement candidates for a read Current Plan item."""
+                output = _invoke_scoped_tool(
+                    ctx.deps, "find_replacement_place", {"item_id": item_id, "keywords": keywords or []},
+                    telemetry_context, require_plan=True, require_item=True,
+                )
+                if not isinstance(output, dict):
+                    raise ModelRetry("The scoped replacement lookup was invalid.")
+                return output
+
+        if "propose_options" in tools_by_name:
+            @agent.tool(retries=0)
+            def propose_options(
+                ctx: RunContext[_PydanticRunDeps],
+                conflict_description: Annotated[
+                    str, Field(strict=True, min_length=1, max_length=_MAX_CONFLICT_DESCRIPTION_LENGTH)
+                ],
+                day: Annotated[str, Field(strict=True, min_length=1, max_length=_MAX_OPTION_DAY_LENGTH)] = "all",
+                conflict_item_ids: Annotated[
+                    list[Annotated[str, Field(strict=True, min_length=1, max_length=128)]],
+                    Field(max_length=_MAX_CONFLICT_ITEM_IDS),
+                ] | None = None,
+                suggestions: Annotated[
+                    list[_RuntimeOptionSuggestion], Field(max_length=_MAX_OPTION_SUGGESTIONS),
+                ] | None = None,
+            ) -> dict[str, object]:
+                """Return bounded advisory options for a scoped planning conflict."""
+                grounded_conflict_ids = tuple(conflict_item_ids or ())
+                grounded_suggestion_item_ids = tuple(
+                    suggestion.item_id for suggestion in (suggestions or [])
+                )
+                output = _invoke_scoped_tool(
+                    ctx.deps,
+                    "propose_options",
+                    {
+                        "conflict_description": conflict_description,
+                        "day": day,
+                        "conflict_item_ids": list(grounded_conflict_ids),
+                        "suggestions": [
+                            suggestion.model_dump(exclude_none=True)
+                            for suggestion in (suggestions or [])
+                        ],
+                    },
+                    telemetry_context,
+                    require_plan=True,
+                    # A model-authored suggestion is no less consequential than
+                    # a declared conflict id: the downstream handler can turn
+                    # either into an advisory option. Both must be facts the
+                    # scoped Current Plan returned during this execution.
+                    required_item_ids=(
+                        *grounded_conflict_ids,
+                        *grounded_suggestion_item_ids,
+                    ),
+                )
+                if not isinstance(output, dict):
+                    raise ModelRetry("The scoped option result was invalid.")
+                ctx.deps.candidate_options.extend(
+                    _options_from_tool(output, ctx.deps.tool_execution_evidence)
+                )
+                return output
 
         @agent.output_validator
         def validate_output(
@@ -342,6 +552,10 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 if output.item_ref not in ctx.deps.read_item_refs:
                     raise ModelRetry(
                         "Read the proposed item through scoped get_current_plan before suggesting it."
+                    )
+                if not _replacement_patch_is_evidenced(output.safe_patch, ctx.deps.tool_execution_evidence):
+                    raise ModelRetry(
+                        "Replacement fields must exactly match a candidate from the scoped replacement lookup."
                     )
             return output
 
@@ -371,7 +585,7 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             return RuntimeResult(
                 reply=output.reply,
                 outcome=AgentClarification(),
-                candidate_options=(),
+                candidate_options=tuple(ctx_option for ctx_option in deps.candidate_options),
                 observation=observation,
                 tool_execution_evidence=tuple(deps.tool_execution_evidence),
             )
@@ -382,14 +596,14 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                     item_ref=output.item_ref,
                     safe_patch=dict(output.safe_patch),
                 ),
-                candidate_options=(),
+                candidate_options=tuple(deps.candidate_options),
                 observation=observation,
                 tool_execution_evidence=tuple(deps.tool_execution_evidence),
             )
         return RuntimeResult(
             reply=output.reply,
             outcome=AgentReplyOnly(),
-            candidate_options=(),
+            candidate_options=tuple(deps.candidate_options),
             observation=observation,
             tool_execution_evidence=tuple(deps.tool_execution_evidence),
         )
@@ -420,12 +634,13 @@ def _history_messages(history: tuple[RuntimeHistoryTurn, ...]) -> list[ModelRequ
     return messages
 
 
-def _record_read_item_refs(output: object, destination: set[str]) -> None:
+def _record_read_item_refs(output: object, destination: set[str]) -> set[str]:
+    recorded: set[str] = set()
     if not isinstance(output, dict):
-        return
+        return recorded
     days = output.get("days")
     if not isinstance(days, list):
-        return
+        return recorded
     for day in days:
         if not isinstance(day, dict):
             continue
@@ -435,6 +650,8 @@ def _record_read_item_refs(output: object, destination: set[str]) -> None:
         for item in items:
             if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
                 destination.add(item["id"])
+                recorded.add(item["id"])
+    return recorded
 
 
 def _reported_total_tokens(usage: object) -> int | None:
@@ -517,7 +734,7 @@ def _emit_pydantic_tool_call(
                 ToolDispatchStatus.HANDLER_FAILED,
                 ToolDispatchStatus.TOOL_DEADLINE_EXCEEDED,
             },
-            cache_hit=False,
+            cache_hit=status is ToolDispatchStatus.CACHE_HIT,
         ))
     except Exception:
         return

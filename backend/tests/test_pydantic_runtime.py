@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from evals.runner import _independent_session_factory, _synthetic_fixture
 
@@ -44,8 +44,16 @@ from app.agents.runtime_contract import (
     RuntimeLimits,
     RuntimeResult,
     RuntimeRequest,
+    ReplacementCandidateEvidence,
+    ToolExecutionEvidence,
 )
-from app.db.models import ChangeProposal, PlanItem, Vote
+from app.db.models import ChangeProposal, PlanItem, TripMembership, Vote
+from app.domain.places import service as place_service
+from app.domain.places.service import PlannerPlace
+from app.domain.preview_apply import PreviewRequest, RevisionBracketedPreview
+from app.domain.conversations import context as conversation_context
+from app.domain.conversations import service as conversation_service
+from app.domain.conversations.runtime import ConversationRuntimeCoordinator
 from app.observability.telemetry import ModelCallCompleted, TelemetryContext, ToolCallCompleted
 
 
@@ -102,16 +110,32 @@ class _SyntheticCapability:
         return operation(self.tools)
 
 
-def _request(*, max_rounds: int = 3, max_total_tokens: int | None = 1_000) -> RuntimeRequest:
+@dataclass
+class _NamedReadTool:
+    name: str
+    handler: Any
+    description: str = "Scoped synthetic tool."
+    parameters: dict[str, object] = field(default_factory=dict)
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def invoke(self, **arguments: object) -> object:
+        self.calls.append(arguments)
+        return self.handler(**arguments)
+
+
+def _request(
+    *, max_rounds: int = 3, max_total_tokens: int | None = 1_000,
+    max_tokens: int | None = 128, selected_item_ref: str | None = "scoped-item",
+) -> RuntimeRequest:
     return RuntimeRequest(
         message="Please help with the Current Plan.",
         history=(RuntimeHistoryTurn(role="user", text="Earlier question"),),
-        selected_item_ref="scoped-item",
+        selected_item_ref=selected_item_ref,
         request_id="pydantic-runtime-test",
         limits=RuntimeLimits(
             max_rounds=max_rounds,
             max_total_tokens=max_total_tokens,
-            max_tokens=128,
+            max_tokens=max_tokens,
             guard_reject_limit=1,
         ),
     )
@@ -222,6 +246,582 @@ def test_suggested_change_requires_same_run_scoped_read_and_has_no_write_authori
         ("get_current_plan", "succeeded"),
     ]
     assert isinstance(result.tool_execution_evidence, tuple)
+
+
+@pytest.mark.parametrize("selected_item_ref", ["scoped-item", "forged-client-item"])
+def test_selected_item_is_a_non_authoritative_hint(selected_item_ref: str):
+    capability = _SyntheticCapability()
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart(
+            "runtime_suggested_change",
+            {
+                "output_kind": "suggested_change", "reply": "Use the plan-backed item.",
+                "item_ref": "scoped-item", "safe_patch": {"start_hour": 16.0},
+            },
+        )])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(selected_item_ref=selected_item_ref), capability, execution=_execution()
+    )
+
+    assert isinstance(result.outcome, AgentSuggestedChange)
+    assert result.outcome.item_ref == "scoped-item"
+    assert capability.tools[0].calls == [{"day": "all"}]
+
+
+def test_pydantic_replacement_uses_scoped_handler_and_returns_trusted_evidence():
+    plan = _SyntheticReadTool()
+    replacement = _NamedReadTool(
+        name="find_replacement_place",
+        handler=lambda item_id, keywords: {
+            "candidates": [{
+                "candidate_id": "trusted-cafe", "title": "Trusted Cafe", "place": "River North",
+                "lat": 41.9, "lng": -87.6, "price_per_person": None,
+            }]
+        },
+    )
+    capability = _SyntheticCapability(tools=(plan, replacement))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        if calls == 2:
+            return ModelResponse(parts=[ToolCallPart(
+                "find_replacement_place", {"item_id": "scoped-item", "keywords": ["cafe"]},
+            )])
+        return ModelResponse(parts=[ToolCallPart("runtime_suggested_change", {
+            "output_kind": "suggested_change", "reply": "Try Trusted Cafe.", "item_ref": "scoped-item",
+            "safe_patch": {"title": "Trusted Cafe", "place": "River North", "lat": 41.9, "lng": -87.6},
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+
+    assert replacement.calls == [{"item_id": "scoped-item", "keywords": ["cafe"]}]
+    assert isinstance(result.outcome, AgentSuggestedChange)
+    assert result.outcome.safe_patch["title"] == "Trusted Cafe"
+    evidence = next(entry for entry in result.tool_execution_evidence if entry.tool_name == "find_replacement_place")
+    assert evidence.replacement_candidates[0].candidate_id == "trusted-cafe"
+    assert isinstance(evidence.replacement_candidates, tuple)
+
+
+def test_replacement_evidence_price_matching_is_order_independent():
+    priced = ReplacementCandidateEvidence(
+        candidate_id="priced", title="Trusted Cafe", place="River North",
+        lat=41.9, lng=-87.6, price_per_person=25.0,
+    )
+    unpriced = ReplacementCandidateEvidence(
+        candidate_id="unpriced", title="Trusted Cafe", place="River North",
+        lat=41.9, lng=-87.6, price_per_person=None,
+    )
+    patch_without_price = {
+        "title": "Trusted Cafe", "place": "River North", "lat": 41.9, "lng": -87.6,
+    }
+    patch_with_price = {**patch_without_price, "price_per_person": 25.0}
+    patch_with_wrong_price = {**patch_without_price, "price_per_person": 30.0}
+
+    for candidates in ((priced, unpriced), (unpriced, priced)):
+        evidence = [ToolExecutionEvidence(
+            tool_name="find_replacement_place", status="succeeded", replacement_candidates=candidates,
+        )]
+        assert pydantic_runtime._replacement_patch_is_evidenced(patch_without_price, evidence)
+        assert pydantic_runtime._replacement_patch_is_evidenced(patch_with_price, evidence)
+        assert not pydantic_runtime._replacement_patch_is_evidenced(patch_with_wrong_price, evidence)
+
+    split_evidence = [
+        ToolExecutionEvidence(
+            tool_name="find_replacement_place", status="succeeded", replacement_candidates=(priced,),
+        ),
+        ToolExecutionEvidence(
+            tool_name="find_replacement_place", status="cache_hit", replacement_candidates=(unpriced,),
+        ),
+        ToolExecutionEvidence(tool_name="find_replacement_place", status="guard_rejected"),
+    ]
+    assert pydantic_runtime._replacement_patch_is_evidenced(patch_without_price, split_evidence)
+    assert not pydantic_runtime._replacement_patch_is_evidenced(
+        {**patch_without_price, "place": "Unknown"}, split_evidence,
+    )
+
+
+def test_pydantic_trip_facts_and_options_use_scoped_handlers_only():
+    plan = _SyntheticReadTool()
+    facts = _NamedReadTool(
+        name="get_trip_facts",
+        handler=lambda: {"destination": "Synthetic City", "member_count": 2},
+    )
+    options = _NamedReadTool(
+        name="propose_options",
+        handler=lambda conflict_description, day, conflict_item_ids, suggestions: {
+            "options": [
+                {
+                    "id": "move-later", "label": "Move later", "title": "Move museum later",
+                    "body": "Move the scoped stop later.", "tradeoff": "Dinner gets closer.",
+                    "item_id": "scoped-item", "patch": {"start_hour": 16.0},
+                },
+                {
+                    "id": "bad", "label": "Bad", "title": "Bad option", "body": "Bad.",
+                    "tradeoff": "Bad.", "item_id": "scoped-item", "patch": {"lat": 999},
+                },
+                {
+                    "id": "forged-venue", "label": "Forged", "title": "Forged venue",
+                    "body": "This must not become an option.", "tradeoff": "Unsafe provenance.",
+                    "item_id": "scoped-item",
+                    "patch": {"title": "Forged", "place": "Elsewhere", "lat": 41.0, "lng": -87.0},
+                },
+            ]
+        },
+    )
+    capability = _SyntheticCapability(tools=(plan, facts, options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_trip_facts", {})])
+        if calls == 2:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        if calls == 3:
+            return ModelResponse(parts=[ToolCallPart(
+                "propose_options", {"conflict_description": "The day is crowded.", "day": "all"},
+            )])
+        return ModelResponse(parts=[ToolCallPart(
+            "runtime_reply", {"output_kind": "reply_only", "reply": "Here are bounded options."},
+        )])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(max_rounds=4), capability, execution=_execution()
+    )
+
+    assert facts.calls == [{}]
+    assert options.calls == [{
+        "conflict_description": "The day is crowded.", "day": "all",
+        "conflict_item_ids": [], "suggestions": [],
+    }]
+    assert [(option.id, option.item_ref, option.safe_patch) for option in result.candidate_options] == [
+        ("move-later", "scoped-item", {"start_hour": 16.0}),
+    ]
+    assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
+        ("get_trip_facts", "succeeded"),
+        ("get_current_plan", "succeeded"),
+        ("propose_options", "succeeded"),
+    ]
+
+
+def test_pydantic_options_passes_grounded_conflict_ids_and_typed_suggestions():
+    plan = _SyntheticReadTool(plan={
+        "days": [{"items": [
+            {"id": "item-a", "title": "Museum", "start_hour": 14.0},
+            {"id": "item-b", "title": "Dinner", "start_hour": 19.0},
+            {"id": "unrelated-long", "title": "Unrelated", "start_hour": 9.0},
+        ]}],
+    })
+    options = _NamedReadTool(
+        name="propose_options",
+        handler=lambda conflict_description, day, conflict_item_ids, suggestions: {
+            "options": [
+                {
+                    "id": "keep", "label": "Keep current", "title": "Keep conflict items",
+                    "body": "Leave the named conflict unchanged.", "tradeoff": "The conflict remains.",
+                    "item_id": "item-a", "patch": {},
+                },
+                {
+                    "id": "suggested-1", "label": "Move museum", "title": "Move museum earlier",
+                    "body": "Move only the museum.", "tradeoff": "Less afternoon time.",
+                    "item_id": "item-a", "patch": {"start_hour": 12.0},
+                },
+                {
+                    "id": "suggested-2", "label": "Shorten dinner", "title": "Shorten dinner",
+                    "body": "Shorten only dinner.", "tradeoff": "Less dinner time.",
+                    "item_id": "item-b", "patch": {"duration_min": 60},
+                },
+            ]
+        },
+    )
+    capability = _SyntheticCapability(tools=(plan, options))
+    calls = 0
+    suggestions = [
+        {
+            "item_id": "item-a", "label": "Move museum", "title": "Move museum earlier",
+            "body": "Move only the museum.", "tradeoff": "Less afternoon time.", "start_hour": 12.0,
+        },
+        {
+            "item_id": "item-b", "label": "Shorten dinner", "title": "Shorten dinner",
+            "body": "Shorten only dinner.", "tradeoff": "Less dinner time.", "duration_min": 60,
+        },
+    ]
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        if calls == 2:
+            return ModelResponse(parts=[ToolCallPart("propose_options", {
+                "conflict_description": "Museum and dinner are too close.", "day": "all",
+                "conflict_item_ids": ["item-a", "item-b"], "suggestions": suggestions,
+            })])
+        return ModelResponse(parts=[ToolCallPart(
+            "runtime_reply", {"output_kind": "reply_only", "reply": "Here are focused options."},
+        )])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(max_rounds=4, max_tokens=512), capability, execution=_execution()
+    )
+
+    assert options.calls == [{
+        "conflict_description": "Museum and dinner are too close.", "day": "all",
+        "conflict_item_ids": ["item-a", "item-b"], "suggestions": suggestions,
+    }]
+    assert calls == 3
+    assert result.observation.failure is None
+    assert [(option.id, option.item_ref, option.safe_patch) for option in result.candidate_options] == [
+        ("keep", "item-a", {}),
+        ("suggested-1", "item-a", {"start_hour": 12.0}),
+        ("suggested-2", "item-b", {"duration_min": 60}),
+    ]
+
+
+def test_pydantic_options_rejects_foreign_conflict_ids_before_handler_call():
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart("propose_options", {
+            "conflict_description": "Foreign conflict.", "conflict_item_ids": ["foreign-item"],
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+
+    assert options.calls == []
+    assert result.observation.failure is not None
+    assert not any(entry.tool_name == "propose_options" and entry.status in {"succeeded", "cache_hit"} for entry in result.tool_execution_evidence)
+
+
+def test_pydantic_options_rejects_specific_conflict_outside_its_read_day():
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart("propose_options", {
+            "conflict_description": "Specific conflict on another day.",
+            "day": "day 2",
+            "conflict_item_ids": ["scoped-item"],
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+
+    assert options.calls == []
+    assert result.observation.failure is not None
+    assert not any(entry.tool_name == "propose_options" and entry.status in {"succeeded", "cache_hit"} for entry in result.tool_execution_evidence)
+
+
+@pytest.mark.parametrize(
+    ("case", "day", "suggestions"),
+    [
+        (
+            "same_trip_unread",
+            "all",
+            [{
+                "item_id": "same-trip-but-unread", "label": "Move it", "title": "Move it",
+                "body": "This item was not returned by Current Plan.", "tradeoff": "None.",
+                "start_hour": 12.0,
+            }],
+        ),
+        (
+            "foreign",
+            "all",
+            [{
+                "item_id": "foreign-trip-item", "label": "Move it", "title": "Move it",
+                "body": "This id is not grounded.", "tradeoff": "None.", "start_hour": 12.0,
+            }],
+        ),
+        (
+            "cross_day",
+            "day 2",
+            [{
+                "item_id": "scoped-item", "label": "Move it", "title": "Move it",
+                "body": "A whole-plan read cannot ground a named day.", "tradeoff": "None.",
+                "start_hour": 12.0,
+            }],
+        ),
+        (
+            "one_of_many_ungrounded",
+            "all",
+            [
+                {
+                    "item_id": "scoped-item", "label": "Grounded", "title": "Grounded",
+                    "body": "This id is safe.", "tradeoff": "None.", "start_hour": 12.0,
+                },
+                {
+                    "item_id": "unread-item", "label": "Ungrounded", "title": "Ungrounded",
+                    "body": "One unsafe id rejects the complete call.", "tradeoff": "None.",
+                    "start_hour": 13.0,
+                },
+            ],
+        ),
+    ],
+)
+def test_pydantic_options_rejects_ungrounded_suggestion_items_before_handler_call(
+    case: str, day: str, suggestions: list[dict[str, object]],
+):
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart("propose_options", {
+            "conflict_description": f"Ungrounded suggestion: {case}.",
+            "day": day,
+            "suggestions": suggestions,
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(), capability, execution=_execution(),
+    )
+
+    assert options.calls == []
+    assert result.observation.failure is not None
+    assert not any(
+        entry.tool_name == "propose_options" and entry.status in {"succeeded", "cache_hit"}
+        for entry in result.tool_execution_evidence
+    )
+
+
+def test_pydantic_options_rejects_oversized_payload_before_handler_call():
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart("propose_options", {
+            "conflict_description": "x" * 1_001,
+            "conflict_item_ids": ["scoped-item"] * 5,
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+
+    assert options.calls == []
+    assert result.observation.failure is not None
+    assert not any(entry.tool_name == "propose_options" and entry.status == "succeeded" for entry in result.tool_execution_evidence)
+
+
+def test_pydantic_real_options_handler_keeps_a_named_conflict_off_unrelated_longest_item(
+    db: Session,
+):
+    """Pydantic forwards grounded ids; existing handler retains targeting/domain validation."""
+    with _synthetic_fixture(db) as fixture:
+        session_factory = _independent_session_factory(db)
+        with session_factory.begin() as setup_db:
+            unrelated = PlanItem(
+                plan_id=fixture["items"]["art"].plan_id,
+                day_index=1,
+                day_date=fixture["items"]["art"].day_date,
+                start_hour=8.0,
+                duration_min=600,
+                title="Unrelated longest item",
+                place="Elsewhere",
+                settledness="loose",
+            )
+            setup_db.add(unrelated)
+            setup_db.flush()
+            unrelated_id = unrelated.id
+        capability = LegacyReadTripCapability(
+            trip_id=fixture["trip"].id,
+            actor_membership_id=fixture["memberships"]["organizer"].id,
+            session_factory=session_factory,
+        )
+        art_id = fixture["items"]["art"].id
+        dinner_id = fixture["items"]["dinner"].id
+        calls = 0
+
+        def scripted_model(_messages, _info):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+            if calls == 2:
+                return ModelResponse(parts=[ToolCallPart("propose_options", {
+                    "conflict_description": "The museum and dinner are too close.",
+                    "day": "all",
+                    "conflict_item_ids": [art_id, dinner_id],
+                    "suggestions": [{
+                        "item_id": art_id,
+                        "label": "Move museum earlier",
+                        "title": "Move the museum earlier",
+                        "body": "Move only the museum to 9 AM.",
+                        "tradeoff": "The group starts its museum visit earlier.",
+                        "start_hour": 9.0,
+                    }, {
+                        "item_id": art_id,
+                        "label": "Shorten museum visit",
+                        "title": "Shorten the museum visit",
+                        "body": "Keep the museum but reduce its duration to 90 minutes.",
+                        "tradeoff": "The group has less time inside the museum.",
+                        "duration_min": 90,
+                    }],
+                })])
+            return ModelResponse(parts=[ToolCallPart(
+                "runtime_reply", {"output_kind": "reply_only", "reply": "Here are reviewed options."},
+            )])
+
+        try:
+            result = _runtime(FunctionModel(scripted_model)).run(
+                _request(max_rounds=4, max_total_tokens=12_000, max_tokens=4_096),
+                capability,
+                execution=_execution(),
+            )
+        finally:
+            with session_factory.begin() as cleanup_db:
+                extra = cleanup_db.get(PlanItem, unrelated_id)
+                if extra is not None:
+                    cleanup_db.delete(extra)
+
+    assert result.observation.failure is None
+    assert calls == 3
+    assert result.candidate_options
+    assert {option.item_ref for option in result.candidate_options} == {art_id}
+    assert all(option.item_ref != unrelated_id for option in result.candidate_options)
+    assert any(option.safe_patch == {"start_hour": 9.0} for option in result.candidate_options)
+    assert any(option.safe_patch == {"duration_min": 90} for option in result.candidate_options)
+
+
+def test_pydantic_tool_cache_is_limited_to_valid_same_run_projections(monkeypatch):
+    plan = _SyntheticReadTool()
+    capability = _SyntheticCapability(tools=(plan,))
+    emitted: list[object] = []
+    monkeypatch.setattr(
+        pydantic_runtime,
+        "emit_event_safely",
+        lambda factory: emitted.append(factory()) or True,
+    )
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart(
+            "runtime_suggested_change",
+            {
+                "output_kind": "suggested_change", "reply": "Move it later.",
+                "item_ref": "scoped-item", "safe_patch": {"start_hour": 16.0},
+            },
+        )])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(),
+        capability,
+        execution=AgentExecutionConfig(
+            request_timeout_seconds=0.5,
+            provider_timeout_seconds=0.25,
+            tool_timeout_seconds=0.1,
+            telemetry_context=TelemetryContext(
+                request_id="request_12345678",
+                trace_id="trace_12345678",
+                execution_id="execution_12345678",
+            ),
+        ),
+    )
+
+    assert plan.calls == [{"day": "all"}]
+    assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
+        ("get_current_plan", "succeeded"),
+        ("get_current_plan", "cache_hit"),
+    ]
+    tool_events = [event for event in emitted if isinstance(event, ToolCallCompleted)]
+    cache_event = next(
+        event for event in tool_events
+        if event.tool_dispatch_status.value == "cache_hit"
+    )
+    assert cache_event.cache_hit is True
+    assert cache_event.handler_executed is False
+
+
+def test_pydantic_replacement_before_plan_is_guard_rejected_without_handler_call():
+    replacement = _NamedReadTool(name="find_replacement_place", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), replacement))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("find_replacement_place", {"item_id": "scoped-item", "keywords": []})])
+        return ModelResponse(parts=[ToolCallPart("runtime_reply", {"output_kind": "reply_only", "reply": "Please read the plan first."})])
+
+    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+
+    assert replacement.calls == []
+    assert result.observation.failure is not None
+    assert not any(entry.tool_name == "find_replacement_place" and entry.status in {"succeeded", "cache_hit"} for entry in result.tool_execution_evidence)
+
+
+def test_pydantic_replacement_unknown_item_is_guard_rejected_without_handler_call():
+    plan = _SyntheticReadTool()
+    replacement = _NamedReadTool(name="find_replacement_place", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(plan, replacement))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart(
+            "find_replacement_place", {"item_id": "foreign-item", "keywords": []},
+        )])
+
+    result = _runtime(FunctionModel(scripted_model)).run(_request(), capability, execution=_execution())
+
+    assert replacement.calls == []
+    assert result.observation.failure is not None
+    assert not any(entry.tool_name == "find_replacement_place" and entry.status in {"succeeded", "cache_hit"} for entry in result.tool_execution_evidence)
+
+
+@pytest.mark.parametrize(
+    "unsafe_patch",
+    [
+        {"unexpected": "value"},
+        {"start_hour": True},
+        {"start_hour": float("nan")},
+        {"price_per_person": float("inf")},
+        {"lat": 91},
+        {"day_date": "not-a-date"},
+        {"title": "Only title"},
+        {"start_hour": {"nested": 1}},
+    ],
+)
+def test_pydantic_patch_validation_rejects_unsafe_values(unsafe_patch: dict[str, object]):
+    with pytest.raises(ValueError):
+        pydantic_runtime._validated_safe_patch(unsafe_patch)
 
 
 @pytest.mark.parametrize(
@@ -449,6 +1049,141 @@ def test_adapter_uses_common_capability_with_independent_session_and_no_durable_
         assert worker_sessions[0] is not db
         assert worker_connection_is_independent == [True]
         assert closed.is_set()
+
+
+def test_pydantic_real_scoped_replacement_evidence_reaches_revision_bracketed_preview(
+    db: Session, monkeypatch: pytest.MonkeyPatch,
+):
+    """FunctionModel -> real scoped handler -> detached evidence -> real Preview."""
+    with _synthetic_fixture(db) as fixture:
+        session_factory = _independent_session_factory(db)
+        with session_factory.begin() as ready_db:
+            membership = ready_db.get(TripMembership, fixture["memberships"]["organizer"].id)
+            assert membership is not None
+            membership.status = "joined"
+        candidate = PlannerPlace(
+            candidate_id="test:trusted-cafe", name="Trusted Cafe", location="River North",
+            latitude=41.9, longitude=-87.6, category="catering.cafe", address=None,
+            image_url=None, opening_hours="24/7",
+        )
+        monkeypatch.setattr(
+            place_service, "places_for_replacement", lambda _db, _destination: (candidate,),
+        )
+        calls = 0
+
+        def scripted_model(_messages, _info):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+            if calls == 2:
+                return ModelResponse(parts=[ToolCallPart(
+                    "find_replacement_place", {"item_id": fixture["items"]["art"].id, "keywords": ["cafe"]},
+                )])
+            return ModelResponse(parts=[ToolCallPart(
+                "runtime_suggested_change",
+                {
+                    "output_kind": "suggested_change", "reply": "Try Trusted Cafe.",
+                    "item_ref": fixture["items"]["art"].id,
+                    "safe_patch": {
+                        "title": "Trusted Cafe", "place": "River North", "lat": 41.9, "lng": -87.6,
+                    },
+                },
+            )])
+
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.delegate = _runtime(FunctionModel(scripted_model))
+                self.result: RuntimeResult | None = None
+
+            def run(self, request, capability, *, execution):  # type: ignore[no-untyped-def]
+                self.result = self.delegate.run(request, capability, execution=execution)
+                return self.result
+
+        runtime = RecordingRuntime()
+        preview = RevisionBracketedPreview(
+            session_factory=session_factory, runtime=runtime,
+            execution=_execution(), runtime_limits=RuntimeLimits(max_rounds=4, max_total_tokens=1_000),
+        ).preview(PreviewRequest(
+            trip_id=fixture["trip"].id,
+            actor_membership_id=fixture["memberships"]["organizer"].id,
+            message="Replace the museum with a cafe.",
+            selected_item_id=fixture["items"]["art"].id,
+        ))
+
+        assert runtime.result is not None
+        evidence = next(
+            entry for entry in runtime.result.tool_execution_evidence
+            if entry.tool_name == "find_replacement_place"
+        )
+        assert evidence.status == "succeeded"
+        assert evidence.replacement_candidates[0].candidate_id == "test:trusted-cafe"
+        assert preview.candidate is not None
+        assert preview.candidate.patch == {
+            "title": "Trusted Cafe", "place": "River North", "lat": 41.9, "lng": -87.6,
+        }
+
+
+def test_pydantic_runtime_persists_preview_options_through_durable_coordinator(
+    db: Session, trip_setup: dict,
+):
+    """Exercise durable Context -> Pydantic -> Preview -> fenced option persistence."""
+    owner = trip_setup["organizer"]
+    owner.status = "joined"
+    now = conversation_service.utcnow()
+    conversation = conversation_service.create_or_discover(
+        db, trip_id=trip_setup["trip"].id, membership_id=owner.id,
+        scope="plan_assistant", context_key=f'item:{trip_setup["item"].id}', now=now,
+    )
+    submission = conversation_service.submit_message(
+        db, trip_id=trip_setup["trip"].id, membership_id=owner.id,
+        conversation_id=conversation.id, idempotency_key="pydantic-options",
+        text="The day is crowded; show alternatives.",
+        selected_plan_item_id=trip_setup["item"].id, now=now,
+    )
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        if calls == 2:
+            return ModelResponse(parts=[ToolCallPart(
+                "propose_options", {"conflict_description": "The day is crowded.", "day": "all"},
+            )])
+        return ModelResponse(parts=[ToolCallPart(
+            "runtime_reply", {"output_kind": "reply_only", "reply": "Here are safe alternatives."},
+        )])
+
+    factory = sessionmaker(
+        bind=db.connection(), future=True, join_transaction_mode="create_savepoint",
+    )
+    coordinator = ConversationRuntimeCoordinator(
+        session_factory=factory,
+        runtime_factory=lambda: _runtime(FunctionModel(scripted_model)),
+        execution=_execution(),
+        budget=conversation_context.ContextBudget(10_000, 100, 100),
+        runtime_limits=RuntimeLimits(max_rounds=4, max_total_tokens=1_000),
+    )
+    result = coordinator.execute(
+        identity=conversation_context.ExecutionIdentity(
+            trip_setup["trip"].id, owner.id, conversation.id, submission.submission_id,
+            submission.attempt_number, submission.fence,
+        ),
+        now=now,
+    )
+    history = conversation_service.history_projection(
+        db, trip_id=trip_setup["trip"].id, membership_id=owner.id,
+        conversation_id=conversation.id, before=None, limit=20, now=now,
+    )
+
+    assert result.state == "completed"
+    assistant = next(message for message in history if message.role == "assistant")
+    assert assistant.content == "Here are safe alternatives."
+    assert assistant.options
+    assert all(option.target_plan_item_id == trip_setup["item"].id for option in assistant.options)
+    assert all(option.plan_revision == trip_setup["plan"].revision for option in assistant.options)
 
 
 def test_blocking_scoped_tool_maps_to_tool_timeout_without_consuming_late_result():

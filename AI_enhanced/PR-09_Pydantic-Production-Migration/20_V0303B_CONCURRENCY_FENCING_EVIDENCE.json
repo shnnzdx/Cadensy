@@ -1,0 +1,200 @@
+{
+  "schema_version": "cadensy.v0303b.concurrency-fencing-evidence.v1",
+  "generated_at_utc": "2026-10-23T21:05:29Z",
+  "sanitization": {
+    "contains_credentials": false,
+    "contains_database_url": false,
+    "contains_raw_user_messages": false,
+    "contains_provider_payloads": false
+  },
+  "repository": {
+    "worktree_branch": "codex/v0303b-pydantic-concurrency-fencing",
+    "baseline_commit": "b1981d849e24e9c88a4ccf997c8831addbd4a48b",
+    "baseline_parent": "8012dce80d5d8ecd30906192311d685ed1d9e13f",
+    "production_code_modified": false,
+    "stage03a_worktree_modified": false,
+    "commit_created": false,
+    "push_performed": false,
+    "pr31_modified": false,
+    "deployment_performed": false
+  },
+  "execution_environment": {
+    "database": "fresh task-owned PostgreSQL, loopback-only, disposable",
+    "environment": {
+      "APP_ENV": "test",
+      "MOCK_AI": "1",
+      "DISABLE_SCHEDULER": "1",
+      "DEV_ALLOW_MEMBERSHIP_HEADER": "0"
+    },
+    "provider_network_calls": false,
+    "pydantic_boundary": "local deterministic FunctionModel"
+  },
+  "source_sha256": {
+    "backend/app/domain/conversations/service.py": "d477b1c2b9f5a0ed79c5c249b6d3b641c239199fef55af083a21e09e235b28c9",
+    "backend/app/domain/conversations/context.py": "e5007801d27272c3f5abdfc05640e0c39225d844270e5e4e4e1a007a50fa05e1",
+    "backend/app/domain/conversations/runtime.py": "71d6b2d47c044c20281fa88642f28b033ab8beecf1503d710959ccdcd2eab29c",
+    "backend/app/domain/preview_apply.py": "ad5d290cbbdc9178f01aad806e99e43057ddf63ba0716a0fb7e4190e9d2998ab",
+    "backend/app/agents/pydantic_runtime.py": "d36dee9c4da0860be25bc7809367f7fbcb33533c363ee38950268fe711eb0877",
+    "backend/app/agents/execution.py": "587631cacd4e705952f6ca05829e26206360ba350b1319db28a246ff31aac338",
+    "backend/tests/test_pr06b2_conversation_concurrency_postgres.py": "8d9c383c5688838b5e08cb66f3b885fb0ae96523e391dbbc4124e2c1b4d7005b",
+    "backend/tests/test_pr06b3_runtime.py": "1eb674d32cbc267dd22d4fa46c47daf8255c913d0c34b623236c70a2d27cd74e",
+    "backend/tests/test_pydantic_runtime.py": "2acd28e09d35182d926f0da8217f71eb6dbe61ec03258fb6425fdec5fa905548",
+    "backend/tests/test_pydantic_durable_runtime_acceptance.py": "44971822a8802237a8504200e3d47b812587a31b0760bb14e4b0822e88022cde",
+    "backend/tests/test_pydantic_concurrency_fencing_acceptance.py": "3b7918eebc17a6c53c1d40eafad5488068a62d9738e81a8783b00bbef18e5f8d"
+  },
+  "scenarios": [
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_pydantic_same_key_replay_and_different_content_conflict",
+      "direct_pydantic_function_model": true,
+      "function_model_invocations": 1,
+      "submission_identity": "server-issued; redacted",
+      "attempt_fence_transitions": [[1, 1]],
+      "admission": {
+        "initial_execution_claimed": true,
+        "running_same_key_replay": true,
+        "running_same_key_execution_claimed": false,
+        "completed_same_key_execution_claimed": false,
+        "canonical_mismatch": "IdempotencyConflict"
+      },
+      "final_counts": { "user_messages": 1, "assistant_messages": 1, "options": 0 },
+      "coordinator_state": "completed",
+      "plan_mutation": false
+    },
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_pydantic_different_key_is_busy_while_first_execution_runs",
+      "direct_pydantic_function_model": true,
+      "function_model_invocations": 1,
+      "attempt_fence_transitions": [[1, 1]],
+      "competing_disposition": "ConversationBusy",
+      "final_counts": { "user_messages": 1, "assistant_messages": 1, "options": 0 },
+      "coordinator_state": "completed",
+      "plan_mutation": false,
+      "postgres_backend_pids": {
+        "worker": [7756, 8660, 19656, 31412, 49772],
+        "competing_submit": [50524],
+        "observer": [13136, 49832],
+        "required_disjointness_asserted": true
+      }
+    },
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_expired_lease_replay_and_recovery_key_advance_authority",
+      "direct_pydantic_function_model": false,
+      "attempt_fence_transitions": [[1, 1], [2, 2], [3, 3]],
+      "active_replay_execution_claimed": false,
+      "expired_same_key_replay_execution_claimed": true,
+      "recovery_key_replay_execution_claimed": false,
+      "final_counts": { "user_messages": 1, "assistant_messages": 0, "options": 0 },
+      "plan_mutation": false
+    },
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_concurrent_recovery_claims_grant_only_one_current_attempt",
+      "direct_pydantic_function_model": false,
+      "attempt_fence_transitions": [[1, 1], [2, 2]],
+      "recovery_claims": { "accepted": 1, "rejected_busy": 1, "execution_claims": 1 },
+      "final_counts": { "user_messages": 1, "assistant_messages": 0, "options": 0 },
+      "plan_mutation": false,
+      "postgres_backend_pids": { "claimants": [6768, 50100], "distinct_physical_connections_asserted": true }
+    },
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_stale_pydantic_completion_cannot_overwrite_recovery",
+      "direct_pydantic_function_model": true,
+      "function_model_invocations": { "old_attempt": 1, "current_attempt": 1 },
+      "attempt_fence_transitions": [[1, 1], [2, 2]],
+      "old_coordinator_state": "discarded",
+      "current_coordinator_state": "completed",
+      "final_counts": { "user_messages": 1, "assistant_messages": 1, "options": 0 },
+      "final_submission": { "attempt": 2, "fence": 2, "state": "completed" },
+      "plan_mutation": false,
+      "postgres_backend_pids": {
+        "pre_recovery_worker": [52568, 54104],
+        "recovery_mutator": [14068],
+        "post_recovery_worker": [23676, 28572, 38276, 48016, 48260, 50520, 50832, 53796],
+        "observer": [13204, 23184],
+        "required_disjointness_asserted": true
+      }
+    },
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_stale_pydantic_failure_cannot_overwrite_recovery",
+      "direct_pydantic_function_model": true,
+      "function_model_invocations": { "old_attempt": 1, "current_attempt": 1 },
+      "attempt_fence_transitions": [[1, 1], [2, 2]],
+      "old_coordinator_state": "discarded",
+      "old_runtime_failure": "controlled local exception",
+      "current_coordinator_state": "completed",
+      "final_counts": { "user_messages": 1, "assistant_messages": 1, "options": 0 },
+      "final_submission": { "attempt": 2, "fence": 2, "state": "completed" },
+      "plan_mutation": false,
+      "postgres_backend_pids": {
+        "pre_recovery_worker": [43088, 47672],
+        "recovery_mutator": [41440],
+        "post_recovery_worker": [5148, 15300, 22688, 23128, 28860, 43172, 51688, 52428],
+        "observer": [32636, 41052],
+        "required_disjointness_asserted": true
+      }
+    },
+    {
+      "node_id": "tests/test_pydantic_concurrency_fencing_acceptance.py::test_pydantic_request_timeout_discards_late_function_model_result",
+      "direct_pydantic_function_model": true,
+      "function_model_invocations": 1,
+      "deadline_scope": "request",
+      "runtime_failure_category": "request_timeout",
+      "late_result_consumed": false,
+      "late_function_model_return_observed": true,
+      "coordinator_state": "failed_or_discarded",
+      "final_counts": { "user_messages": 1, "assistant_messages": 0, "options": 0 },
+      "plan_mutation": false
+    }
+  ],
+  "test_runs": [
+    {
+      "command": "python -m pytest tests/test_pydantic_concurrency_fencing_acceptance.py -q -s",
+      "collected": 7,
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0
+    },
+    {
+      "command": "python -m pytest tests/test_pydantic_durable_runtime_acceptance.py -q",
+      "collected": 8,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0
+    },
+    {
+      "command": "python -m pytest tests/test_pr06b2_conversation_concurrency_postgres.py tests/test_pr06b3_runtime.py -q",
+      "collected": 15,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0
+    },
+    {
+      "command": "python -m pytest tests/test_pydantic_runtime.py tests/test_pydantic_composition.py tests/test_pydantic_ai_poc.py tests/test_b3_revision_bracketed_preview.py tests/test_telemetry_contract.py tests/test_telemetry_execution_wiring.py tests/test_telemetry_privacy.py -q",
+      "collected": 115,
+      "passed": 115,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0
+    },
+    {
+      "command": "python -m pytest tests/test_legacy_schema_compat.py tests/test_runtime_contract.py tests/test_runtime_composition.py -q",
+      "collected": 41,
+      "passed": 41,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "exit_code": 0
+    }
+  ],
+  "limitations": [
+    "No HTTP, browser, provider, or production acceptance is claimed.",
+    "The timeout test proves safe discard, not physical termination of a synchronous worker thread.",
+    "Full backend regression is deferred to Stage 03C because production code is unchanged."
+  ]
+}

@@ -73,7 +73,9 @@ def test_cooperative_async_worker_receives_local_cancellation_after_request_time
         run_agent_with_deadline(
             worker=cooperative_worker,
             config=AgentExecutionConfig(
-                request_timeout_seconds=0.01,
+                # This test asserts cooperative cancellation semantics, not a
+                # cold ThreadPool/async-event-loop startup benchmark.
+                request_timeout_seconds=0.1,
                 provider_timeout_seconds=0.01,
                 tool_timeout_seconds=0.01,
             ),
