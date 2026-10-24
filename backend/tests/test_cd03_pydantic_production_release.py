@@ -252,3 +252,31 @@ def test_workflow_is_manual_protected_and_has_required_safety_contracts():
         assert required in script
     for forbidden in ("get-secret-value", "get-parameter", "--with-decryption", "alembic upgrade", "aws rds", "aws ecs update-service --cluster ${ecs_cluster} --services"):
         assert forbidden not in script
+
+
+def test_activation_post_deployment_verification_is_covered_by_legacy_rollback_trap():
+    """Every Pydantic acceptance check must run inside the activation ERR trap."""
+    workflow = _workflow()
+    steps = workflow["jobs"]["execute"]["steps"]
+    activate = next(step for step in steps if step.get("id") == "activate")
+    activate_script = activate["run"].casefold()
+
+    assert "trap rollback_on_error err" in activate_script
+    for required_post_deploy_check in (
+        "describe-services",
+        "taskdefinition' /tmp/final-service.json",
+        "runningcount >= 1",
+        "pendingcount == 0",
+        "describe-target-health",
+        "/api/health",
+        "--validate-pydantic-profile",
+        "runtime_digest",
+    ):
+        assert required_post_deploy_check in activate_script
+
+    rollback_verification = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify service, target health, and runtime selector"
+    )
+    assert rollback_verification["if"] == "inputs.operation == 'rollback'"

@@ -239,10 +239,29 @@ jobs:
             --task-definition "${task_definition}" \
             --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null
           timeout 900 aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
+           # This verification intentionally remains in the ERR-trapped activation step.
+           # A failure after ECS reports stable must still restore the verified Legacy baseline.
+           aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
+           jq -e '.services | length == 1 and .[0].status == "ACTIVE"' /tmp/final-service.json >/dev/null
+           test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${task_definition}"
+           jq -e '.services[0].desiredCount >= 1 and .services[0].runningCount >= 1 and .services[0].pendingCount == 0' /tmp/final-service.json >/dev/null
+           jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/final-target-groups.txt
+           test -s /tmp/final-target-groups.txt
+           while read -r target_group; do
+             test -n "${target_group}"
+             aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/target-health.json
+             jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/target-health.json >/dev/null
+           done < /tmp/final-target-groups.txt
+           curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/health.json
+           jq -e '.ok == true' /tmp/health.json >/dev/null
+           aws ecs describe-task-definition --task-definition "${task_definition}" --output json > /tmp/final-task-definition.json
+           python scripts/cd01/prepare_pydantic_release_task_definition.py --input /tmp/final-task-definition.json --validate-pydantic-profile
+           image="${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
+           test "$(jq -r --arg name "${CONTAINER_NAME}" '.taskDefinition.containerDefinitions[] | select(.name == $name) | .image' /tmp/final-task-definition.json)" = "${image}"
           echo "task_definition=${task_definition}" >> "${GITHUB_OUTPUT}"
 
       - name: Verify service, target health, and runtime selector
-        if: inputs.operation != 'validate'
+        if: inputs.operation == 'rollback'
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
