@@ -139,6 +139,17 @@ export function usePlanInteractionRuntime({ currentTrip }) {
     setMenuOpen(null)
   }, [])
 
+  const openGlobalAssistant = useCallback(() => {
+    setDrawerItem({
+      id: null,
+      title: currentTrip.name || 'Current plan',
+      place: currentTrip.destination || 'Trip itinerary',
+      time: currentTrip.dates || 'Current plan',
+    })
+    setDrawerMode('global')
+    setMenuOpen(null)
+  }, [currentTrip])
+
   const closeDrawer = useCallback(() => setDrawerItem(null), [])
 
   const toggleBooked = useCallback(async item => {
@@ -228,6 +239,7 @@ export function usePlanInteractionRuntime({ currentTrip }) {
       submitComment,
       toggleMenu,
       openDrawer,
+      openGlobalAssistant,
       closeDrawer,
       toggleBooked,
     },
