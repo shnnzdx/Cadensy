@@ -84,12 +84,14 @@ async function browserApi(session, pathName, options = {}) {
   return { response: { status: result.status }, body: result.body };
 }
 async function login(browser, account) {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
   const page = await context.newPage();
   const calls = [];
+  const pageErrors = [];
   page.on('response', response => {
     if (response.url().includes('/api/')) calls.push({ url: response.url(), status: response.status(), method: response.request().method() });
   });
+  page.on('pageerror', error => pageErrors.push(error.message));
   await page.goto(`${web}/login`, { waitUntil: 'networkidle' });
   await page.locator('#email').fill(account.email);
   await page.locator('#password').fill(account.password);
@@ -99,7 +101,7 @@ async function login(browser, account) {
   await frame.locator('body').waitFor();
   const token = await page.evaluate(() => localStorage.getItem('tripsync:authToken'));
   assert.ok(token, 'real login must persist an Account token through session runtime');
-  return { context, page, frame, token, calls };
+  return { context, page, frame, token, calls, pageErrors };
 }
 async function openPersonal(session) {
   try {
@@ -115,6 +117,25 @@ async function openPersonal(session) {
   const input = session.frame.getByPlaceholder('Message Cadensy...');
   await input.waitFor({ state: 'visible', timeout: 20_000 });
   return input;
+}
+async function openGlobalPlanAssistant(session) {
+  const launch = session.frame.getByRole('button', { name: 'Ask Cadensy about this trip', exact: true });
+  if (await launch.count() === 0) {
+    const planLink = session.frame.getByRole('link', { name: 'Plan', exact: true });
+    if (await planLink.count()) await planLink.click();
+    else await session.frame.getByText('Review current plan', { exact: false }).first().click();
+  }
+  await launch.waitFor({ state: 'visible', timeout: 20_000 });
+  await launch.click();
+  const input = session.frame.getByPlaceholder('Ask Cadensy or request a change...');
+  await input.waitFor({ state: 'visible', timeout: 20_000 });
+  return input;
+}
+async function sendGlobalPlanAssistant(session, text) {
+  const input = await openGlobalPlanAssistant(session);
+  await input.fill(text);
+  await input.press('Enter');
+  await session.frame.getByText(`E2E assistant completion: ${text}`, { exact: true }).waitFor({ timeout: 25_000 });
 }
 async function sendPersonal(session, text) {
   const input = await openPersonal(session);
@@ -148,6 +169,37 @@ async function sendItemAssistant(session, text) {
   await input.press('Enter');
   await session.frame.getByText(`E2E assistant completion: ${text}`, { exact: true }).waitFor({ timeout: 25_000 });
 }
+async function exercisePlanMapLifecycle(session) {
+  if (await session.frame.getByRole('link', { name: 'Plan', exact: true }).count()) {
+    await session.frame.getByRole('link', { name: 'Plan', exact: true }).click();
+  } else {
+    await session.frame.getByText('Review current plan', { exact: false }).first().click();
+  }
+  const tabs = session.frame.locator('.mapDayTabs button');
+  for (let index = 0; index < await tabs.count(); index += 1) {
+    await tabs.nth(index).click();
+    await sleep(100);
+  }
+  const firstClosedDay = session.frame.locator('button.accordionHead[aria-expanded="false"]').first();
+  if (await firstClosedDay.count()) {
+    await firstClosedDay.click();
+    await firstClosedDay.click();
+  }
+  const ask = session.frame.locator('button[title="Ask Cadensy"]:visible').first();
+  await ask.waitFor({ state: 'visible', timeout: 20_000 });
+  await ask.evaluate(element => element.closest('.activityBlock')?.scrollIntoView({ block: 'center' }));
+  await ask.click();
+  await session.frame.locator('.assistantDrawer').waitFor({ state: 'visible', timeout: 20_000 });
+  await session.frame.locator('.assistantDrawer > header > button').click();
+  for (let index = 0; index < 2; index += 1) {
+    await session.frame.getByRole('link', { name: 'Chat', exact: true }).click();
+    await session.frame.getByRole('link', { name: 'Plan', exact: true }).click();
+  }
+  await session.page.reload({ waitUntil: 'networkidle' });
+  await session.frame.locator('body').waitFor();
+  await sleep(200);
+  assert.deepEqual(session.pageErrors, [], 'Plan map lifecycle must not emit browser page errors, including Leaflet _leaflet_pos');
+}
 
 await waitForHealth();
 await waitForFrontend();
@@ -164,6 +216,8 @@ try {
   } else {
     // J01-J03 retain the original browser-only personal-history proof.
     const org = await login(browser, fixture.organizer);
+    await exercisePlanMapLifecycle(org);
+    report('J11', 'PASS', 'All/day map switches, accordion, drawer, route switches, and rapid Plan/Chat navigation emit no Leaflet page error');
     await sendPersonal(org, 'J01 browser durable message');
     const orgMe = (await browserApi(org, '/api/me')).body;
     fixtureAssert('assert-scope', (await browserApi(org, `/api/trips/${fixture.trip_id}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'personal', context_key: 'personal' }) })).body.id, orgMe.membership_id, 'J01 browser durable message');
@@ -211,11 +265,21 @@ try {
       assert.equal(sent.response.status, 202);
       fixtureAssert('assert-scope', conversationId, orgMe.membership_id, text);
     }
+    await sendGlobalPlanAssistant(second, 'J07 global drawer identity');
+    await second.frame.locator('.assistantDrawer > header > button').click();
+    await openGlobalPlanAssistant(second);
+    await second.frame.getByText('J07 global drawer identity', { exact: true }).waitFor();
+    assert.equal(await second.frame.getByText('J07 item identity', { exact: true }).count(), 0);
+    assert.equal(await second.frame.getByText('J07 personal identity', { exact: true }).count(), 0);
+    await second.page.reload({ waitUntil: 'networkidle' });
+    await openGlobalPlanAssistant(second);
+    await second.frame.getByText('J07 global drawer identity', { exact: true }).waitFor();
     await second.page.reload({ waitUntil: 'networkidle' });
     await openPersonal(second);
     await second.frame.getByText('J07 personal identity', { exact: true }).waitFor();
     assert.equal(await second.frame.getByText('J07 global identity', { exact: true }).count(), 0);
-    report('J07', 'PASS', 'distinct Personal/Global/Item IDs persist isolated content and owner identity across a browser refresh');
+    assert.equal(await second.frame.getByText('J07 global drawer identity', { exact: true }).count(), 0);
+    report('J07', 'PASS', 'Global Drawer launches with global identity, restores after close/refresh, and remains isolated from Personal and Item history');
 
     // J09 verifies the server deletion is still effective after a real reload and login-backed read.
     await browserApi(second, `/api/trips/${fixture.trip_id}/conversations/${personal.body.id}`, { method: 'DELETE' });

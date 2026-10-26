@@ -49,6 +49,7 @@ export default function TripMap({ days, selectedItemId, onSelectItem, compact = 
   const mapRef = useRef(null)
   const layerRef = useRef(null)
   const containerRef = useRef(null)
+  const invalidateTimerRef = useRef(null)
   const baseItems = useMemo(() => flattenDays(days), [days])
 
   const mappedItems = useMemo(() => baseItems
@@ -79,6 +80,9 @@ export default function TripMap({ days, selectedItemId, onSelectItem, compact = 
     layerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
     return () => {
+      if (invalidateTimerRef.current !== null) window.clearTimeout(invalidateTimerRef.current)
+      invalidateTimerRef.current = null
+      layerRef.current?.clearLayers()
       map.remove()
       mapRef.current = null
       layerRef.current = null
@@ -90,12 +94,21 @@ export default function TripMap({ days, selectedItemId, onSelectItem, compact = 
     const layer = layerRef.current
     if (!map || !layer) return
 
-    window.setTimeout(() => map.invalidateSize(), 80)
+    if (invalidateTimerRef.current !== null) window.clearTimeout(invalidateTimerRef.current)
+    invalidateTimerRef.current = window.setTimeout(() => {
+      if (mapRef.current !== map) return
+      invalidateTimerRef.current = null
+      map.invalidateSize()
+    }, 80)
+    const invalidateTimer = invalidateTimerRef.current
     layer.clearLayers()
 
     if (!mappedItems.length) {
       map.setView([41.8781, -87.6298], 12)
-      return
+      return () => {
+        window.clearTimeout(invalidateTimer)
+        if (invalidateTimerRef.current === invalidateTimer) invalidateTimerRef.current = null
+      }
     }
 
     const points = mappedItems.map(item => item.coords)
@@ -124,6 +137,10 @@ export default function TripMap({ days, selectedItemId, onSelectItem, compact = 
 
     const bounds = L.latLngBounds(points)
     map.fitBounds(bounds, { padding: compact ? [20, 20] : [34, 34], maxZoom: compact ? 14 : 13 })
+    return () => {
+      window.clearTimeout(invalidateTimer)
+      if (invalidateTimerRef.current === invalidateTimer) invalidateTimerRef.current = null
+    }
   }, [compact, mappedItems, markerMode, onSelectItem, selectedItemId, variant])
 
   return <div className={cx('tripLeafletMap', variant === 'real' ? 'realMap' : 'handDrawn', compact && 'compact')} ref={containerRef}/>
