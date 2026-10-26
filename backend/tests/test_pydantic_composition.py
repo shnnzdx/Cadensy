@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
 import pytest
+from openai import AsyncOpenAI
+from pydantic_ai import Agent, models
+from pydantic_ai.providers.deepseek import DeepSeekProvider
 
 from app.agents.pydantic_composition import (
     PydanticRuntimeCompositionError,
@@ -51,6 +57,69 @@ def test_model_name_and_thinking_policy_are_composed_explicitly(monkeypatch):
 
     assert runtime.model.model_name == _MODEL_NAME
     assert runtime.model.settings["thinking"] is False
+
+
+def test_production_model_sends_deepseek_max_tokens_and_preserves_provider_profile(
+    monkeypatch,
+):
+    _configure_valid_pydantic_runtime(monkeypatch)
+    captured_payloads: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "offline-completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": _MODEL_NAME,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Offline reply."},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            },
+            request=request,
+        )
+
+    async def exercise() -> object:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            openai_client = AsyncOpenAI(
+                api_key=_PLACEHOLDER_KEY,
+                base_url=_OFFICIAL_ENDPOINT,
+                http_client=client,
+                max_retries=0,
+            )
+            provider = DeepSeekProvider(openai_client=openai_client)
+            monkeypatch.setattr(
+                "pydantic_ai.providers.deepseek.DeepSeekProvider",
+                lambda **_kwargs: provider,
+            )
+            runtime = build_pydantic_chat_runtime(system_prompt="test prompt")
+            with models.override_allow_model_requests(True):
+                result = await Agent(runtime.model).run(
+                    "Return a short offline reply.",
+                    model_settings={"max_tokens": 321},
+                )
+            return result.output, runtime.model.profile
+
+    output, profile = asyncio.run(exercise())
+
+    assert output == "Offline reply."
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0]["max_tokens"] == 321
+    assert "max_completion_tokens" not in captured_payloads[0]
+    assert profile["openai_chat_supports_max_completion_tokens"] is False
+    assert profile["supports_json_object_output"] is True
+    assert profile["openai_chat_thinking_field"] == "reasoning_content"
 
 
 @pytest.mark.parametrize("api_key", [None, "", "   "])
