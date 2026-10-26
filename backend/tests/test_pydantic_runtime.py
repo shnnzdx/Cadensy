@@ -511,6 +511,115 @@ def test_pydantic_options_rejects_foreign_conflict_ids_before_handler_call():
     assert not any(entry.tool_name == "propose_options" and entry.status in {"succeeded", "cache_hit"} for entry in result.tool_execution_evidence)
 
 
+def test_pydantic_options_allows_one_grounded_correction_after_guard_rejection():
+    """A rejected proposal can be corrected once without relaxing item grounding."""
+    options = _NamedReadTool(
+        name="propose_options",
+        handler=lambda **_kwargs: {
+            "options": [{
+                "id": "move-later", "label": "Move later", "title": "Move museum later",
+                "body": "Move only the grounded museum visit.", "tradeoff": "Less afternoon time.",
+                "item_id": "scoped-item", "patch": {"start_hour": 16.0},
+            }],
+        },
+    )
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        if calls == 2:
+            return ModelResponse(parts=[ToolCallPart("propose_options", {
+                "conflict_description": "Foreign conflict.", "conflict_item_ids": ["foreign-item"],
+            })])
+        if calls == 3:
+            return ModelResponse(parts=[ToolCallPart("propose_options", {
+                "conflict_description": "Grounded conflict.", "conflict_item_ids": ["scoped-item"],
+            })])
+        return ModelResponse(parts=[ToolCallPart(
+            "runtime_reply", {"output_kind": "reply_only", "reply": "Here is the grounded option."},
+        )])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(max_rounds=4), capability, execution=_execution(),
+    )
+
+    assert calls == 4
+    assert options.calls == [{
+        "conflict_description": "Grounded conflict.", "day": "all",
+        "conflict_item_ids": ["scoped-item"], "suggestions": [],
+    }]
+    assert result.observation.failure is None
+    assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
+        ("get_current_plan", "succeeded"),
+        ("propose_options", "guard_rejected"),
+        ("propose_options", "succeeded"),
+    ]
+
+
+def test_pydantic_options_stops_after_one_rejected_correction_attempt():
+    """Repeated foreign IDs never reach the scoped handler or an unbounded retry loop."""
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("get_current_plan", {"day": "all"})])
+        return ModelResponse(parts=[ToolCallPart("propose_options", {
+            "conflict_description": "Foreign conflict.", "conflict_item_ids": ["foreign-item"],
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(max_rounds=4), capability, execution=_execution(),
+    )
+
+    assert calls == 3
+    assert options.calls == []
+    assert result.observation.failure is not None
+    assert result.observation.failure.normalized_kind == "malformed_runtime_output"
+    assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
+        ("agent_execution", "failed"),
+    ]
+
+
+def test_pydantic_options_can_return_a_typed_clarification_after_insufficient_evidence():
+    """The corrective path may clarify, but cannot invent planning facts or options."""
+    options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
+    capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
+    calls = 0
+
+    def scripted_model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart("propose_options", {
+                "conflict_description": "No Current Plan has been read yet.",
+            })])
+        return ModelResponse(parts=[ToolCallPart("runtime_clarification", {
+            "output_kind": "clarification",
+            "reply": "Which day should I read before suggesting options?",
+        })])
+
+    result = _runtime(FunctionModel(scripted_model)).run(
+        _request(max_rounds=2), capability, execution=_execution(),
+    )
+
+    assert calls == 2
+    assert options.calls == []
+    assert isinstance(result.outcome, AgentClarification)
+    assert result.candidate_options == ()
+    assert result.observation.failure is None
+    assert [(entry.tool_name, entry.status) for entry in result.tool_execution_evidence] == [
+        ("propose_options", "guard_rejected"),
+    ]
+
+
 def test_pydantic_options_rejects_specific_conflict_outside_its_read_day():
     options = _NamedReadTool(name="propose_options", handler=lambda **_kwargs: {})
     capability = _SyntheticCapability(tools=(_SyntheticReadTool(), options))
