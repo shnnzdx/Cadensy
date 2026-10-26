@@ -428,6 +428,11 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
         agent = Agent(
             deadline_model,
             deps_type=_PydanticRunDeps,
+            model_settings=(
+                {"max_tokens": request.limits.max_tokens}
+                if request.limits.max_tokens is not None
+                else None
+            ),
             output_type=[
                 ToolOutput(_RuntimeReply, name="runtime_reply"),
                 ToolOutput(_RuntimeClarification, name="runtime_clarification"),
