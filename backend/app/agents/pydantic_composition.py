@@ -85,7 +85,7 @@ def build_pydantic_chat_runtime(*, system_prompt: str) -> ChatAgentRuntime:
             profile=OpenAIModelProfile(
                 openai_chat_supports_max_completion_tokens=False,
             ),
-            settings=OpenAIChatModelSettings(thinking=False),
+            settings=OpenAIChatModelSettings(openai_reasoning_effort="none"),
         )
         return PydanticChatAgentRuntime(model=model, system_prompt=system_prompt)
     except Exception as error:
