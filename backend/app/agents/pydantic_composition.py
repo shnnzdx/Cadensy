@@ -69,6 +69,7 @@ def build_pydantic_chat_runtime(*, system_prompt: str) -> ChatAgentRuntime:
 
     try:
         from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+        from pydantic_ai.profiles.openai import OpenAIModelProfile
         from pydantic_ai.providers.deepseek import DeepSeekProvider
 
         from .pydantic_runtime import PydanticChatAgentRuntime
@@ -81,6 +82,9 @@ def build_pydantic_chat_runtime(*, system_prompt: str) -> ChatAgentRuntime:
         model = OpenAIChatModel(
             config.model,
             provider=DeepSeekProvider(api_key=config.api_key),
+            profile=OpenAIModelProfile(
+                openai_chat_supports_max_completion_tokens=False,
+            ),
             settings=OpenAIChatModelSettings(thinking=False),
         )
         return PydanticChatAgentRuntime(model=model, system_prompt=system_prompt)
