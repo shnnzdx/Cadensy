@@ -455,6 +455,13 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
             tool_timeout=None,
         )
 
+        # A guard rejection raises ModelRetry so the model can correct its
+        # arguments.  Keep that recovery deliberately narrower than the
+        # runtime's guard-reject ceiling: one correction is enough to replace
+        # an ungrounded option with observed evidence, while repeated unsafe
+        # calls remain terminal and every existing deadline still applies.
+        bounded_options_correction_retries = min(request.limits.guard_reject_limit, 1)
+
         @agent.tool(retries=0)
         def get_current_plan(
             ctx: RunContext[_PydanticRunDeps],
@@ -498,7 +505,7 @@ class PydanticChatAgentRuntime(ChatAgentRuntime):
                 return output
 
         if "propose_options" in tools_by_name:
-            @agent.tool(retries=0)
+            @agent.tool(retries=bounded_options_correction_retries)
             def propose_options(
                 ctx: RunContext[_PydanticRunDeps],
                 conflict_description: Annotated[
