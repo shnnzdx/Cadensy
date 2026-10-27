@@ -2,8 +2,14 @@
 
 **记录日期：** 2026-10-21
 **工作区：** `C:\Users\zdxzh\Desktop\capstone\New`
-**状态：** 本地 Release Candidate 准备中；未 Commit、未 Push、未部署
+**历史记录状态（截至 2026-10-21）：** 本地 Release Candidate 准备中；未 Commit、未 Push、未部署
 **安全边界：** 本目录不保存 API Key、账号密码、数据库连接串、私有 Prompt、原始 Tool Result 或未经脱敏的运行日志。
+
+> **当前状态（2026-10-27）：** 此 README 中的阶段结论保留其记录时的
+> 状态。Release B 随后完成，v0.3.0 也已发布；生产后端当前运行 Pydantic
+> Runtime。请以 [AI engineering evidence index](../README.md) 和
+> [PR-09 migration index](../PR-09_Pydantic-Production-Migration/README.md)
+> 获取当前发布状态，而非将本页的预发布措辞视为当前部署状态。
 
 ## 记录说明
 
