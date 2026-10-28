@@ -1,7 +1,12 @@
 # Navigation Known-Wrong Behavior
 
-Recorded on August 11, 2026 during Phase 1 characterization. These notes describe
-current observable behavior that should not be silently frozen as desired product policy.
+Status: active limitation record
+Originally recorded: 2026-08-11
+Last verified against source: 2026-10-28
+
+These notes describe current observable behavior that should not be silently frozen as
+desired product policy. Resolved characterization details remain only when they explain
+the boundary around an active limitation.
 
 ## Login and Return Intent
 

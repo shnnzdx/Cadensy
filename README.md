@@ -8,6 +8,11 @@ AI is part of the product, but it is not the whole product. It helps explain the
 
 ## Capstone Documentation
 
+The current in-repository development record starts at
+[`docs/README.md`](./docs/README.md). Use it to distinguish active contracts,
+point-in-time evidence, and archived material. The current operational summary
+is [`HANDOFF.md`](./HANDOFF.md).
+
 The final capstone documentation is maintained on the `docs` branch:
 
 - [Cadensy full-stack system documentation](https://github.com/shnnzdx/cap_stone/blob/docs/docs/Cadensy_Full_Stack_System_Documentation.md)
@@ -357,7 +362,9 @@ The capstone documentation records the current testing evidence in detail. The c
 
 - [AGENTS.md](./AGENTS.md)
 - [AI.md](./AI.md)
+- [HANDOFF.md](./HANDOFF.md)
 - [INTEGRATION-ROADMAP.md](./INTEGRATION-ROADMAP.md)
+- [docs/README.md](./docs/README.md)
 - [Capstone submission documentation](https://github.com/shnnzdx/cap_stone/blob/docs/docs/Cadensy_Full_Stack_System_Documentation.md)
 - [backend/README.md](./backend/README.md)
 - [backend/LOCAL_DEV.md](./backend/LOCAL_DEV.md)

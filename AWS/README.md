@@ -1,5 +1,8 @@
 # TripSync AWS Documentation
 
+Status: current operator index, with historical records linked below
+Last reviewed: 2026-10-28
+
 This folder is the AWS source-of-truth area for the TripSync capstone deployment.
 
 ## Start Here
@@ -28,15 +31,15 @@ Use `PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md` when continuing HTTPS/custom domain wo
 Use `CLOUD_FIXED_ACCOUNTS_RUNBOOK.md` when the private cloud RDS database
 should contain the two fixed backend accounts without creating any demo trip.
 
-Use `DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md` for the metadata-only legacy
-inventory and the separately authorized post-Release-B retirement sequence.
+Use `DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md` only as a historical retirement
+plan; verify current metadata before acting on it.
 
-Production AI activation is DeepSeek-only. Use the reviewed, protected
-`.github/workflows/cd01-release-b-ai-activation.yml` from `main`; do not edit
-an ECS task definition by hand or use a provider-provisioning workflow. The
-workflow validates the current Release A baseline, retains its exact image,
-attaches only the approved `DEEPSEEK_API_KEY` reference, enables the two
-Durable Runtime gates, and has a Runtime-off rollback path.
+Recorded v0.3.0 production state is Pydantic on `tripsync-backend:31`, with the
+Durable Conversation production latch enabled. The current protected activation
+entry point is `.github/workflows/cd03-pydantic-production-release.yml`; do not
+edit ECS task definitions by hand. The older CD-01/CD-02 Release B workflow is
+historical activation evidence, not the current runtime instruction. CD-03 run
+`40382252075` did not execute real Pydantic provider acceptance.
 
 ## Current Manual AWS Workflows
 
@@ -102,7 +105,8 @@ TRIPSYNC_AWS_URLS.md
 CUSTOM_DOMAIN_HTTPS_RESULT.md
 PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 Cloud Fixed Accounts Runbook: CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
-DeepSeek-only production activation: .github/workflows/cd01-release-b-ai-activation.yml
+Pydantic production activation: .github/workflows/cd03-pydantic-production-release.yml
+Historical DeepSeek/Legacy activation: .github/workflows/cd01-release-b-ai-activation.yml
 Ollama retirement plan: DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md
 PHASE6_RUNTIME_SECRETS_PLAN.md
 ```
@@ -144,10 +148,10 @@ instead of opening RDS to direct laptop access.
 If the old demo trip still exists in cloud RDS and should be removed while
 keeping the fixed accounts, use the manual `Cloud Demo Purge` GitHub Action.
 
-If the deployed backend should activate real AI, use the protected CD-02
-DeepSeek-only workflow after an authorized preflight; do not edit ECS task
-definitions by hand. Release A remains Runtime-off until that separate
-activation is approved.
+If the deployed backend runtime must change, use the protected CD-03 Pydantic
+workflow from the reviewed `main` revision after an authorized preflight; do
+not edit ECS task definitions by hand. First confirm the workflow's expected
+baseline because the repository records Pydantic as already active.
 
 Before running Phase 10 for any future Route 53-managed domain, provide:
 

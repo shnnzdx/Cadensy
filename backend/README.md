@@ -1,5 +1,8 @@
 # TripSync Backend
 
+Status: current backend contract
+Last reviewed: 2026-10-28
+
 Python + FastAPI + PostgreSQL. This backend owns the decision paths, itinerary data,
 and decision ledger for the Trip workspace.
 
@@ -12,9 +15,10 @@ Local environment and PostgreSQL setup are documented in:
 
 - [`LOCAL_DEV.md`](LOCAL_DEV.md)
 
-Recent backend handoff notes live in:
+Current cross-system handoff and AI evidence live in:
 
-- [`../trip/交接.md`](../trip/%E4%BA%A4%E6%8E%A5.md)
+- [`../HANDOFF.md`](../HANDOFF.md)
+- [`../AI_enhanced/README.md`](../AI_enhanced/README.md)
 
 ---
 
@@ -164,7 +168,8 @@ planner   -> deepseek
 explainer -> deepseek
 ```
 
-`CHAT_AGENT_RUNTIME=legacy` is the default and current safe Chat behavior.
+`CHAT_AGENT_RUNTIME=legacy` is the local configuration default, not the current
+production-state claim.
 DeepSeek is the current real Chat Provider. A non-production real-Provider run
 requires `MOCK_AI=0`, valid DeepSeek configuration, and
 `CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=1`. The production environment
@@ -172,14 +177,13 @@ requires both that base gate and the independent
 `CADENSY_DURABLE_CONVERSATION_PRODUCTION_ACTIVATION_ENABLED=1` latch, plus
 production signing material. Absence of either permission keeps execution off.
 
-The normal production code-only profile is **Release A**: both Durable Runtime
-gates are explicitly `0`, `MOCK_AI=0`, the E2E Fake Runtime is `0`, and no model
-Provider credential is attached to the task definition. **Release B** is a
-separately authorized activation that may add a DeepSeek secret reference and
-turn on both gates. Local Stage 3B real-Provider evidence does not mean Release
-B has run in AWS.
+Recorded v0.3.0 production evidence shows `CHAT_AGENT_RUNTIME=pydantic` on
+`tripsync-backend:31` with both Durable Runtime permissions active. That is a
+recorded deployment state, not a reason to copy production latches into local
+`.env` files. CD-03 activation evidence did not execute real Pydantic provider
+acceptance.
 
-`CHAT_AGENT_RUNTIME=pydantic` is an explicit opt-in composition path. It
+`CHAT_AGENT_RUNTIME=pydantic` is an explicit composition path. It
 requires `MOCK_AI=0`, a present `DEEPSEEK_API_KEY`, the official
 `https://api.deepseek.com` endpoint, and a configured or defaulted
 `DEEPSEEK_MODEL`. Selecting it never falls back to Legacy: a composition

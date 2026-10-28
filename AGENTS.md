@@ -9,6 +9,7 @@ Read these files before substantial work:
 - `README.md`
 - `INTEGRATION-ROADMAP.md`
 - `HANDOFF.md`
+- `docs/README.md`
 - `docs/navigation-known-wrong-behavior.md`
 
 If the task is backend cleanup or repo consolidation, also read:
@@ -16,6 +17,22 @@ If the task is backend cleanup or repo consolidation, also read:
 - `docs/HANDOFF_PROMPT_BACKEND_REFACTOR_CURRENT.md`
 - `backend/README.md`
 - `backend/LOCAL_DEV.md`
+
+If the task changes AI-agent runtime, durable conversation behavior, provider
+handling, or AI evidence, also read:
+
+- `AI_enhanced/README.md`
+- `backend/app/agents/AI_AGENT_SUMMARY.md`
+
+## Documentation Lifecycle
+
+- Update current contracts in the same change that makes them stale.
+- Treat `AI_enhanced/PR-*`, `AI_enhanced/00_*`, `docs/backend/`, and
+  `docs/frontend/` as point-in-time evidence, not current status.
+- Move superseded planning, temporary deployment links/assets, and replaced
+  handoffs to `docs/_archive/`.
+- Do not rewrite historical evidence to match the present; add a newer record
+  and update the current index.
 
 ## Current Source Of Truth
 

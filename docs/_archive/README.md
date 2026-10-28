@@ -1,10 +1,17 @@
-# 归档
+# Documentation Archive
 
-这里的文档已被 [../PROPOSAL.md](../PROPOSAL.md) 取代，保留只为追溯。
-**不要照着这里的内容做事** —— 它们的流程模型（七阶段 + 最终锁定）已经整体废弃。
+Status: historical only
+Last reviewed: 2026-10-28
 
-| 文档 | 为什么归档 |
-|---|---|
-| `capstone-project-proposal-revised-zh.md` | PROPOSAL.md 的主干来源，流程部分已替换 |
-| `群体旅行决策引擎_中文方案.docx` | 差异化论述已并入 PROPOSAL.md 第二节 |
-| `多人协作式 AI 旅行规划平台——完整项目想法.docx` | 最早的完整版，已被完全覆盖 |
+Files here are retained for auditability and context. They must not be used as current product, architecture, navigation, deployment, or production-state instructions.
+
+| Area | Contents |
+| --- | --- |
+| `product-history/` | Superseded proposal, class, and product-page drafts, including exact duplicates retained for provenance |
+| `deployment-history/` | Temporary deployment addresses and QR assets; these links may no longer resolve |
+| `release-history/` | CD-01 and R5 point-in-time build/deployment records |
+| `navigation-history/` | Pre-implementation navigation plan and the 2026-08-11 roadmap snapshot |
+| `handoff-history/` | Superseded operational handoffs |
+| Archive root | Original proposal/business-case source artifacts retained from the earlier archive |
+
+For current documentation, start at [`../README.md`](../README.md). Do not edit an archived file to make it appear current; update the current contract and, when useful, add a new dated evidence record.

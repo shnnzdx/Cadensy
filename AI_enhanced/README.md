@@ -2,7 +2,7 @@
 
 This directory is organized by implementation phase. Historical filenames and report numbers are preserved so that the evidence remains traceable to its original review or pull request.
 
-## Current release status — 2026-10-27
+## Current release status — 2026-10-28
 
 Cadensy v0.3.0 is released at
 [`v0.3.0`](https://github.com/shnnzdx/Cadensy/releases/tag/v0.3.0), targeting
@@ -36,3 +36,9 @@ particular report was written; they are not the current production status.
 | [PR-09 — Pydantic production migration](PR-09_Pydantic-Production-Migration/) | Trusted execution evidence, functional parity, durable lifecycle/concurrency acceptance, formal evaluation, protected Pydantic activation, and v0.3.0 migration evidence. |
 
 The folders are an archival/navigation organization only; they do not alter the historical conclusions inside the reports. When a report contains a link to another report, its path has been updated where needed for this layout.
+
+## Evidence lifecycle
+
+This top-level README is the current status layer. The phase and PR directories are immutable point-in-time evidence and are therefore **archived in place**: moving or rewriting them would break cross-report traceability. Add a new dated report when a conclusion changes; do not edit an older report to make it agree with the latest deployment.
+
+System-wide documentation ownership and archive rules are in [`../docs/README.md`](../docs/README.md). Operational state belongs in [`../HANDOFF.md`](../HANDOFF.md); detailed AI claims belong here and in the relevant evidence folder.
