@@ -1,31 +1,22 @@
-# AI Compatibility Note
+# Cadensy AI Agent Guide
 
-This file is kept as a compatibility pointer for tools or workflows that still look for
-`AI.md` at the repo root.
+Status: current compatibility pointer
+Last reviewed: 2026-10-28
 
-## Read First
+The authoritative AI engineering record is [`AI_enhanced/README.md`](AI_enhanced/README.md). Start there before changing runtime selection, durable conversation behavior, tool execution, provider handling, or evaluation evidence.
 
-If you are an AI agent starting work in this repository, read these files in this order:
+## Current references
 
-1. `AGENTS.md`
-2. `README.md`
-3. `INTEGRATION-ROADMAP.md`
-4. `交接.md`
+- [`HANDOFF.md`](HANDOFF.md) — current system and production handoff
+- [`docs/HANDOFF_PROMPT_CURRENT.md`](docs/HANDOFF_PROMPT_CURRENT.md) — current continuation prompt
+- [`backend/app/agents/AI_AGENT_SUMMARY.md`](backend/app/agents/AI_AGENT_SUMMARY.md) — implementation map
+- [`backend/README.md`](backend/README.md) and [`backend/LOCAL_DEV.md`](backend/LOCAL_DEV.md) — operation and local validation
+- [`AI_enhanced/PR-09_Pydantic-Production-Migration/README.md`](AI_enhanced/PR-09_Pydantic-Production-Migration/README.md) — Pydantic migration evidence index
 
-If the task is backend cleanup or repo-level refactor planning, also read:
+## Status boundary
 
-- `docs/HANDOFF_PROMPT_2026-08-11.md`
-- `docs/HANDOFF_PROMPT_NEXT_BACKEND_AND_REPO_REFACTOR_2026-08-11.md`
-- `docs/navigation-known-wrong-behavior.md`
+Recorded production evidence for Cadensy v0.3.0 shows `CHAT_AGENT_RUNTIME=pydantic` on backend task definition `tripsync-backend:31`, with the Durable Conversation production latch enabled. The local backend environment may still default to `legacy`; that is a development default, not a production-state claim.
 
-## Quick Context
+Historical reports under `AI_enhanced/` are point-in-time evidence. Their old statements such as “Legacy active”, “not merged”, or “not authorized” must be interpreted using the report date and the current index.
 
-- `frontend/` is the main product site and `/trip` host shell.
-- `trip/` is still the source for the embedded Trip workspace.
-- `backend/` is the FastAPI + PostgreSQL backend.
-- `shared/` contains the established cross-app seams.
-
-## Important
-
-Do not treat this file as the main repo rule document.
-The active AI working rules now live in `AGENTS.md`.
+Never place provider keys, AWS credentials, bearer tokens, or unredacted conversation content in AI evidence.

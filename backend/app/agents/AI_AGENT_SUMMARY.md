@@ -1,251 +1,66 @@
-# Cadensy / TripSync AI Agent Summary
+# Cadensy AI Agent Implementation Map
 
-Last updated: 2026-08-15
+Status: current implementation guide
+Last reviewed: 2026-10-28
 
-## 1. Purpose
+This file maps the current backend AI seams. Production and migration evidence belongs in [`../../../AI_enhanced/README.md`](../../../AI_enhanced/README.md); local operation belongs in [`../../LOCAL_DEV.md`](../../LOCAL_DEV.md).
 
-This document is the current-state summary for the Cadensy backend AI layer.
+## Recorded runtime state
 
-It is not a history log and it is not a classroom-demo note. The goal is to help
-the next engineer understand:
+Cadensy v0.3.0 records `CHAT_AGENT_RUNTIME=pydantic` on backend task definition `tripsync-backend:31`, with the Durable Conversation production latch enabled. CD-03 run `40382252075` is protected activation evidence, but it did not execute real Pydantic provider acceptance.
 
-- what is running on `main` now
-- which provider path is active
-- where the important seams live
-- how Chat Agent, Planner, and Places fit together
+The local configuration default is `legacy`. That default provides a safe developer/test starting point and is not a production-state claim.
 
-If a historical migration story is needed, use the dated handoff documents in
-`docs/backend/`.
+## Runtime boundary
 
-## 2. Current AI Runtime
+| File | Responsibility |
+| --- | --- |
+| `runtime_contract.py` | Framework-neutral Chat runtime contract |
+| `runtime_factory.py` | Validates `CHAT_AGENT_RUNTIME` and builds Legacy or Pydantic runtime |
+| `legacy_runtime.py` | Established Legacy adapter |
+| `pydantic_runtime.py` | Pydantic runtime adapter and result normalization |
+| `pydantic_composition.py` | Production Pydantic/DeepSeek composition |
+| `pydantic_poc.py` | Provider/model compatibility components retained by the composition path |
+| `execution.py` | Agent execution lifecycle and safe outcome handling |
+| `tools.py` | Trusted tool definitions and execution support |
+| `trace.py` | Privacy-safe tracing/telemetry support |
+| `e2e_runtime.py` | Test-only browser harness runtime; never a production fallback |
 
-Current production-intent backend routing is:
+`runtime_factory.build_chat_runtime()` is the selector seam. Selecting `pydantic` is fail-closed: composition failure must not silently fall back to Legacy.
 
-```text
-Chat Agent      -> DeepSeek
-Planner Agent   -> DeepSeek
-Explainer Agent -> DeepSeek
-```
+## Request and durable-conversation flow
 
-Important clarification:
+- `backend/app/api/main.py` owns the HTTP endpoints and maps domain outcomes to API responses.
+- `backend/app/domain/chat/service.py` builds the selected runtime, prepares trip-scoped context, and coordinates Chat behavior.
+- `backend/app/domain/conversations/runtime.py` owns durable runtime coordination.
+- `backend/app/domain/conversations/service.py` owns durable lifecycle, idempotency, conflict, busy, recovery, and fencing outcomes.
+- `backend/app/domain/conversations/context.py` constructs server-owned conversation context.
+- `backend/app/db/models.py` contains conversation, message, option, submission, and recovery persistence models.
 
-- the backend keeps the route names `chat`, `planner`, and `explainer`
-- those names describe the calling scenario, not different vendors
-- current real-provider execution is DeepSeek-only
-- `MOCK_AI=1` remains the safest local default when real AI is not required
+Membership authorization and persisted server state are authoritative. A browser-provided membership ID or local conversation cache is not proof of identity or durable truth.
 
-There is no active Ollama or Qwen runtime in the main backend path.
+## Safety invariants
 
-## 3. Product Role Of The AI Layer
+- Provider keys come from runtime secret configuration and never from source, logs, or evidence files.
+- Tool execution must use trusted server-side arguments and retain authorization/trip scope.
+- Idempotency and concurrency fences must survive runtime refactors.
+- Telemetry must remain privacy-safe; do not record raw private constraints or provider payloads.
+- `CADENSY_E2E_FAKE_RUNTIME` is valid only for the explicit test environment.
+- Production execution requires both Durable Conversation gates and production signing material.
 
-The AI layer helps the product with two different jobs:
+## Validation map
 
-### Chat Agent
+Core tests include:
 
-- interpret natural-language user requests
-- decide whether a tool should be called
-- produce assistant copy for the Trip workspace
-- propose changes without directly mutating the plan
+- `tests/test_runtime_contract.py`
+- `tests/test_runtime_composition.py`
+- `tests/test_pydantic_runtime.py`
+- `tests/test_pydantic_composition.py`
+- `tests/test_pydantic_durable_runtime_acceptance.py`
+- `tests/test_pydantic_concurrency_fencing_acceptance.py`
+- `tests/test_agent_execution_lifecycle.py`
+- `tests/test_pr06b2_conversation_api.py`
+- `tests/test_pr06b2_conversation_concurrency_postgres.py`
+- `tests/test_cd03_pydantic_production_release.py`
 
-### Planner Agent
-
-- generate itinerary structure from candidate places and trip constraints
-- choose candidate ids, not invented place names
-- work inside the deterministic plan-generation pipeline
-
-### Explainer Route
-
-- shares the same provider routing expectations as the rest of the backend
-- should be treated as a scenario label, not a separate vendor lane
-
-## 4. Core Product Principle
-
-The system still follows the same product rule:
-
-> AI proposes. Humans decide.
-
-That principle is enforced by backend boundaries, not by prompt wording alone.
-
-## 5. Architecture Snapshot
-
-```text
-React Trip workspace
-        |
-        | user request / plan generation trigger
-        v
-FastAPI backend
-        |
-        +--> domain/chat/service.py
-        |        |
-        |        +--> agents/base.py call_agent / call_model
-        |        +--> agents/tools.py (read-only tools)
-        |        +--> constraints + decisions backend
-        |
-        +--> domain/plans/generator.py
-                 |
-                 +--> agents/planner.py
-                 +--> domain/places/service.py
-                 +--> persisted PlanItem rows
-```
-
-## 6. Critical Boundaries
-
-These boundaries matter more than any prompt tweak:
-
-### 6.1 Provider/runtime seam
-
-`backend/app/agents/base.py`
-
-This file owns:
-
-- provider selection
-- model client construction
-- request timeouts
-- structured-output model calls
-- agent-loop model calls
-- conversion of model/runtime errors into backend-safe failures
-
-Do not scatter provider logic into feature modules.
-
-### 6.2 Tool boundary
-
-`backend/app/agents/tools.py`
-
-Tools are the controlled interface between the model and backend facts.
-
-Key rule:
-
-- tools stay read-only
-
-The agent can inspect backend facts and classification outcomes, but it should not
-directly write the database.
-
-### 6.3 Decision-path boundary
-
-The decision path is determined by deterministic backend logic, not by the model.
-
-Important areas:
-
-- `backend/app/domain/constraints/engine.py`
-- `backend/app/domain/decisions/orchestrator.py`
-- `backend/app/domain/chat/service.py`
-
-The model may help interpret requests, but Python rules still decide whether a
-request becomes NOTICE, ROUND, CONFIRM, or a no-op.
-
-### 6.4 Planner/place boundary
-
-The planner selects `candidate_id`.
-
-The backend resolves that id back to canonical place facts.
-
-The model must not invent titles, addresses, or local names when a candidate
-selection path already exists.
-
-## 7. Important Files
-
-### Backend AI runtime
-
-- `backend/app/agents/base.py`
-- `backend/app/agents/tools.py`
-- `backend/app/agents/chat.py`
-- `backend/app/agents/planner.py`
-- `backend/app/agents/trace.py`
-
-### Backend product/domain integration
-
-- `backend/app/domain/chat/service.py`
-- `backend/app/domain/plans/generator.py`
-- `backend/app/domain/places/service.py`
-- `backend/app/domain/constraints/engine.py`
-- `backend/app/domain/decisions/orchestrator.py`
-
-### Frontend Trip workspace integration
-
-- `trip/src/final/plan-feature/useAssistantChangeRequestFlow.js`
-- `trip/src/final/TripAppState.jsx`
-- `trip/src/final/FinalApp.jsx`
-
-Frontend changes must continue to respect the frozen Trip boundaries documented in
-`AGENTS.md`.
-
-## 8. Local Development Reality
-
-The safest local backend modes are:
-
-### Rules-only / UI-safe local mode
-
-```env
-MOCK_AI=1
-```
-
-Use this when validating deterministic decision behavior without paying for or
-depending on the provider.
-
-### Real AI local mode
-
-Use the configured DeepSeek environment in `backend/.env`.
-
-The backend should be validated by checking:
-
-- backend traceback when a request fails
-- provider credentials and base URL
-- database connectivity and seed data
-- trip, membership, and session state
-
-Do not diagnose AI failures by looking only at `/docs` or frontend behavior.
-
-## 9. Planner And Places
-
-Current planner quality depends on the full chain, not just the LLM:
-
-```text
-trip constraints
-    + candidate places
-    + place ranking / opening-hours facts
-    + planner prompt rules
-    + candidate_id selection
-    + backend PlanItem conversion
-```
-
-If a generated itinerary looks wrong, inspect:
-
-1. whether candidate places were good
-2. whether Geoapify/cache facts were complete
-3. whether the model chose poor candidate ids
-4. whether backend conversion preserved the right place facts
-
-## 10. Validation Expectations
-
-When touching the AI layer, validate the change in the smallest honest way:
-
-- unit tests for routing or conversion logic
-- a real backend request when provider behavior is involved
-- planner/place end-to-end checks when itinerary output changes
-- Trip workspace verification when chatbox or proposal rendering changes
-
-Prompt-only changes without a validation loop are not enough.
-
-## 11. What Is Explicitly Out Of Date
-
-The following should be treated as obsolete for the active backend path:
-
-- any description that says Chat Agent uses Ollama
-- any description that says Qwen is the current backend model
-- any `.env` example built around `OPENAI_BASE_URL=http://localhost:11434/v1/`
-- any instructions that require starting a local Ollama terminal for normal main-branch backend validation
-
-If those details still appear elsewhere, they should be treated as historical
-notes only and not as current setup guidance.
-
-## 12. Current Working Rule
-
-Before changing the AI layer, ask:
-
-1. Is this a provider/runtime problem, a tool problem, a planner/place problem,
-   or a frontend rendering problem?
-2. Does the change cross a frozen boundary?
-3. Is the behavior deterministic Python policy or model behavior?
-4. What is the smallest real validation that proves the change?
-
-That discipline matters more than adding another prompt or another agent.
+Run the smallest relevant group first, then the broader backend suite when the change crosses runtime, conversation, transaction, or persistence boundaries. Real-provider calls and production changes require separate authorization and must not be inferred from unit/integration success.

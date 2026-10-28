@@ -1,5 +1,8 @@
 # Cadensy Product Logic
 
+Status: current product contract
+Last reviewed: 2026-10-28
+
 Audience:
 
 - product teammates
@@ -10,10 +13,11 @@ This file explains product behavior, not low-level implementation.
 
 Related docs:
 
-- `PROPOSAL.md`
-- `../trip/FRONTEND.md`
-- `../trip/BACKEND.md`
-- `../交接.md`
+- [`README.md`](README.md)
+- [`../HANDOFF.md`](../HANDOFF.md)
+- [`../trip/FRONTEND.md`](../trip/FRONTEND.md)
+- [`../trip/BACKEND.md`](../trip/BACKEND.md)
+- Historical proposal: [`_archive/product-history/PROPOSAL_2026-08-13.md`](_archive/product-history/PROPOSAL_2026-08-13.md)
 
 ## 1. What The Product Does
 
@@ -230,8 +234,10 @@ round, reopened round, or confirmation.
 
 Suggestions remain scoped to the member's trip and use privacy-safe plan information; they
 do not disclose another member's private constraint wording or ownership data. The expanded
-Pydantic assistant behavior has local validation evidence only. It is not production-activated;
-the production Chat Runtime remains the established Legacy path.
+Pydantic assistant behavior has local, evaluation, lifecycle/concurrency, and protected
+activation evidence. The v0.3.0 production record shows `CHAT_AGENT_RUNTIME=pydantic` on
+`tripsync-backend:31` with the Durable Conversation production latch enabled. CD-03 did not
+execute real Pydantic provider acceptance, so that narrower provider-level claim remains open.
 
 For a normal full travel day, itinerary quality should follow this priority order:
 
@@ -301,7 +307,7 @@ Current practical MVP shape:
 - small groups
 - one-city planning emphasis
 - 2-5 day trips
-- curated place library
+- provider-backed PostgreSQL place cache, with Geoapify fallback when coverage is sparse
 - no live booking infrastructure required
 
 Out of scope for this product layer:

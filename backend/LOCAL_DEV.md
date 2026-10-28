@@ -1,5 +1,8 @@
 # TripSync Backend Local Development
 
+Status: current local-development guide
+Last reviewed: 2026-10-28
+
 This backend runs with FastAPI, PostgreSQL, and `backend/.env`.
 
 Do not commit real credentials. `backend/.env` is ignored by Git.
@@ -180,12 +183,13 @@ Notes:
   `CADENSY_DURABLE_CONVERSATION_RUNTIME_ENABLED=1`. Leave the production
   activation latch at `0` outside an explicitly authorized production change.
 - Production requires both Durable Runtime gates plus production signing
-  material. Release A pins both gates, `CADENSY_E2E_FAKE_RUNTIME`, and paid
-  Provider execution off; Release B is a separate authorization boundary.
+  material. Recorded v0.3.0 production evidence shows Pydantic active on
+  `tripsync-backend:31`; do not copy that production latch into local config.
 - `CADENSY_E2E_FAKE_RUNTIME=1` is only valid with `APP_ENV=test` and
   `MOCK_AI=1`. It must never be used as a production fallback.
-- The completed local Stage 3B DeepSeek validation proves the local application
-  chain, not AWS production activation.
+- Local/provider validation proves only the environment in which it ran. CD-03
+  is protected activation evidence but did not execute real Pydantic provider
+  acceptance.
 - on Windows, pytest now forces the PostgreSQL test database and client connection to
   UTF-8 so non-ASCII fixtures stay valid
 - on this machine, the local AWS CLI credential copy also lives in `backend/.env`
