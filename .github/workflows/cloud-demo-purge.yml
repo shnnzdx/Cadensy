@@ -1,4 +1,4 @@
-name: Cloud Demo Purge
+name: Operations — Cloud Demo Purge
 
 on:
   workflow_dispatch:

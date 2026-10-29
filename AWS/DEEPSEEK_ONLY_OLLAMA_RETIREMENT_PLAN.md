@@ -2,12 +2,16 @@
 
 ## Status and boundary
 
-**Status: DEFERRED — NON-BLOCKING (2026-10-22).** Release B activation and
+**Status: HISTORICAL / DEFERRED — NON-BLOCKING (reviewed 2026-10-29).** Release B activation and
 bounded real-provider acceptance have completed successfully. This retirement
 plan remains intentionally deferred because the current approved Runtime-off
 rollback baseline is `tripsync-backend:25`, which retains historical Ollama
 environment fields. This document does not authorize any AWS deletion, IAM
 change, task-definition deregistration, or rollback-baseline replacement.
+
+The former Release B activation workflow has been superseded by the current
+Pydantic release path and is archived as non-executable evidence at
+`AWS/archive/workflows/retired-release/cd01-release-b-ai-activation.yml`.
 
 This is an inventory and retirement plan, not an AWS deletion procedure. It
 records metadata-only observations made on 2026-10-22. No parameter value,
@@ -54,9 +58,9 @@ No item below may be deleted until all of these gates are met:
 
 ## Repository state
 
-The supported production activation entry point is
-`.github/workflows/cd01-release-b-ai-activation.yml`. It builds a new task
-definition from the Release A image while stripping the entire `OLLAMA` naming
-space and historical provider selectors from the generated activation profile.
-The historical Release A task definition is never modified by this repository
+The Release B production activation entry point was
+`AWS/archive/workflows/retired-release/cd01-release-b-ai-activation.yml`. It
+built a new task definition from the Release A image while stripping the entire
+`OLLAMA` naming space and historical provider selectors from the generated
+activation profile. The historical Release A task definition was never modified by this repository
 cleanup.

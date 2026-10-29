@@ -1,4 +1,4 @@
-name: CD-03 — Manually Approved Pydantic Production Release
+name: Release — Pydantic Runtime
 
 on:
   workflow_dispatch:

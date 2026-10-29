@@ -1,4 +1,4 @@
-name: CD-01 — PR-06B Manually Approved Production Schema Migration
+name: Release — Production Schema Migration
 
 on:
   workflow_dispatch:

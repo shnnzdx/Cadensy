@@ -1,4 +1,4 @@
-name: Phase 9 Public E2E
+name: Operations — Public Production E2E
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       public_url:
         description: "Public TripSync frontend URL to test"
         required: true
-        default: "http://tripsync-backend-alb-2124233156.us-east-1.elb.amazonaws.com"
+        default: "https://app.cadensy.top"
 
 permissions:
   contents: read

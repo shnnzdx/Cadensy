@@ -1,4 +1,4 @@
-"""Static safety contract for the opt-in R5 ECR image build workflow."""
+"""Static safety contract retained for the archived R5 image build evidence."""
 
 from __future__ import annotations
 
@@ -8,7 +8,14 @@ import yaml
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "r5-manual-ecr-build.yml"
+WORKFLOW_PATH = (
+    REPOSITORY_ROOT
+    / "AWS"
+    / "archive"
+    / "workflows"
+    / "retired-release"
+    / "r5-manual-ecr-build.yml"
+)
 RUNNER_DOCKERFILE = REPOSITORY_ROOT / "backend" / "Dockerfile.r5-migration-runner"
 RELEASE_SHA = "6daf90ed4f1130171ff6e84c11241f374dc5aeeb"
 

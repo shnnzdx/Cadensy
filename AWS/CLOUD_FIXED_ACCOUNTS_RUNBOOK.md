@@ -80,7 +80,7 @@ In GitHub:
 
 ```text
 Actions
--> Cloud Fixed Accounts Upsert
+-> Operations — Cloud Fixed Accounts Upsert
 -> Run workflow
 ```
 
