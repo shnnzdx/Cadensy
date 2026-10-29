@@ -91,15 +91,130 @@ The workspace build is copied into `frontend/public/trip-app/` so the main site 
 
 Production currently runs behind `https://app.cadensy.top`:
 
-```text
-Browser
-  -> Aliyun DNS / app.cadensy.top
-  -> AWS Application Load Balancer
-     -> frontend ECS service for public routes and static Trip assets
-     -> backend ECS service for /api/* routes
-        -> private RDS PostgreSQL
-        -> DeepSeek / Geoapify / Unsplash when configured
+### Overall System Architecture
+
+```mermaid
+flowchart TB
+    User["Traveler / Organizer"] --> Browser["Web browser"]
+    Browser --> DNS["Aliyun DNS<br/>app.cadensy.top"]
+    DNS --> ALB["AWS Application Load Balancer<br/>ACM HTTPS"]
+
+    subgraph Client["Browser application"]
+        Product["Product shell and authentication<br/>frontend/"]
+        Workspace["Embedded Trip workspace<br/>trip/"]
+        Plan["PlanFeature<br/>plan interaction and assistant drawer"]
+        Session["Session Runtime<br/>identity, tokens, request headers"]
+        Navigation["Trip Navigation Policy<br/>destinations and reachability"]
+
+        Product -->|opens /trip| Workspace
+        Workspace --> Plan
+        Session -. shared contract .-> Product
+        Session -. shared contract .-> Workspace
+        Navigation -. shared contract .-> Product
+        Navigation -. shared contract .-> Workspace
+    end
+
+    subgraph AWS["AWS us-east-1"]
+        Frontend["Frontend ECS Fargate service<br/>public routes and Trip static assets"]
+        Backend["Backend ECS Fargate service<br/>FastAPI /api"]
+        RDS[("Private RDS PostgreSQL<br/>users, trips, plans, decisions, conversations")]
+        ECR["Amazon ECR<br/>digest-pinned container images"]
+        Logs["CloudWatch<br/>logs and operational telemetry"]
+
+        ALB -->|public, auth, /trip, /trip-app| Frontend
+        ALB -->|/api/*| Backend
+        Backend --> RDS
+        ECR -. image pull .-> Frontend
+        ECR -. image pull .-> Backend
+        Frontend -. logs .-> Logs
+        Backend -. logs and safe telemetry .-> Logs
+    end
+
+    Frontend -->|serves HTML, JS, and CSS| Product
+    Frontend -->|serves embedded workspace build| Workspace
+    Product -->|HTTPS API requests| ALB
+    Workspace -->|HTTPS API requests| ALB
+
+    Backend --> Domains["Deterministic domain services<br/>plans, preferences, constraints, decisions, places"]
+    Domains --> RDS
+    Backend --> DeepSeek["DeepSeek<br/>AI provider"]
+    Backend --> Geoapify["Geoapify<br/>place discovery"]
+    Backend --> Unsplash["Unsplash<br/>trip cover images"]
+
+    classDef client fill:#eef5ff,stroke:#3569a8,color:#172b4d;
+    classDef service fill:#edf8f1,stroke:#2d7a4b,color:#173b27;
+    classDef data fill:#fff4dc,stroke:#ad7620,color:#4b3512;
+    classDef external fill:#f6efff,stroke:#7450a8,color:#392356;
+    class Product,Workspace,Plan,Session,Navigation client;
+    class Frontend,Backend,Domains service;
+    class RDS,ECR,Logs data;
+    class DeepSeek,Geoapify,Unsplash external;
 ```
+
+### AI Agent Architecture
+
+```mermaid
+flowchart TB
+    Drawer["Cadensy assistant drawer<br/>useAssistantChangeRequestFlow"] --> ChatAPI["Chat and Conversation API<br/>backend/app/api/main.py"]
+    ChatAPI --> Scope["Membership authorization<br/>trip-scoped identity"]
+
+    subgraph Conversation["Server-owned durable conversation boundary"]
+        Coordinator["ConversationRuntimeCoordinator"]
+        Context["Conversation Context Builder<br/>trip facts, plan, preferences, safe history"]
+        Lifecycle["Conversation Service<br/>lifecycle, idempotency, recovery, concurrency fencing"]
+        ConversationStore[("PostgreSQL conversation tables")]
+
+        Coordinator --> Context
+        Coordinator --> Lifecycle
+        Context --> ConversationStore
+        Lifecycle <--> ConversationStore
+    end
+
+    Scope --> Coordinator
+    Context --> DomainFacts["Authorized domain reads<br/>trip, plan, place and decision facts"]
+    DomainFacts --> AppData[("PostgreSQL application data")]
+
+    Coordinator --> Factory["Runtime Factory<br/>CHAT_AGENT_RUNTIME"]
+    Factory --> Contract["Framework-neutral<br/>ChatAgentRuntime contract"]
+    Contract -->|production selection| Pydantic["Pydantic AI Runtime<br/>typed result and guarded tools"]
+    Contract -->|local / compatibility selection| Legacy["Legacy Runtime<br/>same runtime contract"]
+
+    Pydantic -->|bounded prompt and requests| Provider["DeepSeek model API"]
+    Legacy -->|bounded prompt and requests| Provider
+    Pydantic <--> Tools["Trusted read-only tools<br/>deadline and dispatch guards"]
+    Legacy <--> Tools
+    Tools --> DomainFacts
+
+    Pydantic --> Outcome["Normalized agent outcome<br/>explanation, options, proposed change"]
+    Legacy --> Outcome
+    Outcome --> Lifecycle
+    Lifecycle --> ChatAPI
+    ChatAPI --> Drawer
+
+    Drawer -->|user approves / applies| ChangeAPI["Change-request API"]
+    ChangeAPI --> DecisionEngine["Deterministic decision engine<br/>notice, round, reopen, confirm"]
+    DecisionEngine --> AppData
+    DecisionEngine --> Drawer
+
+    Pydantic -. privacy-safe events .-> Telemetry["Safe telemetry and tracing"]
+    Legacy -. privacy-safe events .-> Telemetry
+
+    classDef ui fill:#eef5ff,stroke:#3569a8,color:#172b4d;
+    classDef boundary fill:#edf8f1,stroke:#2d7a4b,color:#173b27;
+    classDef runtime fill:#f6efff,stroke:#7450a8,color:#392356;
+    classDef data fill:#fff4dc,stroke:#ad7620,color:#4b3512;
+    class Drawer,ChangeAPI ui;
+    class ChatAPI,Scope,Coordinator,Context,Lifecycle,DomainFacts,DecisionEngine boundary;
+    class Factory,Contract,Pydantic,Legacy,Provider,Tools,Outcome,Telemetry runtime;
+    class ConversationStore,AppData data;
+```
+
+The AI runtime can propose and explain a change, but it cannot directly mutate the
+current plan. User-approved proposals return through the deterministic decision engine,
+which owns validation, voting, confirmation, persistence, and the audit trail. See
+[`backend/app/agents/AI_AGENT_SUMMARY.md`](./backend/app/agents/AI_AGENT_SUMMARY.md)
+for the implementation map and [`AI_enhanced/README.md`](./AI_enhanced/README.md) for
+dated engineering evidence.
 
 ### Frontend
 
