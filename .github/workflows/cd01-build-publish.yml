@@ -1,4 +1,4 @@
-name: CD-01 — Build and Publish Immutable Backend Images
+name: Artifacts — Immutable Backend Images
 
 on:
   workflow_run:

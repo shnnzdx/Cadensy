@@ -1,7 +1,7 @@
 # TripSync AWS Documentation
 
 Status: current operator index, with historical records linked below
-Last reviewed: 2026-10-28
+Last reviewed: 2026-10-29
 
 This folder is the AWS source-of-truth area for the TripSync capstone deployment.
 
@@ -26,7 +26,9 @@ Use `CUSTOM_DOMAIN_HTTPS_RESULT.md` for the completed manual
 `app.cadensy.top` HTTPS setup, Aliyun DNS records, ALB listener routing, and
 the current answer to where the frontend/backend are hosted.
 
-Use `PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md` when continuing HTTPS/custom domain work.
+Use `PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md` only as historical Route 53 planning
+context. The completed production domain uses Aliyun DNS, and the Phase 10
+workflow is no longer an active operator entry point.
 
 Use `CLOUD_FIXED_ACCOUNTS_RUNBOOK.md` when the private cloud RDS database
 should contain the two fixed backend accounts without creating any demo trip.
@@ -41,21 +43,33 @@ edit ECS task definitions by hand. The older CD-01/CD-02 Release B workflow is
 historical activation evidence, not the current runtime instruction. CD-03 run
 `40382252075` did not execute real Pydantic provider acceptance.
 
-## Current Manual AWS Workflows
+## Active GitHub Actions Workflows
 
-Use only these current manual AWS operator entry points for cloud data and
-runtime administration:
+The authoritative workflow inventory and ownership boundaries are in
+[`../.github/workflows/README.md`](../.github/workflows/README.md). Active
+workflows are limited to ten CI, artifact, release, and production-operation
+entry points.
+
+Current protected manual AWS operations are:
 
 ```text
+.github/workflows/cd01-pr06b-schema-migration.yml
+.github/workflows/cd01-production-release.yml
+.github/workflows/cd01-frontend-production-release.yml
+.github/workflows/cd03-pydantic-production-release.yml
 .github/workflows/cloud-fixed-accounts-upsert.yml
 .github/workflows/cloud-demo-purge.yml
-.github/workflows/cd01-release-b-ai-activation.yml
 ```
+
+The public browser acceptance workflow remains a separate non-deployment
+operation at `.github/workflows/phase9-public-e2e.yml`.
 
 Important:
 
 - all AWS deploy and cloud-admin workflows must be dispatched from `main`
-- the workflows now hard-fail if they are started from any other branch
+- release and data-operation permissions remain separate intentionally
+- completed setup and superseded release workflows are non-executable evidence
+  under [`archive/workflows/`](archive/workflows/README.md)
 - treat `main` as the only cloud release branch for this repository
 
 ## Local AWS CLI Credentials
@@ -106,12 +120,14 @@ CUSTOM_DOMAIN_HTTPS_RESULT.md
 PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 Cloud Fixed Accounts Runbook: CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
 Pydantic production activation: .github/workflows/cd03-pydantic-production-release.yml
-Historical DeepSeek/Legacy activation: .github/workflows/cd01-release-b-ai-activation.yml
+Historical DeepSeek/Legacy activation: AWS/archive/workflows/retired-release/cd01-release-b-ai-activation.yml
 Ollama retirement plan: DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md
 PHASE6_RUNTIME_SECRETS_PLAN.md
 ```
 
-`PHASE6_RUNTIME_SECRETS_PLAN.md` intentionally remains in the root because the validation workflow references this exact path.
+`PHASE6_RUNTIME_SECRETS_PLAN.md` remains in the root as a stable historical
+cross-reference. Its completed setup workflows are archived under
+`AWS/archive/workflows/completed-setup/`.
 
 ## Archived Completed Phases
 
@@ -142,24 +158,27 @@ The domain is registered and DNS-managed in Aliyun, not Route 53. See
 custom-domain settings.
 
 Cloud RDS remains private. If the two fixed backend accounts need to be written
-to cloud RDS, use the manual `Cloud Fixed Accounts Upsert` GitHub Action
+to cloud RDS, use the manual `Operations — Cloud Fixed Accounts Upsert` GitHub Action
 instead of opening RDS to direct laptop access.
 
 If the old demo trip still exists in cloud RDS and should be removed while
-keeping the fixed accounts, use the manual `Cloud Demo Purge` GitHub Action.
+keeping the fixed accounts, use the manual `Operations — Cloud Demo Purge` GitHub Action.
 
 If the deployed backend runtime must change, use the protected CD-03 Pydantic
 workflow from the reviewed `main` revision after an authorized preflight; do
 not edit ECS task definitions by hand. First confirm the workflow's expected
 baseline because the repository records Pydantic as already active.
 
-Before running Phase 10 for any future Route 53-managed domain, provide:
+The Phase 10 workflow is archived and must not be restored merely to change the
+current domain. If a future, separately reviewed Route 53 migration is approved,
+its historical inputs were:
 
 ```text
 domain_name=<owned custom domain, for example app.example.com>
 hosted_zone_id=<existing Route 53 public hosted zone ID>
 ```
 
-Do not blindly re-run Phase 10 against `app.cadensy.top`; the current DNS
-provider is Aliyun and future backend task definition updates must preserve the
-existing AI runtime.
+Do not run the archived Phase 10 implementation against `app.cadensy.top`; the
+current DNS provider is Aliyun. Any replacement workflow needs a fresh review,
+and future backend task definition updates must preserve the existing AI
+runtime.

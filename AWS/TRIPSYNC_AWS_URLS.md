@@ -52,20 +52,23 @@ https://github.com/shnnzdx/cap_stone/actions/runs/31355307955
 Phase 9 screenshot artifact:
 https://github.com/shnnzdx/cap_stone/actions/runs/31355307955/artifacts/9050425261
 
-Cloud Fixed Accounts Upsert workflow:
+Operations — Cloud Fixed Accounts Upsert workflow:
 https://github.com/shnnzdx/cap_stone/actions/workflows/cloud-fixed-accounts-upsert.yml
 
 Cloud Fixed Accounts Upsert successful run:
 https://github.com/shnnzdx/cap_stone/actions/runs/31662909315
 
-Cloud Demo Purge workflow:
+Operations — Cloud Demo Purge workflow:
 https://github.com/shnnzdx/cap_stone/actions/workflows/cloud-demo-purge.yml
 
 Cloud Demo Purge successful run:
 https://github.com/shnnzdx/cap_stone/actions/runs/31663298728
 
-DeepSeek-only Release B activation workflow:
-https://github.com/shnnzdx/Cadensy/actions/workflows/cd01-release-b-ai-activation.yml
+Current Pydantic production release workflow:
+https://github.com/shnnzdx/Cadensy/actions/workflows/cd03-pydantic-production-release.yml
+
+The former DeepSeek-only Release B workflow is archived in the repository at:
+AWS/archive/workflows/retired-release/cd01-release-b-ai-activation.yml
 ```
 
 ## Local AWS Operator Credential Source
@@ -215,7 +218,7 @@ Do not blindly re-run `Phase 10 HTTPS Custom Domain` against
 future backend task definition updates must preserve the current AI runtime.
 
 Cloud RDS remains private. Use `AWS/CLOUD_FIXED_ACCOUNTS_RUNBOOK.md` and the
-manual `Cloud Fixed Accounts Upsert` workflow if the real database should
+manual `Operations — Cloud Fixed Accounts Upsert` workflow if the real database should
 contain the fixed backend accounts:
 
 ```text

@@ -1,4 +1,4 @@
-name: Cloud Fixed Accounts Upsert
+name: Operations — Cloud Fixed Accounts Upsert
 
 on:
   workflow_dispatch:

@@ -225,7 +225,7 @@ Recommended final browser check:
 
 ```text
 GitHub Actions
--> Phase 9 Public E2E
+-> Operations — Public Production E2E
 -> public_url=https://app.cadensy.top
 ```
 

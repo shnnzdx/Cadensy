@@ -1,6 +1,6 @@
 # TripSync AWS Phase 6 Runtime Secrets Plan
 
-Status: repository readiness completed, no AWS secrets or parameters created.
+Status: historical Phase 6 record; repository readiness completed, no AWS secrets or parameters created.
 
 Date: 2026-08-10
 
@@ -8,10 +8,14 @@ Region: us-east-1
 
 Phase 6 defines how TripSync runtime configuration should be handled after the first infrastructure-only backend proof. It does not create AWS Secrets Manager secrets, SSM parameters, IAM permissions, or ECS task definition changes.
 
-Repository readiness workflow:
+The workflows named below completed their purpose and are no longer active
+GitHub Actions entry points. They are retained as historical evidence under
+`AWS/archive/workflows/completed-setup/`.
+
+Repository readiness workflow (archived):
 
 ```text
-.github/workflows/runtime-secrets-readiness.yml
+AWS/archive/workflows/completed-setup/runtime-secrets-readiness.yml
 ```
 
 The workflow is manually triggered and validation-only. It does not configure AWS credentials, read GitHub Secrets, read AWS secrets, or print environment variables.
@@ -24,11 +28,11 @@ GitHub Actions run: https://github.com/shnnzdx/cap_stone/actions/runs/3134973828
 result: success
 ```
 
-Runtime provisioning plan:
+Runtime provisioning plan and workflow (archived):
 
 ```text
 AWS/archive/completed-phases/PHASE6_RUNTIME_PROVISION_PLAN.md
-.github/workflows/phase6-runtime-provision.yml
+AWS/archive/workflows/completed-setup/phase6-runtime-provision.yml
 ```
 
 Runtime provisioning result:

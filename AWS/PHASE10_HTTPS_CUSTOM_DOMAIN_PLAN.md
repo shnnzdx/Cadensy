@@ -1,13 +1,17 @@
 # TripSync AWS Phase 10 HTTPS Custom Domain Plan
 
-Status: workflow ready; blocked on domain input.
+Status: historical Route 53 plan; not an active production workflow.
 
 Date: 2026-08-10
 
-Workflow:
+The production custom domain is currently operated through Aliyun DNS. The
+unused Route 53 implementation is preserved as historical evidence and must not
+be treated as the current DNS runbook.
+
+Archived workflow:
 
 ```text
-.github/workflows/phase10-https-custom-domain.yml
+AWS/archive/workflows/completed-setup/phase10-https-custom-domain.yml
 ```
 
 This phase is only for HTTPS and custom domain configuration.

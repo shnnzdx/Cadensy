@@ -1,4 +1,4 @@
-name: CD-01 — Manually Approved Production Frontend Release
+name: Release — Production Frontend
 
 on:
   workflow_dispatch:

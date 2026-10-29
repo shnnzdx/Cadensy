@@ -1,4 +1,4 @@
-"""Offline CD-02 contracts for controlled DeepSeek production activation."""
+"""Historical CD-02 contracts retained for archived release evidence."""
 
 from __future__ import annotations
 
@@ -12,7 +12,14 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_deepseek_activation_task_definition.py"
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-release-b-ai-activation.yml"
+WORKFLOW_PATH = (
+    REPOSITORY_ROOT
+    / "AWS"
+    / "archive"
+    / "workflows"
+    / "retired-release"
+    / "cd01-release-b-ai-activation.yml"
+)
 OBSOLETE_OLLAMA_WORKFLOWS = (
     REPOSITORY_ROOT / ".github" / "workflows" / "backend-ai-runtime-config.yml",
     REPOSITORY_ROOT / ".github" / "workflows" / "backend-ai-secret-provision.yml",
