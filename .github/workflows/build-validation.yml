@@ -20,8 +20,176 @@ env:
   NODE_VERSION: "22.13.0"
 
 jobs:
+  classify-change-scope:
+    name: CI — Classify Documentation or Code Change
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.scope.outputs.code_changed }}
+      docs_changed: ${{ steps.scope.outputs.docs_changed }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+      base_sha: ${{ steps.scope.outputs.base_sha }}
+      head_sha: ${{ steps.scope.outputs.head_sha }}
+    steps:
+      - name: Check out change history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify the changed paths
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          head_sha="${GITHUB_SHA}"
+          base_sha=""
+          case "${EVENT_NAME}" in
+            pull_request)
+              base_sha="${PR_BASE_SHA}"
+              head_sha="${PR_HEAD_SHA}"
+              ;;
+            push)
+              base_sha="${EVENT_BEFORE}"
+              ;;
+            workflow_dispatch)
+              # A manual run is an explicit request for the full regression suite.
+              echo "code_changed=true" >> "${GITHUB_OUTPUT}"
+              echo "docs_changed=false" >> "${GITHUB_OUTPUT}"
+              echo "docs_only=false" >> "${GITHUB_OUTPUT}"
+              echo "base_sha=" >> "${GITHUB_OUTPUT}"
+              echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+              exit 0
+              ;;
+            *)
+              echo "Unexpected event '${EVENT_NAME}'; failing safe to code validation." >&2
+              echo "code_changed=true" >> "${GITHUB_OUTPUT}"
+              echo "docs_changed=false" >> "${GITHUB_OUTPUT}"
+              echo "docs_only=false" >> "${GITHUB_OUTPUT}"
+              echo "base_sha=" >> "${GITHUB_OUTPUT}"
+              echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+              exit 0
+              ;;
+          esac
+
+          if [[ -z "${base_sha}" || "${base_sha}" =~ ^0+$ ]] || \
+             ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null || \
+             ! git cat-file -e "${head_sha}^{commit}" 2>/dev/null; then
+            echo "Cannot establish a trusted diff; running the full code suite." >&2
+            echo "code_changed=true" >> "${GITHUB_OUTPUT}"
+            echo "docs_changed=false" >> "${GITHUB_OUTPUT}"
+            echo "docs_only=false" >> "${GITHUB_OUTPUT}"
+            echo "base_sha=" >> "${GITHUB_OUTPUT}"
+            echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          code_changed=false
+          docs_changed=false
+          mapfile -t changed_files < <(git diff --name-only "${base_sha}" "${head_sha}")
+          if [[ "${#changed_files[@]}" -eq 0 ]]; then
+            echo "Empty diff; running the full code suite." >&2
+            code_changed=true
+          fi
+
+          for file in "${changed_files[@]}"; do
+            case "${file}" in
+              *.md|docs/**|AI_enhanced/**|AWS/**)
+                docs_changed=true
+                ;;
+              *)
+                code_changed=true
+                ;;
+            esac
+          done
+
+          docs_only=false
+          if [[ "${docs_changed}" = true && "${code_changed}" = false ]]; then
+            docs_only=true
+          fi
+
+          echo "code_changed=${code_changed}" >> "${GITHUB_OUTPUT}"
+          echo "docs_changed=${docs_changed}" >> "${GITHUB_OUTPUT}"
+          echo "docs_only=${docs_only}" >> "${GITHUB_OUTPUT}"
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+
+  documentation-ci:
+    name: Documentation — Relative Link Check
+    needs: classify-change-scope
+    if: ${{ always() && needs.classify-change-scope.outputs.docs_changed == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the reviewed source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify-change-scope.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Validate changed Markdown relative links
+        shell: bash
+        env:
+          BASE_SHA: ${{ needs.classify-change-scope.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.classify-change-scope.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          python3 - "${BASE_SHA}" "${HEAD_SHA}" <<'PY'
+          from __future__ import annotations
+
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote
+
+          base_sha, head_sha = sys.argv[1:]
+          root = Path.cwd().resolve()
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", base_sha, head_sha], text=True
+          ).splitlines()
+          markdown_files = [root / path for path in changed if path.lower().endswith(".md")]
+          pattern = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\n]+)\)")
+          failures: list[str] = []
+
+          for source in markdown_files:
+              if not source.is_file():
+                  continue
+              for target in pattern.findall(source.read_text(encoding="utf-8")):
+                  target = target.strip()
+                  if target.startswith("<") and ">" in target:
+                      target = target[1 : target.index(">")]
+                  else:
+                      target = target.split(maxsplit=1)[0]
+                  if not target or target.startswith(("#", "/", "mailto:", "tel:")) or "://" in target:
+                      continue
+                  target_path = unquote(target.split("#", 1)[0])
+                  if not target_path:
+                      continue
+                  resolved = (source.parent / target_path).resolve()
+                  try:
+                      resolved.relative_to(root)
+                  except ValueError:
+                      failures.append(f"{source.relative_to(root)}: link escapes repository: {target}")
+                  else:
+                      if not resolved.exists():
+                          failures.append(f"{source.relative_to(root)}: missing target: {target}")
+
+          if failures:
+              print("\n".join(failures), file=sys.stderr)
+              raise SystemExit(1)
+          print(f"Validated relative links in {len(markdown_files)} changed Markdown file(s).")
+          PY
+
   backend-legacy-full-regression:
     name: Backend — Legacy Full Regression
+    needs: classify-change-scope
+    # If scope classification cannot run, the empty output is not "false" and
+    # this required check runs rather than silently allowing a code change.
+    if: ${{ always() && needs.classify-change-scope.outputs.code_changed != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -250,6 +418,8 @@ jobs:
 
   pydantic-ai-isolated-fake-compatibility:
     name: Pydantic AI — Isolated Fake Compatibility
+    needs: classify-change-scope
+    if: ${{ always() && needs.classify-change-scope.outputs.code_changed != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -332,6 +502,8 @@ jobs:
 
   backend-production-pydantic-image-proof:
     name: Backend — Production Pydantic Image Proof
+    needs: classify-change-scope
+    if: ${{ always() && needs.classify-change-scope.outputs.code_changed != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -349,6 +521,8 @@ jobs:
 
   backend-migration-runner-image-proof:
     name: Backend — Migration Runner Image Proof
+    needs: classify-change-scope
+    if: ${{ always() && needs.classify-change-scope.outputs.code_changed != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -370,6 +544,8 @@ jobs:
 
   frontend-regression:
     name: Frontend — Regression and Builds
+    needs: classify-change-scope
+    if: ${{ always() && needs.classify-change-scope.outputs.code_changed != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
