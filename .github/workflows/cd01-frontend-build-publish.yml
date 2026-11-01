@@ -29,8 +29,8 @@ env:
   PRODUCTION_API_BASE_URL: https://app.cadensy.top
 
 jobs:
-  build-and-push:
-    name: Build, validate, and publish one immutable frontend image
+  classify-artifact-source:
+    name: Determine whether frontend artifacts are needed
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
@@ -38,10 +38,9 @@ jobs:
        github.event.workflow_run.head_branch == 'main') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    # Main remains the artifact-publication approval boundary.  This workflow
-    # has no ECS, RDS, migration, or shared-infrastructure operation.
-    environment: Main
-    timeout-minutes: 35
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      build_required: ${{ steps.scope.outputs.build_required }}
 
     steps:
       - name: Select the CI-approved main source
@@ -61,16 +60,61 @@ jobs:
           [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=${source_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Check out the selected immutable source
+      - name: Check out the selected source history
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.source.outputs.sha }}
           fetch-depth: 0
 
-      - name: Verify selected source and full-stack build inputs
+      - name: Determine whether frontend build inputs changed
+        id: scope
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]]; then
+            echo "build_required=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          parent_sha="$(git rev-parse "${SOURCE_SHA}^" 2>/dev/null || true)"
+          if [[ -z "${parent_sha}" ]]; then
+            echo "No trusted parent commit; building fail-safe." >&2
+            echo "build_required=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          build_required=false
+          while IFS= read -r file; do
+            case "${file}" in
+              frontend/**|trip/**|shared/**|.dockerignore|.github/workflows/cd01-frontend-build-publish.yml)
+                build_required=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "${parent_sha}" "${SOURCE_SHA}")
+          echo "build_required=${build_required}" >> "${GITHUB_OUTPUT}"
+
+  build-and-push:
+    name: Build, validate, and publish one immutable frontend image
+    needs: classify-artifact-source
+    if: ${{ needs.classify-artifact-source.outputs.build_required == 'true' }}
+    runs-on: ubuntu-latest
+    # Main remains the artifact-publication approval boundary. This workflow
+    # has no ECS, RDS, migration, or shared-infrastructure operation.
+    environment: Main
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out the selected immutable source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify-artifact-source.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify selected source and full-stack build inputs
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           actual_sha="$(git rev-parse HEAD)"
@@ -105,7 +149,7 @@ jobs:
       - name: Refuse a previously used immutable release tag
         shell: bash
         env:
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           error_file="$(mktemp)"
@@ -130,7 +174,7 @@ jobs:
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker build \
@@ -144,7 +188,7 @@ jobs:
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
           CONTAINER_NAME: tripsync-frontend-release-proof
         run: |
           set -euo pipefail
@@ -169,7 +213,7 @@ jobs:
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker push "${ECR_URI}:${SOURCE_SHA}"

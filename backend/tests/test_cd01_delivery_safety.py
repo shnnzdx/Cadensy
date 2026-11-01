@@ -472,9 +472,18 @@ def test_cd01_workflows_are_digest_pinned_manual_for_production_and_never_migrat
     assert {"workflow_run", "workflow_dispatch"} == set(build["on"])
     assert build["on"]["workflow_run"]["workflows"] == ["CI Regression Gates"]
     assert build["on"]["workflow_run"]["branches"] == ["main"]
-    assert "github.event.workflow_run.conclusion == 'success'" in build["jobs"]["build-and-push"]["if"]
-    assert "github.event.workflow_run.event == 'push'" in build["jobs"]["build-and-push"]["if"]
-    assert build["jobs"]["build-and-push"]["environment"] == "Main"
+    scope_job = build["jobs"]["classify-artifact-source"]
+    build_job = build["jobs"]["build-and-push"]
+    assert "github.event.workflow_run.conclusion == 'success'" in scope_job["if"]
+    assert "github.event.workflow_run.event == 'push'" in scope_job["if"]
+    assert build_job["needs"] == "classify-artifact-source"
+    assert build_job["if"] == "${{ needs.classify-artifact-source.outputs.build_required == 'true' }}"
+    scope_script = next(
+        step["run"] for step in scope_job["steps"] if step.get("id") == "scope"
+    )
+    assert "backend/**|.github/workflows/cd01-build-publish.yml" in scope_script
+    assert "workflow_dispatch" in scope_script
+    assert build_job["environment"] == "Main"
     assert set(release["on"]) == {"workflow_dispatch"}
     assert release["jobs"]["assert-approval-gate"]["if"] == "github.ref == 'refs/heads/main'"
     assert release["jobs"]["promote"]["needs"] == "assert-approval-gate"

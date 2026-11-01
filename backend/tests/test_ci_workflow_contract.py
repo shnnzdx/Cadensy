@@ -126,16 +126,52 @@ def test_ci_remote_job_contract_has_pinned_runtimes_isolated_postgres_and_no_sof
 
     jobs = workflow["jobs"]
     assert set(jobs) == {
+        "classify-change-scope",
+        "documentation-ci",
         "backend-legacy-full-regression",
         "pydantic-ai-isolated-fake-compatibility",
         "backend-production-pydantic-image-proof",
         "backend-migration-runner-image-proof",
         "frontend-regression",
     }
+    scope = jobs["classify-change-scope"]
+    assert "needs" not in scope
+    assert scope["outputs"] == {
+        "code_changed": "${{ steps.scope.outputs.code_changed }}",
+        "docs_changed": "${{ steps.scope.outputs.docs_changed }}",
+        "docs_only": "${{ steps.scope.outputs.docs_only }}",
+        "base_sha": "${{ steps.scope.outputs.base_sha }}",
+        "head_sha": "${{ steps.scope.outputs.head_sha }}",
+    }
+    scope_script = next(
+        step["run"] for step in scope["steps"] if step.get("id") == "scope"
+    )
+    assert "*.md|docs/**|AI_enhanced/**|AWS/**" in scope_script
+    assert "Cannot establish a trusted diff; running the full code suite." in scope_script
+
+    documentation = jobs["documentation-ci"]
+    assert documentation["needs"] == "classify-change-scope"
+    assert documentation["if"] == "${{ always() && needs.classify-change-scope.outputs.docs_changed == 'true' }}"
+    documentation_script = documentation["steps"][-1]["run"]
+    assert "Validate changed Markdown relative links" == documentation["steps"][-1]["name"]
+    assert "missing target" in documentation_script
+    assert "link escapes repository" in documentation_script
+
+    code_jobs = {
+        "backend-legacy-full-regression",
+        "pydantic-ai-isolated-fake-compatibility",
+        "backend-production-pydantic-image-proof",
+        "backend-migration-runner-image-proof",
+        "frontend-regression",
+    }
+    for job_name in code_jobs:
+        job = jobs[job_name]
+        assert job["needs"] == "classify-change-scope"
+        assert job["if"] == "${{ always() && needs.classify-change-scope.outputs.code_changed != 'false' }}"
+
     for job in jobs.values():
-        assert "needs" not in job
         assert "continue-on-error" not in job
-        for step in job["steps"]:
+        for step in job.get("steps", []):
             assert "continue-on-error" not in step
             assert "|| true" not in step.get("run", "")
 

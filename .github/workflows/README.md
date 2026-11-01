@@ -1,7 +1,7 @@
 # Active GitHub Actions Workflows
 
 Status: current operator map
-Last reviewed: 2026-10-29
+Last reviewed: 2026-10-31
 
 Only workflows that remain valid CI, artifact, release, or production-operation entry points belong in this directory. Completed setup workflows and superseded release paths are preserved under [`../../AWS/archive/workflows/`](../../AWS/archive/workflows/README.md), where GitHub will not expose them as runnable Actions.
 
@@ -9,9 +9,9 @@ Only workflows that remain valid CI, artifact, release, or production-operation 
 
 | Category | Workflow | Trigger | Responsibility |
 | --- | --- | --- | --- |
-| CI | `build-validation.yml` | pull request, push, manual | Required regression, build, migration-runner, and Pydantic compatibility gates |
-| Artifacts | `cd01-build-publish.yml` | successful main CI, manual rebuild | Build and publish digest-addressed backend and migration-runner images; no deployment |
-| Artifacts | `cd01-frontend-build-publish.yml` | successful main CI, manual rebuild | Build and publish a digest-addressed frontend image; no deployment |
+| CI | `build-validation.yml` | pull request, push, manual | Classifies documentation versus code changes; validates changed Markdown links and runs required regression gates only for code changes |
+| Artifacts | `cd01-build-publish.yml` | successful relevant main CI, manual rebuild | Build and publish digest-addressed backend and migration-runner images only when backend build inputs change; no deployment |
+| Artifacts | `cd01-frontend-build-publish.yml` | successful relevant main CI, manual rebuild | Build and publish a digest-addressed frontend image only when frontend build inputs change; no deployment |
 | Release | `cd01-pr06b-schema-migration.yml` | protected manual dispatch | Run the explicitly approved production schema migration gate |
 | Release | `cd01-production-release.yml` | protected manual dispatch | Promote a validated backend image with rollback checks |
 | Release | `cd01-frontend-production-release.yml` | protected manual dispatch | Promote a validated frontend image with rollback checks |
@@ -23,7 +23,9 @@ Only workflows that remain valid CI, artifact, release, or production-operation 
 ## Frozen boundaries
 
 - CI validates source; it does not publish or deploy.
+- Pure documentation changes run the `Documentation — Relative Link Check` job. Required code jobs are intentionally skipped with a successful conclusion, preserving `main` branch protection without consuming application-test runners.
 - Artifact workflows publish immutable-addressed build outputs; they do not update ECS, run migrations, or change data.
+- Artifact workflows re-check changed build inputs before requesting the protected `Main` environment; documentation-only commits never receive AWS credentials or push ECR images.
 - Release workflows are separate because their approval, rollback, and evidence contracts differ. Do not combine them into one unrestricted shell job.
 - Data operations remain separate from release operations so an account repair or demo purge cannot inherit deployment permissions accidentally.
 - All AWS mutation workflows must be dispatched from `main` and use the protected `Main` environment where specified.

@@ -146,7 +146,15 @@ def test_frontend_release_workflows_are_manual_or_artifact_only_and_never_provis
     release_script = "\n".join(step.get("run", "") for job in release["jobs"].values() for step in job.get("steps", [])).casefold()
 
     assert {"workflow_run", "workflow_dispatch"} == set(build["on"])
-    assert build["jobs"]["build-and-push"]["environment"] == "Main"
+    scope_job = build["jobs"]["classify-artifact-source"]
+    build_job = build["jobs"]["build-and-push"]
+    assert build_job["needs"] == "classify-artifact-source"
+    assert build_job["if"] == "${{ needs.classify-artifact-source.outputs.build_required == 'true' }}"
+    scope_script = next(
+        step["run"] for step in scope_job["steps"] if step.get("id") == "scope"
+    )
+    assert "frontend/**|trip/**|shared/**|.dockerignore" in scope_script
+    assert build_job["environment"] == "Main"
     assert "npm run build:trip-preview" in FRONTEND_DOCKERFILE.read_text(encoding="utf-8")
     assert "curl --fail" in build_script
     assert "docker push" in build_script

@@ -28,8 +28,8 @@ env:
   ECR_REPOSITORY: tripsync-backend
 
 jobs:
-  build-and-push:
-    name: Build and publish immutable backend artifacts
+  classify-artifact-source:
+    name: Determine whether backend artifacts are needed
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
@@ -37,16 +37,9 @@ jobs:
        github.event.workflow_run.head_branch == 'main') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    # This environment is the existing AWS credential boundary.  It may require
-    # approval according to the repository Environment configuration; this job
-    # can publish artifacts but contains no ECS, RDS, or migration operation.
-    environment: Main
-    timeout-minutes: 35
-    # This is an artifact contract only. It is deliberately separate from the
-    # production-release schema preflight, which remains fail-closed at the
-    # deployed c2a4 baseline until a dedicated PR-06B migration is approved.
-    env:
-      BUILD_ALEMBIC_HEAD: b7d3a1e9c642
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      build_required: ${{ steps.scope.outputs.build_required }}
 
     steps:
       - name: Select the CI-approved main source
@@ -66,16 +59,67 @@ jobs:
           [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=${source_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Check out the selected immutable source
+      - name: Check out the selected source history
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.source.outputs.sha }}
           fetch-depth: 0
 
-      - name: Verify selected source belongs to main
+      - name: Determine whether backend build inputs changed
+        id: scope
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]]; then
+            echo "build_required=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          parent_sha="$(git rev-parse "${SOURCE_SHA}^" 2>/dev/null || true)"
+          if [[ -z "${parent_sha}" ]]; then
+            echo "No trusted parent commit; building fail-safe." >&2
+            echo "build_required=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          build_required=false
+          while IFS= read -r file; do
+            case "${file}" in
+              backend/**|.github/workflows/cd01-build-publish.yml)
+                build_required=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "${parent_sha}" "${SOURCE_SHA}")
+          echo "build_required=${build_required}" >> "${GITHUB_OUTPUT}"
+
+  build-and-push:
+    name: Build and publish immutable backend artifacts
+    needs: classify-artifact-source
+    if: ${{ needs.classify-artifact-source.outputs.build_required == 'true' }}
+    runs-on: ubuntu-latest
+    # This environment is the existing AWS credential boundary. It may require
+    # approval according to the repository Environment configuration; this job
+    # can publish artifacts but contains no ECS, RDS, or migration operation.
+    environment: Main
+    timeout-minutes: 35
+    # This is an artifact contract only. It is deliberately separate from the
+    # production-release schema preflight, which remains fail-closed at the
+    # deployed c2a4 baseline until a dedicated PR-06B migration is approved.
+    env:
+      BUILD_ALEMBIC_HEAD: b7d3a1e9c642
+
+    steps:
+      - name: Check out the selected immutable source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify-artifact-source.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify selected source belongs to main
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           actual_sha="$(git rev-parse HEAD)"
@@ -111,7 +155,7 @@ jobs:
       - name: Refuse mutable or previously used release tags
         shell: bash
         env:
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           for tag in "${SOURCE_SHA}" "${SOURCE_SHA}-migration"; do
@@ -138,7 +182,7 @@ jobs:
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker build --file backend/Dockerfile --tag "${ECR_URI}:${SOURCE_SHA}" backend
@@ -148,7 +192,7 @@ jobs:
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           migration_image="${ECR_URI}:${SOURCE_SHA}-migration"
@@ -165,7 +209,7 @@ jobs:
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker push "${ECR_URI}:${SOURCE_SHA}"
