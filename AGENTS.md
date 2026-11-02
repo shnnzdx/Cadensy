@@ -9,12 +9,12 @@ Read these files before substantial work:
 - `README.md`
 - `INTEGRATION-ROADMAP.md`
 - `HANDOFF.md`
-- `docs/README.md`
-- `docs/navigation-known-wrong-behavior.md`
+- `application_docs/README.md`
+- `application_docs/navigation-known-wrong-behavior.md`
 
 If the task is backend cleanup or repo consolidation, also read:
 
-- `docs/HANDOFF_PROMPT_BACKEND_REFACTOR_CURRENT.md`
+- `application_docs/HANDOFF_PROMPT_BACKEND_REFACTOR_CURRENT.md`
 - `backend/README.md`
 - `backend/LOCAL_DEV.md`
 
@@ -27,10 +27,10 @@ handling, or AI evidence, also read:
 ## Documentation Lifecycle
 
 - Update current contracts in the same change that makes them stale.
-- Treat `AI_enhanced/PR-*`, `AI_enhanced/00_*`, `docs/backend/`, and
-  `docs/frontend/` as point-in-time evidence, not current status.
-- Move superseded planning, temporary deployment links/assets, and replaced
-  handoffs to `docs/_archive/`.
+- Treat `AI_enhanced/PR-*`, `AI_enhanced/00_*`, `application_docs/backend/`, and
+  `application_docs/frontend/` as point-in-time evidence, not current status.
+- Move superseded application planning, temporary deployment links/assets, and
+  replaced handoffs to `application_docs/_archive/`.
 - Do not rewrite historical evidence to match the present; add a newer record
   and update the current index.
 
@@ -42,7 +42,7 @@ Treat these as the active source-of-truth:
 - `trip/`
 - `backend/`
 - `shared/`
-- `docs/`
+- `application_docs/`
 
 Do not treat these as primary source files:
 

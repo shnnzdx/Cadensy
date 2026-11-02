@@ -146,7 +146,7 @@ def test_ci_remote_job_contract_has_pinned_runtimes_isolated_postgres_and_no_sof
     scope_script = next(
         step["run"] for step in scope["steps"] if step.get("id") == "scope"
     )
-    assert "*.md|docs/**|AI_enhanced/**|AWS/**" in scope_script
+    assert "*.md|application_docs/**|AI_enhanced/**|AWS/**" in scope_script
     assert "Cannot establish a trusted diff; running the full code suite." in scope_script
 
     documentation = jobs["documentation-ci"]

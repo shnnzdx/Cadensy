@@ -68,7 +68,7 @@ Read these first before changing Trip behavior:
 2. `../README.md`
 3. `../INTEGRATION-ROADMAP.md`
 4. `../HANDOFF.md`
-5. `../docs/navigation-known-wrong-behavior.md`
+5. `../application_docs/navigation-known-wrong-behavior.md`
 6. `FRONTEND.md`
 7. `BACKEND.md`
 

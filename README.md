@@ -6,12 +6,14 @@ The main problem it solves is coordination. Group trips usually involve differen
 
 AI is part of the product, but it is not the whole product. It helps explain the itinerary, generate or repair plan options, and turn natural-language requests into structured changes. The final decision path is handled by product rules, so the system can stay predictable and auditable.
 
-## Capstone Documentation
+## Documentation Domains
 
-The current in-repository development record starts at
-[`docs/README.md`](./docs/README.md). Use it to distinguish active contracts,
-point-in-time evidence, and archived material. The current operational summary
-is [`HANDOFF.md`](./HANDOFF.md).
+The application development record starts at
+[`application_docs/README.md`](./application_docs/README.md). It covers the
+product, frontend, backend, and application-level handoffs. AWS deployment
+records live in [`AWS/`](./AWS/README.md), and AI-agent engineering evidence
+lives in [`AI_enhanced/`](./AI_enhanced/README.md). The current operational
+summary is [`HANDOFF.md`](./HANDOFF.md).
 
 The final capstone documentation is maintained on the `docs` branch:
 
@@ -54,7 +56,7 @@ Core decision paths:
 | Reopened round | A settled decision is being changed | A stronger group decision is required |
 | Confirm | A booking or hard requirement is affected | Every affected member must approve |
 
-For detailed behavior, read [docs/PRODUCT.md](./docs/PRODUCT.md).
+For detailed behavior, read [application_docs/PRODUCT.md](./application_docs/PRODUCT.md).
 
 ## Tech Stack
 
@@ -73,8 +75,9 @@ For detailed behavior, read [docs/PRODUCT.md](./docs/PRODUCT.md).
 |-- trip/                  Trip workspace app: plan, chat, updates, members, invites
 |-- backend/               FastAPI + PostgreSQL API and domain logic
 |-- shared/                Shared route, session, theme, and product contracts
-|-- docs/                  Product, handoff, design, and operating notes
+|-- application_docs/      Product, frontend, backend, and application handoffs
 |-- AWS/                   Deployment planning and infrastructure notes
+|-- AI_enhanced/           AI-agent runtime, evaluation, and evidence
 |-- AGENTS.md              Working rules for AI agents in this repository
 |-- AI.md                  Compatibility pointer for older AI workflows
 `-- README.md
@@ -479,12 +482,12 @@ The capstone documentation records the current testing evidence in detail. The c
 - [AI.md](./AI.md)
 - [HANDOFF.md](./HANDOFF.md)
 - [INTEGRATION-ROADMAP.md](./INTEGRATION-ROADMAP.md)
-- [docs/README.md](./docs/README.md)
+- [application_docs/README.md](./application_docs/README.md)
 - [Capstone submission documentation](https://github.com/shnnzdx/cap_stone/blob/docs/docs/Cadensy_Full_Stack_System_Documentation.md)
 - [backend/README.md](./backend/README.md)
 - [backend/LOCAL_DEV.md](./backend/LOCAL_DEV.md)
 - [frontend/README.md](./frontend/README.md)
 - [trip/README.md](./trip/README.md)
-- [docs/PRODUCT.md](./docs/PRODUCT.md)
-- [docs/HANDOFF_PROMPT_CURRENT.md](./docs/HANDOFF_PROMPT_CURRENT.md)
+- [application_docs/PRODUCT.md](./application_docs/PRODUCT.md)
+- [application_docs/HANDOFF_PROMPT_CURRENT.md](./application_docs/HANDOFF_PROMPT_CURRENT.md)
 - [AWS/README.md](./AWS/README.md)

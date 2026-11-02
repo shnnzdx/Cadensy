@@ -1,9 +1,14 @@
-# Cadensy Documentation Index
+# Cadensy Application Documentation Index
 
-Status: current documentation map
-Last reviewed: 2026-10-28
+Status: current application documentation map
+Last reviewed: 2026-11-01
 
-This directory is the development record for the whole system. It contains both current contracts and historical evidence; those categories are not interchangeable.
+This directory is the application documentation domain: product, frontend,
+backend, shared workspace, and application-level handoffs. AWS deployment
+records remain in [`../AWS/README.md`](../AWS/README.md), while AI-agent
+engineering evidence remains in [`../AI_enhanced/README.md`](../AI_enhanced/README.md).
+It contains both current contracts and historical evidence; those categories
+are not interchangeable.
 
 ## Start here
 

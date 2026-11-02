@@ -1,14 +1,14 @@
 # Cadensy AI Agent Guide
 
 Status: current compatibility pointer
-Last reviewed: 2026-10-28
+Last reviewed: 2026-11-01
 
 The authoritative AI engineering record is [`AI_enhanced/README.md`](AI_enhanced/README.md). Start there before changing runtime selection, durable conversation behavior, tool execution, provider handling, or evaluation evidence.
 
 ## Current references
 
 - [`HANDOFF.md`](HANDOFF.md) — current system and production handoff
-- [`docs/HANDOFF_PROMPT_CURRENT.md`](docs/HANDOFF_PROMPT_CURRENT.md) — current continuation prompt
+- [`application_docs/HANDOFF_PROMPT_CURRENT.md`](application_docs/HANDOFF_PROMPT_CURRENT.md) — current continuation prompt
 - [`backend/app/agents/AI_AGENT_SUMMARY.md`](backend/app/agents/AI_AGENT_SUMMARY.md) — implementation map
 - [`backend/README.md`](backend/README.md) and [`backend/LOCAL_DEV.md`](backend/LOCAL_DEV.md) — operation and local validation
 - [`AI_enhanced/PR-09_Pydantic-Production-Migration/README.md`](AI_enhanced/PR-09_Pydantic-Production-Migration/README.md) — Pydantic migration evidence index
