@@ -1,12 +1,17 @@
 # Cadensy Current Handoff
 
 Status: current operational handoff
-Last reviewed: 2026-10-31
+Last reviewed: 2026-11-01
 Release evidence baseline: Cadensy v0.3.0
 
-This file summarizes the state recorded in the repository. It is not a fresh live-AWS inspection. For documentation ownership and evidence rules, start at [`docs/README.md`](docs/README.md).
+This file summarizes the state recorded in the repository. It is not a fresh live-AWS inspection. For documentation ownership and evidence rules, start at [`application_docs/README.md`](application_docs/README.md).
 
 ## Contribution log
+
+### 2026-11-01 — Documentation-domain rename
+
+- Renamed `docs/` to [`application_docs/`](application_docs/README.md) to make its product, frontend, backend, and application-handoff scope explicit.
+- Kept [`AWS/`](AWS/README.md) and [`AI_enhanced/`](AI_enhanced/README.md) as independent documentation domains; historical evidence remains unchanged.
 
 ### 2026-10-31 — Workflow consolidation verification
 
@@ -30,7 +35,7 @@ The local backend default can remain `legacy`. That is a development default and
 
 ## Active architecture boundaries
 
-The current source of truth is `frontend/`, `trip/`, `backend/`, `shared/`, and `docs/`. Generated bundles under `frontend/dist/`, `trip/dist/`, and `frontend/public/trip-app/assets/` are not primary source.
+The current application source of truth is `frontend/`, `trip/`, `backend/`, `shared/`, and `application_docs/`. Generated bundles under `frontend/dist/`, `trip/dist/`, and `frontend/public/trip-app/assets/` are not primary source.
 
 Do not redesign these established seams casually:
 
@@ -54,7 +59,7 @@ If `trip/` changes and the embedded `/trip` experience must reflect it, run `cd 
 - CD-03 did not execute real Pydantic provider acceptance.
 - Provider cost/rate governance should not be described as complete unless a newer contract and evidence prove it.
 
-The first two items are tracked in [`docs/navigation-known-wrong-behavior.md`](docs/navigation-known-wrong-behavior.md).
+The first two items are tracked in [`application_docs/navigation-known-wrong-behavior.md`](application_docs/navigation-known-wrong-behavior.md).
 
 ## Safe continuation workflow
 

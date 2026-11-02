@@ -1,9 +1,9 @@
-# Documentation and Agent Working Rules
+# Application Documentation and Agent Working Rules
 
 Status: current companion to [`../AGENTS.md`](../AGENTS.md)
-Last reviewed: 2026-10-28
+Last reviewed: 2026-11-01
 
-The root `AGENTS.md` is authoritative for repository work. These rules add documentation-specific guidance.
+The root `AGENTS.md` is authoritative for repository work. These rules add application-documentation-specific guidance. AWS deployment material belongs in `../AWS/`; AI-agent engineering evidence belongs in `../AI_enhanced/`.
 
 ## Read order
 

@@ -6,9 +6,9 @@ How engineering-oriented agent skills should consume this repo's domain document
 
 - `README.md` at the repo root for workspace structure and local run instructions.
 - `CONTEXT.md` at the repo root when it exists.
-- `docs/adr/` for architectural decisions when it exists.
+- `application_docs/adr/` for architectural decisions when it exists.
 
-If `CONTEXT.md` or `docs/adr/` do not exist yet, proceed silently and continue the task.
+If `CONTEXT.md` or `application_docs/adr/` do not exist yet, proceed silently and continue the task.
 
 ## File Structure
 
@@ -19,7 +19,7 @@ This repo currently follows a single-context layout:
 |-- AI.md
 |-- README.md
 |-- CONTEXT.md
-|-- docs/
+|-- application_docs/
 |   |-- adr/
 |   `-- agents/
 |-- frontend/

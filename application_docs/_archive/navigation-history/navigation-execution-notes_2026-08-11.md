@@ -27,7 +27,7 @@ trip workspace navigation adapter
     → React Router navigate()
 ```
 
-The existing preview contract in [shared/tripsync-preview-contract.js](C:/Users/zdxzh/Desktop/capstone/New/shared/tripsync-preview-contract.js)
+The existing preview contract in [shared/tripsync-preview-contract.js](../../../shared/tripsync-preview-contract.js)
 already owns host/embed handoff concerns. The future shared route codec should remain pure
 and should not perform browser navigation.
 

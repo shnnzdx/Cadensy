@@ -1,9 +1,9 @@
 # Cadensy Integration Roadmap
 
 Status: current roadmap
-Last reviewed: 2026-10-28
+Last reviewed: 2026-11-01
 
-This roadmap records what is integrated now and what remains. The original 2026-08-11 roadmap is preserved at [`docs/_archive/navigation-history/INTEGRATION-ROADMAP_2026-08-11.md`](docs/_archive/navigation-history/INTEGRATION-ROADMAP_2026-08-11.md).
+This roadmap records what is integrated now and what remains. The original 2026-08-11 roadmap is preserved at [`application_docs/_archive/navigation-history/INTEGRATION-ROADMAP_2026-08-11.md`](application_docs/_archive/navigation-history/INTEGRATION-ROADMAP_2026-08-11.md).
 
 ## Current system shape
 
@@ -47,7 +47,7 @@ Before backend cleanup, use locality, leverage, testability, migration risk, and
 
 ### 5. Keep documentation state synchronized
 
-Treat [`docs/README.md`](docs/README.md) as the documentation map. Update current contracts with implementation changes and archive superseded planning/deployment material. Keep point-in-time evidence immutable.
+Treat [`application_docs/README.md`](application_docs/README.md) as the application documentation map. Update current contracts with implementation changes and archive superseded planning/deployment material. Keep point-in-time evidence immutable.
 
 ## Constraints
 
@@ -57,4 +57,4 @@ Treat [`docs/README.md`](docs/README.md) as the documentation map. Update curren
 - Do not treat generated bundles as primary source.
 - Do not infer current production state from historical deployment reports.
 
-Active navigation limitations are documented in [`docs/navigation-known-wrong-behavior.md`](docs/navigation-known-wrong-behavior.md); current operational details are in [`HANDOFF.md`](HANDOFF.md).
+Active navigation limitations are documented in [`application_docs/navigation-known-wrong-behavior.md`](application_docs/navigation-known-wrong-behavior.md); current operational details are in [`HANDOFF.md`](HANDOFF.md).

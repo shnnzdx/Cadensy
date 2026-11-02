@@ -70,13 +70,13 @@ ECS stable + ALB target health + GET /api/health
 
 The implementation is split deliberately:
 
-- [`cd01-build-publish.yml`](../.github/workflows/cd01-build-publish.yml)
+- [`cd01-build-publish.yml`](../../../.github/workflows/cd01-build-publish.yml)
   starts only after a successful `CI Regression Gates` **push** run for `main`,
   or from a main-only controlled rebuild. It checks out the exact approved SHA,
   rejects an existing tag, builds two images, validates the migration runner
   offline, pushes immutable tags, resolves immutable digests, and ends. It has
   no ECS, RDS, Alembic mutation, or infrastructure-provisioning command.
-- [`cd01-production-release.yml`](../.github/workflows/cd01-production-release.yml)
+- [`cd01-production-release.yml`](../../../.github/workflows/cd01-production-release.yml)
   is `workflow_dispatch` only and runs inside the existing `Main` GitHub
   Environment. It accepts SHA-256 image digests, confirms their ECR tags prove
   the same main commit provenance, requires the live service to already retain
@@ -112,7 +112,7 @@ it does not rerun the completed historical migration or rewrite its Source SHA.
 `migration_bound` retains the exact Gate M evidence verification for future use
 when the release and approved migration are intentionally coupled. Do not
 change the approved head merely to make a deployment pass.
-- [`prepare_ecs_task_definition.py`](../scripts/cd01/prepare_ecs_task_definition.py)
+- [`prepare_ecs_task_definition.py`](../../../scripts/cd01/prepare_ecs_task_definition.py)
   is the offline safety boundary for that clone. It permits only the approved
   ECR repository with an `@sha256:` image, requires Fargate/`awsvpc`, both ECS
   roles, CloudWatch logs, and the existing `DATABASE_URL` SSM secret reference.
@@ -125,7 +125,7 @@ change the approved head merely to make a deployment pass.
   plaintext environment entries and ECS secret references. Provider credential
   aliases such as `*_TOKEN` are rejected for known model providers, and a name
   cannot be configured simultaneously through `environment` and `secrets`.
-- [`validate_release_evidence.py`](../scripts/cd01/validate_release_evidence.py)
+- [`validate_release_evidence.py`](../../../scripts/cd01/validate_release_evidence.py)
   executes the release-mode input contract offline. It requires immutable SHA
   and digest formats, an exact repository Gate M run URL, empty Gate M binding
   fields for `code_only`, and complete matching fields for `migration_bound`.

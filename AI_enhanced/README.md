@@ -41,4 +41,4 @@ The folders are an archival/navigation organization only; they do not alter the 
 
 This top-level README is the current status layer. The phase and PR directories are immutable point-in-time evidence and are therefore **archived in place**: moving or rewriting them would break cross-report traceability. Add a new dated report when a conclusion changes; do not edit an older report to make it agree with the latest deployment.
 
-System-wide documentation ownership and archive rules are in [`../docs/README.md`](../docs/README.md). Operational state belongs in [`../HANDOFF.md`](../HANDOFF.md); detailed AI claims belong here and in the relevant evidence folder.
+Application-documentation ownership and archive rules are in [`../application_docs/README.md`](../application_docs/README.md). Operational state belongs in [`../HANDOFF.md`](../HANDOFF.md); detailed AI claims belong here and in the relevant evidence folder.

@@ -98,7 +98,7 @@ jobs:
 
           for file in "${changed_files[@]}"; do
             case "${file}" in
-              *.md|docs/**|AI_enhanced/**|AWS/**)
+              *.md|application_docs/**|AI_enhanced/**|AWS/**)
                 docs_changed=true
                 ;;
               *)
