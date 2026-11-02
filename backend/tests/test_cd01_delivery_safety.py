@@ -481,7 +481,9 @@ def test_cd01_workflows_are_digest_pinned_manual_for_production_and_never_migrat
     scope_script = next(
         step["run"] for step in scope_job["steps"] if step.get("id") == "scope"
     )
-    assert "backend/**|.github/workflows/cd01-build-publish.yml" in scope_script
+    assert "docs/**|application_docs/**|AI_enhanced/**|AWS/**|*.md|backend/tests/**" in scope_script
+    assert "backend/**)" in scope_script
+    assert "--find-renames" in scope_script
     assert "workflow_dispatch" in scope_script
     assert build_job["environment"] == "Main"
     assert set(release["on"]) == {"workflow_dispatch"}

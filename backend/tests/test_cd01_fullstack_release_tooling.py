@@ -153,7 +153,9 @@ def test_frontend_release_workflows_are_manual_or_artifact_only_and_never_provis
     scope_script = next(
         step["run"] for step in scope_job["steps"] if step.get("id") == "scope"
     )
-    assert "frontend/**|trip/**|shared/**|.dockerignore" in scope_script
+    assert "docs/**|application_docs/**|AI_enhanced/**|AWS/**|*.md" in scope_script
+    assert "frontend/**|trip/**|shared/**|.dockerignore)" in scope_script
+    assert "--find-renames" in scope_script
     assert build_job["environment"] == "Main"
     assert "npm run build:trip-preview" in FRONTEND_DOCKERFILE.read_text(encoding="utf-8")
     assert "curl --fail" in build_script

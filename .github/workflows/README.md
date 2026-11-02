@@ -1,7 +1,7 @@
 # Active GitHub Actions Workflows
 
 Status: current operator map
-Last reviewed: 2026-10-31
+Last reviewed: 2026-11-01
 
 Only workflows that remain valid CI, artifact, release, or production-operation entry points belong in this directory. Completed setup workflows and superseded release paths are preserved under [`../../AWS/archive/workflows/`](../../AWS/archive/workflows/README.md), where GitHub will not expose them as runnable Actions.
 
@@ -25,7 +25,7 @@ Only workflows that remain valid CI, artifact, release, or production-operation 
 - CI validates source; it does not publish or deploy.
 - Pure documentation changes run the `Documentation — Relative Link Check` job. Required code jobs are intentionally skipped with a successful conclusion, preserving `main` branch protection without consuming application-test runners.
 - Artifact workflows publish immutable-addressed build outputs; they do not update ECS, run migrations, or change data.
-- Artifact workflows re-check changed build inputs before requesting the protected `Main` environment; documentation-only commits never receive AWS credentials or push ECR images.
+- Artifact workflows re-check changed build inputs before requesting the protected `Main` environment. `docs/`, `application_docs/`, `AI_enhanced/`, `AWS/`, Markdown, tests, and workflow-only changes never receive AWS credentials or push ECR images; a workflow-only rebuild is manual and controlled.
 - Release workflows are separate because their approval, rollback, and evidence contracts differ. Do not combine them into one unrestricted shell job.
 - Data operations remain separate from release operations so an account repair or demo purge cannot inherit deployment permissions accidentally.
 - All AWS mutation workflows must be dispatched from `main` and use the protected `Main` environment where specified.

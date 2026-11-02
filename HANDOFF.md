@@ -8,6 +8,11 @@ This file summarizes the state recorded in the repository. It is not a fresh liv
 
 ## Contribution log
 
+### 2026-11-01 — Artifact scope safety correction
+
+- Corrected artifact input classification so documentation, tests, and workflow-only changes cannot automatically publish ECR images; workflow source changes require a manual controlled rebuild.
+- A prior documentation-domain rename was misclassified by the old matcher. It published one immutable backend artifact but did not deploy ECS, update a service, run a migration, or change production data. The matching frontend run was cancelled before its ECR push.
+
 ### 2026-11-01 — Documentation-domain rename
 
 - Renamed `docs/` to [`application_docs/`](application_docs/README.md) to make its product, frontend, backend, and application-handoff scope explicit.

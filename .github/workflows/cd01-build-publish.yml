@@ -85,12 +85,17 @@ jobs:
           build_required=false
           while IFS= read -r file; do
             case "${file}" in
-              backend/**|.github/workflows/cd01-build-publish.yml)
+              # Documentation, tests, and release-workflow changes are
+              # validated in CI but do not alter the runtime image. A workflow
+              # change can be exercised by controlled manual rebuild only.
+              docs/**|application_docs/**|AI_enhanced/**|AWS/**|*.md|backend/tests/**)
+                ;;
+              backend/**)
                 build_required=true
                 break
                 ;;
             esac
-          done < <(git diff --name-only "${parent_sha}" "${SOURCE_SHA}")
+          done < <(git diff --name-only --find-renames "${parent_sha}" "${SOURCE_SHA}")
           echo "build_required=${build_required}" >> "${GITHUB_OUTPUT}"
 
   build-and-push:
