@@ -18,6 +18,12 @@ This file summarizes the state recorded in the repository. It is not a fresh liv
 - Renamed `docs/` to [`application_docs/`](application_docs/README.md) to make its product, frontend, backend, and application-handoff scope explicit.
 - Kept [`AWS/`](AWS/README.md) and [`AI_enhanced/`](AI_enhanced/README.md) as independent documentation domains; historical evidence remains unchanged.
 
+### 2026-11-04 — Current prompt path maintenance
+
+- Updated the current application and backend continuation prompts to reference `application_docs/` after the documentation-domain rename.
+- Preserved historical `docs/` references inside archived and point-in-time evidence; those records are not rewritten.
+- Documentation-only maintenance; no source code, AWS resource, deployment, migration, or production data was changed.
+
 ### 2026-10-31 — Workflow consolidation verification
 
 - Reviewed the workflow consolidation merged by [PR #42](https://github.com/shnnzdx/Cadensy/pull/42) at `fa7a209`.

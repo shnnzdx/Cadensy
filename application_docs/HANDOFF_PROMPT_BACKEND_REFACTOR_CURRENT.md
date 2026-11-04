@@ -1,11 +1,11 @@
 # Backend Refactor Continuation Prompt
 
 Status: current
-Last reviewed: 2026-10-28
+Last reviewed: 2026-11-04
 
 Use this only for backend cleanup or repository consolidation:
 
-> Read `AGENTS.md`, `HANDOFF.md`, `docs/README.md`, `backend/README.md`, `backend/LOCAL_DEV.md`, `AI_enhanced/README.md`, and this prompt. Treat older files in `docs/backend/` as historical handoffs.
+> Read `AGENTS.md`, `HANDOFF.md`, `application_docs/README.md`, `backend/README.md`, `backend/LOCAL_DEV.md`, `AI_enhanced/README.md`, and this prompt. Treat older files in `application_docs/backend/` as historical handoffs.
 >
 > Start with an architecture assessment. Map API composition, service dependencies, transaction ownership, durable conversation persistence, idempotency/concurrency boundaries, runtime selection, telemetry, and test seams. Rank candidates by locality, leverage, testability, migration risk, and the deletion test. Grill the strongest candidate, freeze the boundary, write a phased migration plan, then implement.
 >
