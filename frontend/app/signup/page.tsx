@@ -25,8 +25,8 @@ export default function SignupPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const next = params.get("next");
-    const resolvedNext = isSafeInternalReturnPath(next) ? next : "/trip";
+    const requestedNext = params.get("next");
+    const resolvedNext = isSafeInternalReturnPath(requestedNext) ?? "/trip";
     nextPathRef.current = resolvedNext;
     const restored = sessionRuntime.restoreTechnicalSession();
     if (restored.facts.kind === "account") {

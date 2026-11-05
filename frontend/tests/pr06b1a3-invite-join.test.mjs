@@ -19,10 +19,41 @@ test("PR-06B.1A.3 keeps the Account invite return inside the Trip workspace", ()
     accountAuthenticationHref("login", "invite-1"),
     "/login?next=%2Ftrip-app%2Findex.html%23%2Fjoin%2Finvite-1",
   );
-  assert.equal(isSafeInternalReturnPath("/trip-app/index.html#/join/invite-1"), true);
-  assert.equal(isSafeInternalReturnPath("//outside.example/invite"), false);
-  assert.equal(isSafeInternalReturnPath("https://outside.example/invite"), false);
-  assert.equal(isSafeInternalReturnPath("/\\outside.example"), false);
+  assert.equal(
+    isSafeInternalReturnPath("/trip-app/index.html#/join/invite-1"),
+    "/trip-app/index.html#/join/invite-1",
+  );
+});
+
+test("PR-06B.1A.3 normalizes safe internal Account return paths", () => {
+  assert.equal(isSafeInternalReturnPath("/trip"), "/trip");
+  assert.equal(isSafeInternalReturnPath("/trip?x=1"), "/trip?x=1");
+  assert.equal(isSafeInternalReturnPath("/trip-app/index.html#/join/invite-1"), "/trip-app/index.html#/join/invite-1");
+  assert.equal(isSafeInternalReturnPath("/trip/../join/invite-1"), "/join/invite-1");
+});
+
+test("PR-06B.1A.3 rejects unsafe Account return paths after query decoding", () => {
+  for (const value of [
+    "/\t/evil.com",
+    "/\n/evil.com",
+    "/\r/evil.com",
+    "/\0/evil.com",
+    "/\x7F/evil.com",
+    "/ trip",
+    "/\u00A0trip",
+    "/\\outside.example",
+    "//outside.example/invite",
+    "///evil.com",
+    "https://outside.example/invite",
+    "https://[",
+    "javascript:alert(1)",
+    "",
+    null,
+    undefined,
+    1,
+  ]) {
+    assert.equal(isSafeInternalReturnPath(value), null, `expected ${String(value)} to be rejected`);
+  }
 });
 
 test("PR-06B.1A.3 public Guest join has a display-name-only payload", () => {
@@ -64,6 +95,7 @@ test("PR-06B.1A.3 wires the public and Account endpoints through separate UI act
   assert.match(state, /body: JSON\.stringify\(guestJoinPayload\(displayName\)\)/);
   assert.match(state, /accountRequestJson\(`\/api\/invites\/\$\{token\}\/account-join`, \{/);
   assert.match(state, /clearMembershipScopedState\(\)/);
-  assert.match(login, /isSafeInternalReturnPath\(requestedNext\)/);
+  assert.match(login, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);
+  assert.match(signup, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);
   assert.match(signup, /window\.location\.href = nextPathRef\.current;/);
 });

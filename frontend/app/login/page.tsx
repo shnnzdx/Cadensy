@@ -48,7 +48,7 @@ export default function LoginPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const requestedNext = params.get("next");
-    const resolvedNext = isSafeInternalReturnPath(requestedNext) ? requestedNext : "/trip";
+    const resolvedNext = isSafeInternalReturnPath(requestedNext) ?? "/trip";
     setAccountCreated(params.get("created") === "1");
     nextPathRef.current = resolvedNext;
 
