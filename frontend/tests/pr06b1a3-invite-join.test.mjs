@@ -56,6 +56,24 @@ test("PR-06B.1A.3 rejects unsafe Account return paths after query decoding", () 
   }
 });
 
+test("PR-06B.1A.3 rejects unsafe paths created by URL normalization", () => {
+  for (const value of [
+    "/.//evil.com",
+    "/..//evil.com",
+    "/trip/..//evil.com",
+    "/a/../../..//evil.com",
+    "/./%2F/evil.com",
+    "/%252e//evil.com",
+    "/%252E%252E//evil.com",
+    "/.//evil.com/path?x=1#h",
+    "/%2e//evil.com",
+    "/%2E%2E//evil.com",
+    "/trip/%2e%2e//evil.com",
+  ]) {
+    assert.equal(isSafeInternalReturnPath(value), null, `expected ${value} to be rejected`);
+  }
+});
+
 test("PR-06B.1A.3 public Guest join has a display-name-only payload", () => {
   assert.deepEqual(guestJoinPayload("  Guest Name  "), { display_name: "Guest Name" });
   assert.throws(() => guestJoinPayload("  "), /display name/i);
@@ -97,5 +115,8 @@ test("PR-06B.1A.3 wires the public and Account endpoints through separate UI act
   assert.match(state, /clearMembershipScopedState\(\)/);
   assert.match(login, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);
   assert.match(signup, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);
+  assert.match(login, /window\.location\.replace\(resolvedNext\)/);
+  assert.match(login, /window\.location\.href = nextPathRef\.current;/);
+  assert.match(signup, /window\.location\.replace\(resolvedNext\)/);
   assert.match(signup, /window\.location\.href = nextPathRef\.current;/);
 });
