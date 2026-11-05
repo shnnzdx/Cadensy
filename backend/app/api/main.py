@@ -3145,7 +3145,7 @@ def _protected_trip_error(exc: Exception) -> None:
         raise HTTPException(409, "Protected command is unavailable") from exc
     if isinstance(exc, InvalidCredential):
         raise HTTPException(401, "Protected command authorization failed") from exc
-    if isinstance(exc, MembershipNotAuthorized):
+    if isinstance(exc, (MembershipNotAuthorized, InsufficientRole)):
         raise HTTPException(403, "Protected command authorization failed") from exc
     if isinstance(exc, TripNotFound):
         raise HTTPException(404, "Trip not found") from exc
@@ -3484,7 +3484,7 @@ def _protected_organizer_action(
         raise HTTPException(422, "Protected organizer action is invalid") from exc
     except InvalidCredential as exc:
         raise HTTPException(401, "Protected organizer authorization failed") from exc
-    except MembershipNotAuthorized as exc:
+    except (MembershipNotAuthorized, InsufficientRole) as exc:
         raise HTTPException(403, "Protected organizer authorization failed") from exc
     except (LockUnavailable, RetriableDeadlock, RetriableSerializationFailure, TransactionIntegrityViolation, TransactionDatabaseFailure) as exc:
         raise HTTPException(503, "Protected organizer action could not be completed safely") from exc
