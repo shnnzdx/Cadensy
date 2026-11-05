@@ -108,7 +108,7 @@ test("phase 11 login source preserves a validated same-origin return path before
 
   assert.match(loginPage, /const nextPathRef = useRef\("\/trip"\);/);
   assert.match(loginPage, /const requestedNext = params\.get\("next"\);/);
-  assert.match(loginPage, /isSafeInternalReturnPath\(requestedNext\)/);
+  assert.match(loginPage, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);
   assert.match(loginPage, /const membership = result\.default_membership \|\| result\.memberships\?\.\[0\];/);
   assert.match(loginPage, /const adoption = sessionRuntime\.adoptAccountAuth\(\{\s*token: result\.token,\s*\.\.\.\(membership \? \{/s);
   assert.match(loginPage, /if \(hasPersistenceWarning\(adoption\.warnings\)\) \{/);
