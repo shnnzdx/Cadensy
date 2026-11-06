@@ -15,6 +15,7 @@ import {
 } from './workspace-navigation-model.js'
 import { resolveTripCover, tripCoverImageUrlForVariant } from './trip-cover.js'
 import { describeInviteJoinError } from './invite-join-flow.js'
+import { extendRoundFailureNotice } from './tripContextClientError.js'
 
 const dayKey = date => date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : ''
 const sameDay = (a, b) => a && b && dayKey(a) === dayKey(b)
@@ -642,7 +643,7 @@ function DecisionRoundCard({ round, compact }) {
       await app.extendRound(round.id)
       app.notify('Round extended')
     } catch (err) {
-      app.notify(err.status === 409 ? 'This round has already been extended once.' : 'Could not extend this round.')
+      app.notify(extendRoundFailureNotice(err))
     }
   }
   return <article id={`round-card-${round.id}`} data-round-item-id={round.itemId || ''} className={cx('roundCard', compact && 'roundCardCompact', closed && 'roundClosed')}>

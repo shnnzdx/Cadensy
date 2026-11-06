@@ -5,6 +5,7 @@ import { createSessionRuntime, SESSION_RUNTIME_CODES } from '../../../shared/ses
 import { classifyTechnicalSessionInvalidation } from './technicalSessionInvalidation.js'
 import { guestJoinPayload, validateInviteJoinResult } from './invite-join-flow.js'
 import { createDurableConversationClient } from './durableConversationClient.js'
+import { friendlyError, messageFromResponseBody } from './tripContextClientError.js'
 
 const TripAppContext = createContext(null)
 
@@ -238,14 +239,6 @@ const requestPatch = (actionType, item, request) => {
   }
 }
 
-const friendlyError = err => {
-  if (err?.status === 409) return 'A vote is already open for this time block.'
-  if (err?.status === 422) return err.message || 'Reopening this block needs a written reason.'
-  if (err?.status >= 500) return err.message || 'The backend hit an error while processing this request.'
-  if (!err?.status) return 'Could not reach the backend.'
-  return err.message || 'Something went wrong.'
-}
-
 const mergeRounds = (incoming, current) => {
   const incomingIds = new Set(incoming.map(round => round.id))
   return [
@@ -375,7 +368,7 @@ export function TripAppProvider({ children }) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      const message = typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`
+      const message = messageFromResponseBody(body, response.status)
       const error = new Error(message)
       error.status = response.status
       throw error
@@ -431,7 +424,7 @@ export function TripAppProvider({ children }) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      const message = typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`
+      const message = messageFromResponseBody(body, response.status)
       const invalidationCause = classifyTechnicalSessionInvalidation({
         scope,
         facts: technicalSessionFacts,

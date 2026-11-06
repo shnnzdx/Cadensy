@@ -4,6 +4,7 @@ import { useDurableConversation } from '../useDurableConversation.js'
 import { advisoryCandidatesFromPersisted } from '../durablePlanOption.js'
 import { trip } from '../tripContent.js'
 import { serializeWorkspaceRoute } from '../../../../shared/trip-navigation-route/index.js'
+import { assistantChangeErrorText as assistantErrorText } from '../tripContextClientError.js'
 
 const tripHref = (tripId, section) => serializeWorkspaceRoute({ kind: 'trip', tripId, section })
 
@@ -32,16 +33,6 @@ const ASSISTANT_LOADING_MESSAGES = [
   'Looking for member impact...',
   'Organizing the options...',
 ]
-
-const assistantErrorText = err => (
-  err?.status === 409
-    ? 'A vote is already open for this time block.'
-    : err?.status === 422
-      ? 'Reopening this block needs a written reason.'
-      : err?.status >= 500
-        ? 'The backend hit an error while applying this change. Try again or check the backend logs.'
-        : 'I could not reach the backend. Try again in a moment.'
-)
 
 const removeRequestPatch = () => ({ remove: true })
 
