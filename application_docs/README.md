@@ -30,10 +30,18 @@ are not interchangeable.
 ## Evidence lifecycle
 
 - **Current contract:** files listed above describe the intended or recorded current state. Update them in the same change that makes their statements stale.
-- **Point-in-time evidence:** `AI_enhanced/PR-*`, `AI_enhanced/00_*`, [`backend/`](backend/), and [`frontend/`](frontend/) preserve dated reviews and handoffs. Their conclusions apply at the time written.
+- **Point-in-time evidence:** `AI_enhanced/PR-*`, `AI_enhanced/00_*`, [`backend/`](backend/), [`frontend/`](frontend/), and the dated task records below preserve reviews and handoffs. Their conclusions apply at the time written.
 - **Archived material:** [`_archive/`](_archive/) contains superseded designs, deployment records, temporary links, and old handoffs. It is retained for traceability, not implementation guidance.
 
 Historical evidence is normally immutable. If a conclusion is superseded, update the current index and add newer evidence instead of rewriting the old report.
+
+## Point-in-time task records
+
+Index entry added: 2026-11-06. These files record a completed task. They are not current contracts and they are not production-state evidence.
+
+| Record | What it preserves |
+| --- | --- |
+| [`MERGE-PHASE1_2026-11-05.md`](MERGE-PHASE1_2026-11-05.md) | 2026-11-05 squash of PR #49, then PR #48, onto `main`. Merged to `main`. Not a production deployment. Not verified in production. |
 
 ## Maintenance rules
 
