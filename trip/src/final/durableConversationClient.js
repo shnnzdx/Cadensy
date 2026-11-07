@@ -1,5 +1,7 @@
 /** Durable Conversation API adapter. It accepts no client history. */
 
+import { tripContextClientText } from './tripContextClientError.js'
+
 export const conversationIdentityFor = ({ scope, itemId = null }) => {
   if (scope === 'personal') return { scope: 'personal', contextKey: 'personal' }
   if (scope === 'plan_assistant') {
@@ -115,6 +117,8 @@ export const createDurableConversationClient = ({ requestJson, tripId }) => {
 export const durableConversationError = error => {
   if (error?.status === 401) return { kind: 'terminal', terminal: true, text: 'Your session has expired. Please sign in again.' }
   if (error?.status === 404) return { kind: 'terminal', terminal: true, text: 'This private conversation is no longer available.' }
+  const tripContext = tripContextClientText(error)
+  if (tripContext) return { kind: 'terminal', terminal: true, text: tripContext }
   if (error?.status === 409 && error?.message === 'conversation_busy') return { kind: 'running', retryable: true, text: 'Cadensy is still working on this conversation.' }
   if (error?.status === 409) return { kind: 'running', retryable: true, text: 'This request is already being processed. Reconnecting…' }
   if (error?.status === 422) return { kind: 'terminal', terminal: true, text: 'This message cannot be processed safely.' }
