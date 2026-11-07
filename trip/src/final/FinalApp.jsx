@@ -16,6 +16,7 @@ import {
 import { resolveTripCover, tripCoverImageUrlForVariant } from './trip-cover.js'
 import { describeInviteJoinError } from './invite-join-flow.js'
 import { extendRoundFailureNotice } from './tripContextClientError.js'
+import { invitePageRenderModel, visibleInviteForRoute } from './invitePageDisplay.js'
 
 const dayKey = date => date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : ''
 const sameDay = (a, b) => a && b && dayKey(a) === dayKey(b)
@@ -1273,32 +1274,58 @@ function CreateTrip() {
   </main></div>
 }
 
+function InviteRouteChrome({ model, children }) {
+  return <div className="tripPage">
+    <header className="tripUnifiedHeader">
+      <div className="tripUnifiedBrand">
+        <Link className="brandBack brandBack--return" to={workspaceHomeHref()}><BrandAssets /><span className="backArrow">←</span><span>My Trips</span></Link>
+      </div>
+      <div className="tripUnifiedCenter">
+        <div className="tripUnifiedTitleRow tripUnifiedTitleRow--tabsOnly">
+          <nav className="tripUnifiedTabs" aria-label={`${model.name || 'Trip'} sections`}>
+            {model.navigation.map(entry => <Link key={entry.id} to={entry.href}>{entry.label}</Link>)}
+          </nav>
+        </div>
+      </div>
+    </header>
+    <main className="workspaceContent">{children}</main>
+  </div>
+}
+
 function InvitePage() {
   const { tripId: routeTripId } = useParams()
   const app = useTripApp()
   const navigate = useNavigate()
-  const currentTrip = useCurrentTrip()
-  const [invite, setInvite] = useState(null)
+  const [inviteState, setInviteState] = useState({ routeTripId: '', invite: null, error: '' })
   const [loadingInvite, setLoadingInvite] = useState(false)
-  const [inviteError, setInviteError] = useState('')
-  const inviteUrl = invite ? buildTripPreviewAbsoluteUrl(window.location.origin, joinHref(invite.token)) : ''
+  const model = invitePageRenderModel({
+    routeTripId,
+    trips: app.trips,
+    activeTrip: app.trip,
+    tripSummaries: app.tripSummaries,
+    tripSummariesStatus: app.tripSummariesStatus,
+    demoTrip: trip,
+  }, inviteState)
+  const shownInvite = visibleInviteForRoute(routeTripId, inviteState)
+  const shownError = inviteState.routeTripId === routeTripId ? inviteState.error : ''
+  const shownLoading = inviteState.routeTripId === routeTripId && loadingInvite
+  const inviteUrl = shownInvite ? buildTripPreviewAbsoluteUrl(window.location.origin, joinHref(shownInvite.token)) : ''
   useEffect(() => {
     let cancelled = false
-    if (!routeTripId) {
-      setInvite(null)
-      setInviteError('Could not create an invite link')
-      setLoadingInvite(false)
-      return undefined
+    if (!model.shouldCreateInvite) {
+      return () => {
+        cancelled = true
+        app.invalidateInviteCreation()
+      }
     }
     setLoadingInvite(true)
-    setInvite(null)
-    setInviteError('')
+    setInviteState({ routeTripId, invite: null, error: '' })
     app.createInvite(routeTripId)
       .then(nextInvite => {
-        if (!cancelled) setInvite(nextInvite)
+        if (!cancelled) setInviteState({ routeTripId, invite: nextInvite, error: '' })
       })
       .catch(err => {
-        if (!cancelled) setInviteError(err.message || 'Could not create an invite link')
+        if (!cancelled) setInviteState({ routeTripId, invite: null, error: err.message || 'Could not create an invite link' })
       })
       .finally(() => {
         if (!cancelled) setLoadingInvite(false)
@@ -1307,10 +1334,7 @@ function InvitePage() {
       cancelled = true
       app.invalidateInviteCreation()
     }
-  }, [app.createInvite, app.invalidateInviteCreation, routeTripId])
-  if (!currentTrip) {
-    return <TripShell />
-  }
+  }, [app.createInvite, app.invalidateInviteCreation, model.shouldCreateInvite, routeTripId])
   const copyLink = () => {
     if (!inviteUrl) return
     if (navigator.clipboard?.writeText) navigator.clipboard.writeText(inviteUrl).catch(() => {})
@@ -1318,27 +1342,41 @@ function InvitePage() {
     app.notify('Invite link copied')
   }
   const revokeLink = async () => {
-    if (!invite?.invite_id) return
-    await app.revokeInvite(invite.invite_id)
-    setInvite(null)
+    if (!shownInvite?.invite_id) return
+    await app.revokeInvite(shownInvite.invite_id)
+    setInviteState({ routeTripId, invite: null, error: '' })
     app.setInviteCopied(false)
     app.notify('Invite link revoked')
   }
-  return <TripShell>
-    <div className="inviteManager">
-      <TripCoverHero className="shareHero" trip={currentTrip}>
-        <span className="eyebrow">Invite link</span>
-        <h1>Share this trip with the group.</h1>
-      </TripCoverHero>
-      <section className="linkPanel">
-        <div><span className="roleChip">{app.inviteCopied ? 'Link copied' : 'Ready to share'}</span><h2>{currentTrip.name}</h2><p>{currentTrip.destination} · {currentTrip.dates}</p></div>
-        <label>Invite link<textarea className="inviteLinkField" readOnly rows={2} value={loadingInvite ? 'Creating link...' : inviteError || inviteUrl}/></label>
-        <div className="copyActions"><Button disabled={!inviteUrl} onClick={copyLink}>{app.inviteCopied ? 'Copied' : 'Copy link'}</Button><Button secondary onClick={() => navigate(tripHref(currentTrip.id, 'preferences'))}>Start planning</Button>{invite && <Button ghost onClick={revokeLink}>Revoke link</Button>}</div>
-        {app.inviteCopied && <div className="copiedState"><strong>Link ready to share</strong></div>}
-        {inviteError && <div className="copiedState"><strong>{inviteError}</strong></div>}
-      </section>
+  if (model.status !== 'ready' || !model.trip || model.trip.id !== routeTripId) {
+    return <div className="tripPage">
+      <header className="tripUnifiedHeader">
+        <div className="tripUnifiedBrand"><Link className="brandBack brandBack--return" to={workspaceHomeHref()}><BrandAssets /><span className="backArrow">←</span><span>My Trips</span></Link></div>
+        <div className="tripUnifiedCenter"><div className="tripUnifiedTitleRow"><h1>{model.heading}</h1></div></div>
+      </header>
+      <main className="workspaceContent">
+        <div className="emptyState quietEmptyState"><h2>{model.heading}</h2></div>
+      </main>
     </div>
-  </TripShell>
+  }
+  const currentTrip = model.trip
+  const manager = <div className="inviteManager">
+    <TripCoverHero className="shareHero" trip={currentTrip}>
+      <span className="eyebrow">Invite link</span>
+      <h1>Share this trip with the group.</h1>
+    </TripCoverHero>
+    <section className="linkPanel">
+      <div><span className="roleChip">{app.inviteCopied ? 'Link copied' : 'Ready to share'}</span><h2>{model.name}</h2><p>{model.destination} · {model.dates}</p></div>
+      <label>Invite link<textarea className="inviteLinkField" readOnly rows={2} value={shownLoading ? 'Creating link...' : shownError || inviteUrl}/></label>
+      <div className="copyActions"><Button disabled={!inviteUrl} onClick={copyLink}>{app.inviteCopied ? 'Copied' : 'Copy link'}</Button><Button secondary onClick={() => navigate(model.startPlanningHref)}>Start planning</Button>{shownInvite && <Button ghost onClick={revokeLink}>Revoke link</Button>}</div>
+      {app.inviteCopied && <div className="copiedState"><strong>Link ready to share</strong></div>}
+      {shownError && <div className="copiedState"><strong>{shownError}</strong></div>}
+    </section>
+  </div>
+  if (model.shellMode === 'shared') {
+    return <TripShell>{manager}</TripShell>
+  }
+  return <InviteRouteChrome model={model}>{manager}</InviteRouteChrome>
 }
 
 function JoinInvitePage() {
