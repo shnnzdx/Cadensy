@@ -1274,6 +1274,7 @@ function CreateTrip() {
 }
 
 function InvitePage() {
+  const { tripId: routeTripId } = useParams()
   const app = useTripApp()
   const navigate = useNavigate()
   const currentTrip = useCurrentTrip()
@@ -1283,9 +1284,16 @@ function InvitePage() {
   const inviteUrl = invite ? buildTripPreviewAbsoluteUrl(window.location.origin, joinHref(invite.token)) : ''
   useEffect(() => {
     let cancelled = false
+    if (!routeTripId) {
+      setInvite(null)
+      setInviteError('Could not create an invite link')
+      setLoadingInvite(false)
+      return undefined
+    }
     setLoadingInvite(true)
+    setInvite(null)
     setInviteError('')
-    app.createInvite(currentTrip.id)
+    app.createInvite(routeTripId)
       .then(nextInvite => {
         if (!cancelled) setInvite(nextInvite)
       })
@@ -1297,8 +1305,12 @@ function InvitePage() {
       })
     return () => {
       cancelled = true
+      app.invalidateInviteCreation()
     }
-  }, [app.createInvite, currentTrip.id])
+  }, [app.createInvite, app.invalidateInviteCreation, routeTripId])
+  if (!currentTrip) {
+    return <TripShell />
+  }
   const copyLink = () => {
     if (!inviteUrl) return
     if (navigator.clipboard?.writeText) navigator.clipboard.writeText(inviteUrl).catch(() => {})
