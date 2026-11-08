@@ -1,7 +1,7 @@
 # Cadensy Integration Roadmap
 
 Status: current roadmap
-Last reviewed: 2026-11-01
+Last reviewed: 2026-11-07
 
 This roadmap records what is integrated now and what remains. The original 2026-08-11 roadmap is preserved at [`application_docs/_archive/navigation-history/INTEGRATION-ROADMAP_2026-08-11.md`](application_docs/_archive/navigation-history/INTEGRATION-ROADMAP_2026-08-11.md).
 
@@ -31,7 +31,7 @@ This roadmap records what is integrated now and what remains. The original 2026-
 
 ### 1. Complete structured return intent
 
-Product login and signup currently preserve a simple `next` destination. They do not carry the full workspace intent needed for precise restoration after authentication. Any fix must extend the shared navigation/session boundaries rather than insert destination policy into pages.
+Product login and signup currently preserve only a simple, safe-normalized internal `next` destination. They do not carry the full workspace intent needed for precise restoration after authentication. Any fix must extend the shared navigation/session boundaries rather than insert destination policy into pages.
 
 ### 2. Decide the long-term `/trip` host model
 
