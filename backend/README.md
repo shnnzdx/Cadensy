@@ -1,7 +1,7 @@
 # TripSync Backend
 
 Status: current backend contract
-Last reviewed: 2026-10-28
+Last reviewed: 2026-11-11
 
 Python + FastAPI + PostgreSQL. This backend owns the decision paths, itinerary data,
 and decision ledger for the Trip workspace.
@@ -256,6 +256,23 @@ It does not call AI, touch the database, or make network requests.
 
 Business rules belong in domain code, not in route handlers.
 
+### Protected Authorization Responses
+
+The protected membership and organizer mutation routes keep authorization
+decisions in the transaction layer and translate them at the HTTP boundary:
+
+- a missing or no-longer-authorized membership returns HTTP `403`;
+- a caller whose current role is insufficient returns HTTP `403`, rather than
+  being exposed as a server error;
+- a rejected protected request must not add, flush, or commit through the
+  request database session.
+
+The focused regression coverage in
+[`tests/test_pilot_fix_03_insufficient_role_http.py`](tests/test_pilot_fix_03_insufficient_role_http.py)
+checks this contract for protected member removal/quarantine and organizer
+round-extension/deadlock actions. This is an API response boundary, not a
+replacement for the domain-layer authorization checks.
+
 ---
 
 ## Privacy Model
@@ -329,6 +346,8 @@ Representative test areas:
 - `test_agent*.py`: chat and agent behavior
 - `test_plan_generation.py`: planner fallback behavior
 - `test_comments.py` / `test_booking.py`: comments, booking, organizer actions
+- `test_pilot_fix_03_insufficient_role_http.py`: protected authorization failures
+  return `403` without request-session writes
 
 ---
 
