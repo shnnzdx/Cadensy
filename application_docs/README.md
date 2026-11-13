@@ -1,7 +1,7 @@
 # Cadensy Application Documentation Index
 
 Status: current application documentation map
-Last reviewed: 2026-11-01
+Last reviewed: 2026-11-11
 
 This directory is the application documentation domain: product, frontend,
 backend, shared workspace, and application-level handoffs. AWS deployment
