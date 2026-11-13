@@ -1,12 +1,18 @@
 # Cadensy Current Handoff
 
 Status: current operational handoff
-Last reviewed: 2026-11-01
+Last reviewed: 2026-11-07
 Release evidence baseline: Cadensy v0.3.0
 
 This file summarizes the state recorded in the repository. It is not a fresh live-AWS inspection. For documentation ownership and evidence rules, start at [`application_docs/README.md`](application_docs/README.md).
 
 ## Contribution log
+
+### 2026-11-07 — Return-URL documentation correction
+
+- Updated current navigation documentation after the safe internal return-URL validation merged in PR #48.
+- Login and signup now normalize and validate `next` as a safe internal path before redirecting; the remaining gap is still the absence of a structured workspace return intent.
+- Documentation-only maintenance; no source code, AWS resource, deployment, migration, or production data was changed.
 
 ### 2026-11-01 — Artifact scope safety correction
 
@@ -65,7 +71,7 @@ If `trip/` changes and the embedded `/trip` experience must reflect it, run `cd 
 
 ## Known gaps
 
-- Product-to-workspace login/signup handoff still carries a simple `next` destination rather than a complete structured return intent.
+- Product-to-workspace login/signup handoff still carries only a safe-normalized internal `next` destination rather than a complete structured return intent.
 - The host `/trip` shell still defaults to the iframe path; host-owned workspace restoration is not the sole entry model.
 - CD-03 did not execute real Pydantic provider acceptance.
 - Provider cost/rate governance should not be described as complete unless a newer contract and evidence prove it.

@@ -2,7 +2,7 @@
 
 Status: active limitation record
 Originally recorded: 2026-08-11
-Last verified against source: 2026-10-28
+Last verified against source: 2026-11-07
 
 These notes describe current observable behavior that should not be silently frozen as
 desired product policy. Resolved characterization details remain only when they explain
@@ -10,12 +10,15 @@ the boundary around an active limitation.
 
 ## Login and Return Intent
 
-- The login page only transports a host-level `next` string and accepts it when it starts
-  with `/`. It does not carry a structured workspace return intent.
-- After that minimal check, login redirects to `window.location.href = nextPath` without
-  route reachability or role-based validation.
-- This means a slash-prefixed path can win even when it does not encode a valid workspace
-  destination.
+- Login and signup still transport only a host-level `next` string; they do not carry a
+  structured workspace return intent.
+- Before redirecting, `isSafeInternalReturnPath()` normalizes the value and accepts only a
+  safe same-origin internal path. It rejects external origins, malformed URLs, whitespace or
+  control characters, backslashes, unsafe normalized paths, and encoded slashes in the
+  pathname. An invalid value falls back to `/trip`.
+- This is return-URL safety validation, not workspace reachability or role-based validation.
+  A safe internal path can still lack the structured workspace intent needed for precise
+  post-authentication restoration.
 
 ## Restored Trip Selection
 
