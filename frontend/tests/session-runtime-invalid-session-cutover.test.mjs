@@ -69,6 +69,40 @@ test("phase 7 ordinary 403 does not invalidate session", () => {
   );
 });
 
+test("400 trip_context_required does not invalidate an account or guest session", () => {
+  for (const facts of [
+    { kind: "account", accountAuth: true, activeTripId: "t-1", membershipId: "m-1" },
+    { kind: "guest", guestAuth: true, activeTripId: "t-guest", membershipId: "m-guest" },
+  ]) {
+    assert.equal(
+      classifyTechnicalSessionInvalidation({
+        scope: "trip",
+        facts,
+        status: 400,
+        message: "trip_context_required",
+      }),
+      null,
+    );
+  }
+});
+
+test("409 trip_context_mismatch does not invalidate an account or guest session", () => {
+  for (const facts of [
+    { kind: "account", accountAuth: true, activeTripId: "t-1", membershipId: "m-1" },
+    { kind: "guest", guestAuth: true, activeTripId: "t-guest", membershipId: "m-guest" },
+  ]) {
+    assert.equal(
+      classifyTechnicalSessionInvalidation({
+        scope: "trip",
+        facts,
+        status: 409,
+        message: "trip_context_mismatch",
+      }),
+      null,
+    );
+  }
+});
+
 test("phase 7 404 does not invalidate session", () => {
   assert.equal(
     classifyTechnicalSessionInvalidation({
@@ -95,4 +129,13 @@ test("phase 7 TripAppState invalidates technical session on authoritative 401 wi
   assert.match(source, /if \(invalidationCause\) \{\s*applyTechnicalSessionInvalidation\(invalidationCause, message\)\s*\}/s);
   assert.doesNotMatch(source, /if \(response\.status === 403\)[\s\S]*invalidateTechnicalSession/);
   assert.doesNotMatch(source, /if \(response\.status === 404\)[\s\S]*invalidateTechnicalSession/);
+  assert.doesNotMatch(source, /if \(response\.status === 400\)[\s\S]*invalidateTechnicalSession/);
+  assert.doesNotMatch(source, /if \(response\.status === 409\)[\s\S]*invalidateTechnicalSession/);
+
+  const planFeature = await readFile(new URL("../../trip/src/final/plan-feature/PlanFeature.jsx", import.meta.url), "utf8");
+  const finalApp = await readFile(new URL("../../trip/src/final/FinalApp.jsx", import.meta.url), "utf8");
+  assert.match(planFeature, /app\.notify\(extendRoundFailureNotice\(err\)\)/);
+  assert.match(finalApp, /app\.notify\(extendRoundFailureNotice\(err\)\)/);
+  assert.doesNotMatch(planFeature, /already been extended/);
+  assert.doesNotMatch(finalApp, /already been extended/);
 });

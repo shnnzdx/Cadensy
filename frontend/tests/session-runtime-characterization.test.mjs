@@ -121,9 +121,14 @@ test("phase 1 current authoritative invalid credential 401 clears the local tech
 
   assert.match(backendAuth, /raise AuthRequired\("Invalid or expired session"\)/);
   assert.match(backendApi, /except auth_service\.AuthRequired as exc:\s*raise HTTPException\(401, str\(exc\)\)/s);
+  const tripContextClientError = await readFile(new URL("../../trip/src/final/tripContextClientError.js", import.meta.url), "utf8");
   assert.match(tripAppState, /const invalidationCause = classifyTechnicalSessionInvalidation\(\{/);
   assert.match(tripAppState, /sessionRuntime\.invalidateTechnicalSession\(technicalSessionFacts, cause\)/);
-  assert.match(tripAppState, /if \(!response\.ok\) \{\s*const body = await response\.json\(\)\.catch\(\(\) => \(\{\}\)\)\s*const message = typeof body\.detail === 'string' \? body\.detail : `Request failed \(\$\{response\.status\}\)`/s);
+  assert.match(tripAppState, /import \{ friendlyError, messageFromResponseBody \} from '\.\/tripContextClientError\.js'/);
+  assert.match(tripAppState, /const message = messageFromResponseBody\(body, response\.status\)/);
+  assert.match(tripContextClientError, /typeof body\?\.detail === 'string' \? body\.detail : `Request failed \(\$\{status\}\)`/);
+  assert.doesNotMatch(tripAppState, /body\.detail\.code/);
+  assert.doesNotMatch(tripContextClientError, /detail\.code/);
   assert.match(tripAppState, /setError\(err\.message \|\| 'Failed to load trip data'\)/);
   assert.match(tripAppState, /const loadError = error \|\| \(missingSession \? 'Join from an invite link or configure a membership session\.' : ''\)/);
   assert.match(tripAppState, /<a className="btn btnSecondary" href=\{loginUrl\(\)\} target="_top">Sign in<\/a>/);

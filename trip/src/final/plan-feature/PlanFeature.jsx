@@ -7,6 +7,7 @@ import { resolveTripCover, tripCoverImageUrlForVariant } from '../trip-cover.js'
 import { serializeWorkspaceRoute } from '../../../../shared/trip-navigation-route/index.js'
 import { useAssistantChangeRequestFlow } from './useAssistantChangeRequestFlow.js'
 import { usePlanInteractionRuntime } from './usePlanInteractionRuntime.js'
+import { addStopWarningText, extendRoundFailureNotice, generateItineraryErrorText } from '../tripContextClientError.js'
 
 const visibleStatus = status => ['Booked', 'Updated'].includes(status) ? status : ''
 const statusTone = status => status === 'Booked' ? 'purple' : status === 'Updated' ? 'green' : 'blue'
@@ -188,9 +189,8 @@ function AddStopDialog({ context, app, onClose }) {
       app.notify(`${value} added to the plan`)
       onClose()
     } catch (error) {
-      if (error?.status === 409) {
-        setWarning(error.message || "This stop may affect the next activity's time.")
-      }
+      const warning = addStopWarningText(error)
+      if (warning) setWarning(warning)
     } finally {
       setSaving(false)
     }
@@ -444,9 +444,7 @@ function NewTripPlan({ currentTrip }) {
       }
       app.notify('Itinerary generated')
     } catch (err) {
-      if (err.code === 'organizer_preference_missing' || err.status === 422) setGenerateError('Fill your preferences before generating the first itinerary.')
-      else if (err.status === 409) setGenerateError('An itinerary already exists.')
-      else setGenerateError('Could not generate the itinerary. Try again in a moment.')
+      setGenerateError(generateItineraryErrorText(err))
     }
   }
 
@@ -505,7 +503,7 @@ function PlanDecisionRoundCard({ round, compact, onCommand }) {
       await app.extendRound(round.id)
       app.notify('Round extended')
     } catch (err) {
-      app.notify(err.status === 409 ? 'This round has already been extended once.' : 'Could not extend this round.')
+      app.notify(extendRoundFailureNotice(err))
     }
   }
 

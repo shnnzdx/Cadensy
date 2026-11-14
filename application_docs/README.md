@@ -26,6 +26,7 @@ are not interchangeable.
 | Backend operation | [`../backend/README.md`](../backend/README.md) and [`../backend/LOCAL_DEV.md`](../backend/LOCAL_DEV.md) |
 | AWS deployment operation | [`../AWS/README.md`](../AWS/README.md) |
 | AI-agent engineering evidence | [`../AI_enhanced/README.md`](../AI_enhanced/README.md) |
+| Trip-independent routes and unused `X-Trip-Id` | [`trip-independent-x-trip-id.md`](trip-independent-x-trip-id.md) |
 
 ## Evidence lifecycle
 
@@ -42,6 +43,7 @@ Index entry added: 2026-11-06. These files record a completed task. They are not
 | Record | What it preserves |
 | --- | --- |
 | [`MERGE-PHASE1_2026-11-05.md`](MERGE-PHASE1_2026-11-05.md) | 2026-11-05 squash of PR #49, then PR #48, onto `main`. Merged to `main`. Not a production deployment. Not verified in production. |
+| [`design-04-phase1-task0-coverage-note.md`](design-04-phase1-task0-coverage-note.md) | 2026-11-06 read-only re-run of the DESIGN-04 Phase 1 Task 0 caller searches. No success-path header fix. Not runtime proof and not exhaustive. |
 
 ## Maintenance rules
 

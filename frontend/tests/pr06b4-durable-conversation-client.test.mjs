@@ -108,6 +108,39 @@ test('network uncertainty is retryable while terminal validation is not', () => 
   assert.equal(validation.retryable, undefined)
 })
 
+test('decided trip-context strings are context errors and other 409 copy stays generic', () => {
+  const required = durableConversationError({ status: 400, message: 'trip_context_required' })
+  assert.equal(required.kind, 'terminal')
+  assert.equal(required.terminal, true)
+  assert.equal(required.retryable, undefined)
+  assert.equal(required.text, 'This action needs a selected trip.')
+  assert.doesNotMatch(required.text, /sign in|unavailable/)
+
+  const mismatch = durableConversationError({ status: 409, message: 'trip_context_mismatch' })
+  assert.equal(mismatch.kind, 'terminal')
+  assert.equal(mismatch.terminal, true)
+  assert.equal(mismatch.retryable, undefined)
+  assert.equal(mismatch.text, 'The selected trip does not match this page.')
+  assert.notEqual(mismatch.text, 'This request is already being processed. Reconnecting…')
+
+  const otherConflict = durableConversationError({ status: 409, message: 'plan_already_exists' })
+  assert.equal(otherConflict.kind, 'running')
+  assert.equal(otherConflict.retryable, true)
+  assert.equal(otherConflict.text, 'This request is already being processed. Reconnecting…')
+
+  const busy = durableConversationError({ status: 409, message: 'conversation_busy' })
+  assert.equal(busy.kind, 'running')
+  assert.equal(busy.retryable, true)
+  assert.equal(busy.text, 'Cadensy is still working on this conversation.')
+
+  const otherClientError = durableConversationError({ status: 400, message: 'preference_missing' })
+  assert.equal(otherClientError.kind, 'service_unavailable')
+  assert.equal(otherClientError.retryable, true)
+
+  const objectDetail = durableConversationError({ status: 409, message: 'Request failed (409)' })
+  assert.equal(objectDetail.text, 'This request is already being processed. Reconnecting…')
+})
+
 test('refresh restores only the latest terminal submission failure', () => {
   const history = normalizeConversationMessages({ messages: [
     { id: 'old', sequence: 1, role: 'user', content: 'old', submission: { submission_id: 's1', state: 'failed', attempt_number: 1 } },
