@@ -9,9 +9,9 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ...db.models import InviteLink, Plan, PlanItem, Trip, TripMembership, User
@@ -44,7 +44,24 @@ class MembershipRemovalDenied(Exception):
 
 
 class InviteNotFound(Exception):
-    """Invalid, expired, or revoked invite token."""
+    """Public invite lookup failed. ``code`` is safe to return to the client."""
+
+    code = "invite_invalid"
+
+
+class InviteRevoked(InviteNotFound):
+    """The token existed and was revoked. Do not include trip details."""
+
+    code = "invite_revoked"
+
+
+class InviteExpired(InviteNotFound):
+    """The token existed and is past expires_at. Do not include trip details."""
+
+    code = "invite_expired"
+
+
+INVITE_TTL = timedelta(days=30)
 
 
 MAX_COVER_FETCHES_PER_DASHBOARD_REQUEST = 4
@@ -263,16 +280,18 @@ def create_invite(db: Session, trip_id: str, organizer: TripMembership) -> Creat
     if db.get(Trip, trip_id) is None:
         raise InviteNotFound("Trip not found")
 
+    issued_at = _now()
     db.execute(
         update(InviteLink)
-        .where(InviteLink.trip_id == trip_id, InviteLink.is_primary.is_(True))
-        .values(is_primary=False)
+        .where(InviteLink.trip_id == trip_id, InviteLink.revoked_at.is_(None))
+        .values(revoked_at=issued_at, is_primary=False)
     )
     token = secrets.token_urlsafe(32)
     invite = InviteLink(
         trip_id=trip_id,
         token_hash=_token_hash(token),
         is_primary=True,
+        expires_at=issued_at + INVITE_TTL,
     )
     db.add(invite)
     db.flush()
@@ -282,13 +301,54 @@ def create_invite(db: Session, trip_id: str, organizer: TripMembership) -> Creat
     return CreatedInvite(invite=invite, token=token)
 
 
+def _classify_invite(invite: InviteLink | None) -> InviteLink:
+    if invite is None:
+        raise InviteNotFound("invite_invalid")
+    if invite.revoked_at is not None:
+        raise InviteRevoked("invite_revoked")
+    expires_at = invite.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at <= _now():
+        raise InviteExpired("invite_expired")
+    return invite
+
+
 def _valid_invite(db: Session, token: str) -> InviteLink:
     invite = db.scalar(select(InviteLink).where(InviteLink.token_hash == _token_hash(token)))
-    if invite is None or invite.revoked_at is not None:
+    return _classify_invite(invite)
+
+
+def active_invite_metadata(db: Session, trip_id: str, organizer: TripMembership) -> dict:
+    """Return the reusable active invite without the raw token.
+
+    Pre-existing unrevoked links stay valid until the organizer generates a
+    new one. When more than one is still active, the primary or newest is
+    the one the page reuses.
+    """
+
+    _require_organizer(db, trip_id, organizer)
+    if db.get(Trip, trip_id) is None:
+        raise InviteNotFound("Trip not found")
+    now = _now()
+    invite = db.scalar(
+        select(InviteLink)
+        .where(
+            InviteLink.trip_id == trip_id,
+            InviteLink.revoked_at.is_(None),
+            or_(InviteLink.expires_at.is_(None), InviteLink.expires_at > now),
+        )
+        .order_by(InviteLink.is_primary.desc(), InviteLink.created_at.desc())
+        .limit(1)
+    )
+    if invite is None:
         raise InviteNotFound("Invite not found")
-    if invite.expires_at is not None and invite.expires_at <= _now():
-        raise InviteNotFound("Invite not found")
-    return invite
+    return {
+        "invite_id": invite.id,
+        "expires_at": invite.expires_at.isoformat() if invite.expires_at else None,
+        "created_at": invite.created_at.isoformat() if invite.created_at else None,
+        "status": "active",
+    }
 
 
 def invite_preview(
@@ -333,6 +393,7 @@ class JoinedInvite:
     membership: TripMembership
     trip_id: str
     guest_session: auth_service.GuestSessionResult | None = None
+    already_member: bool = False
 
 
 def record_organizer_share_event(

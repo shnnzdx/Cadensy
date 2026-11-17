@@ -31,12 +31,12 @@ export function createInviteAttemptGate() {
     invalidate() {
       generation += 1
     },
-    async createVerifiedInvite({
+    async _verifiedInvite({
       routeTripId,
       readSession,
       listAccountTrips,
       adoptAccountTrip,
-      postInvite,
+      perform,
     }) {
       const attempt = ++generation
       const current = () => generation === attempt
@@ -97,7 +97,13 @@ export function createInviteAttemptGate() {
       }
       if (!current()) throw unavailable()
 
-      return postInvite({ tripId: routeTripId, facts })
+      return perform({ tripId: routeTripId, facts })
+    },
+    createVerifiedInvite(args) {
+      return this._verifiedInvite({ ...args, perform: args.postInvite })
+    },
+    loadVerifiedInvite(args) {
+      return this._verifiedInvite({ ...args, perform: args.readInvite })
     },
   }
 }

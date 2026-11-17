@@ -126,7 +126,10 @@ test("phase 8 runtime keeps preview tripId absent in backend preview and consume
     readFile(new URL("../../trip/src/final/TripAppState.jsx", import.meta.url), "utf8"),
   ]);
 
-  assert.match(backendSource, /def invite_preview\(db: Session, token: str\) -> dict:/);
+  assert.match(
+    backendSource,
+    /def invite_preview\(\s*db: Session, token: str, \*, opener: InviteOpenContext \| None = None\s*\) -> dict:/,
+  );
   assert.match(backendSource, /"organizer_name": organizer_user\.name if organizer_user else "Organizer",/);
   assert.doesNotMatch(backendSource, /"trip_id": invite\.trip_id/);
   assert.match(finalAppSource, /const savedInviteSession = useMemo\(\(\) => app\.readInviteAdoption\(token\), \[app, token\]\)/);

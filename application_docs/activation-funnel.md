@@ -112,6 +112,22 @@ Invitation acceptance rate:
 - Duplicate guest memberships cannot be merged. Guest rates count memberships,
   not proven unique people.
 
+## Invite reuse
+
+Opening the invite page reads `GET /api/trips/{trip_id}/invite` and does not
+create a token. The response has no raw token. The organizer's browser stores
+the raw link under `cadensy.inviteLink.v1`, keyed by trip id and invite id,
+and clears it on revoke and logout. `生成新链接` creates one invite, sets a
+30-day `expires_at`, and revokes every previous unrevoked invite for that trip.
+Invites that already have a null `expires_at` keep working until then.
+
+Public lookup failures are distinct and contain no trip details:
+`invite_invalid` (404), `invite_revoked` (410), and `invite_expired` (410).
+The same live guest credential joining the same trip returns the existing
+membership and does not emit another `member_joined`. A credential for a
+different trip does not reuse that membership. A new join is still refused
+with `membership_change_pending_decision` while a vote or confirmation is open.
+
 ## Production rollout
 
 Do not treat this revision as applied in production. The production migration

@@ -49,6 +49,7 @@ export function resolveInvitePageDisplay({
       trip: null,
       shellMode: 'neutral',
       shouldCreateInvite: false,
+      shouldLoadInvite: false,
       navigation: [],
       startPlanningHref: null,
       heading: routeId && waiting ? 'Loading' : 'Unavailable',
@@ -61,7 +62,8 @@ export function resolveInvitePageDisplay({
     routeTripId: routeId,
     trip: matched,
     shellMode: shellMatchesRoute ? 'shared' : 'route',
-    shouldCreateInvite: true,
+    shouldCreateInvite: false,
+    shouldLoadInvite: true,
     navigation: sections.map(section => ({
       id: section,
       label: SECTION_LABELS[section],

@@ -78,6 +78,12 @@ An organizer creates a trip with:
 ### Join
 
 Members join through an invite flow and only become members after an explicit join step.
+An organizer reuses one active invite. Opening the invite page does not mint a new
+token. The raw link stays in the organizer's browser for that trip and invite.
+Generating a new link revokes the trip's previous active invites. New invites
+expire after 30 days. Older invites with no expiry keep working until they are
+revoked or replaced. The same guest session joining the same trip again does not
+create another membership.
 
 ### Preferences
 

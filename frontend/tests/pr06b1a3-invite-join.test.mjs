@@ -91,11 +91,14 @@ test("PR-06B.1A.3 validates Account and Guest join response separation", () => {
 test("PR-06B.1A.3 maps deterministic lifecycle denials without a retry fallback", () => {
   assert.deepEqual(describeInviteJoinError({ status: 409, message: "membership_change_pending_decision" }), {
     kind: "decision-window",
-    message: "Joining is temporarily unavailable while a group decision is in progress.",
+    message: "You can't join while a group vote or confirmation is still open. Try again after that decision is finished.",
   });
   assert.equal(describeInviteJoinError({ status: 409, message: "Membership is quarantined" }).kind, "quarantined");
   assert.equal(describeInviteJoinError({ status: 401, message: "Account authentication required" }).kind, "authentication");
   assert.equal(describeInviteJoinError({ status: 404, message: "Invite not found" }).kind, "invite");
+  assert.equal(describeInviteJoinError({ status: 410, message: "invite_expired" }).kind, "expired");
+  assert.equal(describeInviteJoinError({ status: 410, message: "invite_revoked" }).kind, "revoked");
+  assert.equal(describeInviteJoinError({ status: 403, message: "invite_join_forbidden" }).kind, "forbidden");
 });
 
 test("PR-06B.1A.3 wires the public and Account endpoints through separate UI actions", async () => {

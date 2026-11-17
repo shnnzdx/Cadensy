@@ -5575,3 +5575,5 @@ body,
   top:auto!important;
   bottom:42px!important;
 }
+.copyFailure strong{color:#9a3412}
+.inviteManager .copyActions{flex-wrap:wrap}
