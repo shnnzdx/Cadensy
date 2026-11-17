@@ -19,6 +19,8 @@ Alembic revision `c8e1d4a90b27` revises `b7d3a1e9c642`.
   already has `submitted_at` keeps that timestamp as `first_submitted_at` on
   the next save and does not emit a new `preferences_submitted` event.
 - Same-trip foreign keys reject an invite or membership from another trip.
+  Deleting a trip, invite, or membership removes the activation rows that
+  reference it. Product revoke does not delete those rows.
 - Inserts use `ON CONFLICT (dedup_key) DO NOTHING` inside the business
   transaction. Rollback removes the event. A retry does not add a second row.
 

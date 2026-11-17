@@ -87,17 +87,22 @@ def upgrade() -> None:
             name="ck_activation_event_metadata_privacy",
         ),
         sa.ForeignKeyConstraint(
-            ["trip_id"], ["trip.id"], name="fk_activation_event_trip"
+            ["trip_id"],
+            ["trip.id"],
+            name="fk_activation_event_trip",
+            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["invite_id", "trip_id"],
             ["invite_link.id", "invite_link.trip_id"],
             name="fk_activation_event_invite_same_trip",
+            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["membership_id", "trip_id"],
             ["trip_membership.id", "trip_membership.trip_id"],
             name="fk_activation_event_membership_same_trip",
+            ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("dedup_key", name="uq_activation_event_dedup_key"),
