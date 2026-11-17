@@ -68,6 +68,13 @@ Counted only when a group decision reaches a final determined outcome.
    (audit origins `deadlock_keep`, `deadlock_split`, `deadlock_remove`).
    Outcome is `deadlock_resolved`. `keep` leaves the itinerary unchanged and
    still counts.
+3. **Confirm applied or declined.** `decide_proposal` is the group confirm
+   mechanism: every affected member must accept, and any decline is final.
+   When `change_proposal.status` becomes `applied`, the outcome is
+   `confirm_applied`. When it becomes `declined`, the outcome is
+   `confirm_declined`. A proposal whose affected set is only the proposer
+   still reaches `applied` through that same unanimous rule, so it counts.
+   The dedup key remains one row per trip.
 
 Not counted:
 
@@ -86,9 +93,9 @@ Not counted:
   trip and does not emit `first_decision_completed`. The event stores no title
   and no patch.
 - Bookings (`set_booking_status_for_actor`, plan-change origin `booking`).
-- Confirm path. `decide_proposal` reaching `applied` or `declined` is not a
-  decision round and not a deadlock resolution, so it does not emit
-  `first_decision_completed`. The existing confirm rules are unchanged.
+- A confirm proposal that is still `waiting_affected_members`, becomes
+  `escalated` because of a schedule conflict, `expired`, or `withdrawn`.
+  Those are not a determined applied or declined result.
 
 ## Metrics
 

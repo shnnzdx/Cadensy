@@ -72,7 +72,15 @@ _METADATA: dict[str, dict[str, frozenset[str]]] = {
     "preferences_updated": {},
     "first_plan_created": {"origin": _PLAN_ORIGINS},
     "first_decision_completed": {
-        "outcome": frozenset({"round_applied", "round_rejected", "deadlock_resolved"})
+        "outcome": frozenset(
+            {
+                "round_applied",
+                "round_rejected",
+                "deadlock_resolved",
+                "confirm_applied",
+                "confirm_declined",
+            }
+        )
     },
     "notice_auto_applied": {"source": frozenset({"notice"})},
 }

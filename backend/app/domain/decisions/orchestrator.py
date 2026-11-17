@@ -989,6 +989,7 @@ def decide_proposal(
     if any(d.status == "declined" for d in decisions):
         proposal.status = "declined"
         db.flush()
+        _record_confirm_terminal(db, proposal, "confirm_declined")
         return False
 
     if not all(d.status == "accepted" for d in decisions):
@@ -1031,7 +1032,23 @@ def decide_proposal(
         )
     )
     db.flush()
+    _record_confirm_terminal(db, proposal, "confirm_applied")
     return True
+
+
+def _record_confirm_terminal(db: Session, proposal: ChangeProposal, outcome: str) -> None:
+    """Count a Confirm proposal that reached applied or declined.
+
+    Confirm is a group mechanism: every affected member must accept, and any
+    decline is a final rejection. A one-person affected set still uses that
+    rule and stores the same terminal status. Waiting, withdrawn, expired,
+    and escalated proposals are not terminal confirm results.
+    """
+
+    item = db.get(PlanItem, proposal.plan_item_id)
+    if item is None or item.plan is None:
+        return
+    record_first_decision_completed(db, trip_id=item.plan.trip_id, outcome=outcome)
 
 
 def withdraw_proposal(db: Session, proposal: ChangeProposal) -> None:

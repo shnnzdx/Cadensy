@@ -670,63 +670,110 @@ def test_notice_auto_applied_is_not_first_decision_completed(db: Session, trip_s
     assert _events(db, "first_decision_completed", trip_setup["trip"].id) == []
 
 
-def test_booking_and_confirm_paths_are_not_first_decision_completed(db: Session, trip_setup):
+def _waiting_proposal(db: Session, item: PlanItem, actor_id: str, title: str) -> ChangeProposal:
+    proposal = ChangeProposal(
+        plan_item_id=item.id,
+        action_type="edit",
+        before_json={"title": item.title},
+        after_json={"title": title},
+        requested_by_membership_id=actor_id,
+        status="waiting_affected_members",
+    )
+    db.add(proposal)
+    db.flush()
+    return proposal
+
+
+def test_booking_is_not_first_decision_completed(db: Session, trip_setup):
     item = trip_setup["item"]
     trip = trip_setup["trip"]
-    organizer = trip_setup["organizer"]
     orchestrator.set_booking_status_for_actor(
         db,
         item,
         trip_id=trip.id,
-        actor_membership_id=organizer.id,
+        actor_membership_id=trip_setup["organizer"].id,
         booked=True,
     )
     assert item.settledness == "booked"
     assert _events(db, "first_decision_completed", trip.id) == []
 
-    declined = ChangeProposal(
-        plan_item_id=item.id,
-        action_type="edit",
-        before_json={"title": item.title},
-        after_json={"title": "Declined idea"},
-        requested_by_membership_id=organizer.id,
-        status="waiting_affected_members",
-    )
-    db.add(declined)
-    db.flush()
-    db.add(
-        ProposalDecision(
-            proposal_id=declined.id,
-            trip_membership_id=organizer.id,
-            status="pending",
-        )
-    )
-    db.flush()
-    assert orchestrator.decide_proposal(db, declined, organizer.id, "declined") is False
-    assert declined.status == "declined"
 
-    applied = ChangeProposal(
-        plan_item_id=item.id,
-        action_type="edit",
-        before_json={"title": item.title},
-        after_json={"title": "Confirmed title"},
-        requested_by_membership_id=organizer.id,
-        status="waiting_affected_members",
-    )
-    db.add(applied)
+def test_first_decision_completed_counts_confirm_applied(db: Session, trip_setup):
+    item = trip_setup["item"]
+    trip = trip_setup["trip"]
+    organizer = trip_setup["organizer"]
+    participant = trip_setup["participant"]
+    proposal = _waiting_proposal(db, item, organizer.id, "Confirmed title")
+    db.add_all([
+        ProposalDecision(proposal_id=proposal.id, trip_membership_id=organizer.id, status="pending"),
+        ProposalDecision(proposal_id=proposal.id, trip_membership_id=participant.id, status="pending"),
+    ])
     db.flush()
-    db.add(
-        ProposalDecision(
-            proposal_id=applied.id,
-            trip_membership_id=organizer.id,
-            status="pending",
-        )
-    )
-    db.flush()
-    assert orchestrator.decide_proposal(db, applied, organizer.id, "accepted") is True
-    assert applied.status == "applied"
+
+    assert orchestrator.decide_proposal(db, proposal, organizer.id, "accepted") is False
+    assert proposal.status == "waiting_affected_members"
     assert _events(db, "first_decision_completed", trip.id) == []
-    assert len(_events(db, "first_plan_created", trip.id)) == 1
+
+    assert orchestrator.decide_proposal(db, proposal, participant.id, "accepted") is True
+    assert proposal.status == "applied"
+    assert item.title == "Confirmed title"
+    events = _events(db, "first_decision_completed", trip.id)
+    assert len(events) == 1
+    assert events[0].event_metadata == {"outcome": "confirm_applied"}
+    assert events[0].dedup_key == f"first_decision_completed:{trip.id}"
+
+
+def test_first_decision_completed_counts_confirm_declined(db: Session, trip_setup):
+    item = trip_setup["item"]
+    original = item.title
+    organizer = trip_setup["organizer"]
+    participant = trip_setup["participant"]
+    proposal = _waiting_proposal(db, item, organizer.id, "Declined idea")
+    db.add_all([
+        ProposalDecision(proposal_id=proposal.id, trip_membership_id=organizer.id, status="accepted"),
+        ProposalDecision(proposal_id=proposal.id, trip_membership_id=participant.id, status="pending"),
+    ])
+    db.flush()
+
+    assert orchestrator.decide_proposal(db, proposal, participant.id, "declined") is False
+    assert proposal.status == "declined"
+    assert item.title == original
+    events = _events(db, "first_decision_completed", trip_setup["trip"].id)
+    assert len(events) == 1
+    assert events[0].event_metadata == {"outcome": "confirm_declined"}
+
+
+def test_confirm_applied_by_the_only_affected_member_counts(db: Session, trip_setup):
+    item = trip_setup["item"]
+    organizer = trip_setup["organizer"]
+    proposal = _waiting_proposal(db, item, organizer.id, "Solo confirmed title")
+    db.add(ProposalDecision(proposal_id=proposal.id, trip_membership_id=organizer.id, status="pending"))
+    db.flush()
+
+    assert orchestrator.decide_proposal(db, proposal, organizer.id, "accepted") is True
+    assert proposal.status == "applied"
+    events = _events(db, "first_decision_completed", trip_setup["trip"].id)
+    assert len(events) == 1
+    assert events[0].event_metadata == {"outcome": "confirm_applied"}
+
+
+def test_confirm_does_not_emit_a_second_decision_after_a_settled_round(db: Session, trip_setup):
+    item = trip_setup["item"]
+    row = _round(db, item, electorate=1, options=_options())
+    db.add(Vote(round_id=row.id, trip_membership_id=trip_setup["organizer"].id, option_id="requested"))
+    db.flush()
+    orchestrator.settle_round(db, row)
+    proposal = _waiting_proposal(db, item, trip_setup["organizer"].id, "Later confirm")
+    db.add(ProposalDecision(
+        proposal_id=proposal.id,
+        trip_membership_id=trip_setup["organizer"].id,
+        status="pending",
+    ))
+    db.flush()
+    assert orchestrator.decide_proposal(db, proposal, trip_setup["organizer"].id, "accepted") is True
+    events = _events(db, "first_decision_completed", trip_setup["trip"].id)
+    assert len(events) == 1
+    assert events[0].event_metadata == {"outcome": "round_applied"}
 
 
 def test_client_share_event_is_organizer_only_and_deduped(client: TestClient, api_session: Session):
