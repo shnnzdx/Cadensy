@@ -18,6 +18,7 @@ import { describeInviteJoinError } from './invite-join-flow.js'
 import { clearInviteLink, readInviteLink, rememberInviteLink } from './inviteLinkCache.js'
 import { wechatShareTemplate, writeClipboard } from './inviteShare.js'
 import { clearInviteJoinResume, inviteJoinResumeMatches, markInviteJoinResume } from './inviteJoinResume.js'
+import { preferenceBudgetError } from './preferenceBudget.js'
 import { extendRoundFailureNotice } from './tripContextClientError.js'
 import { invitePageRenderModel, visibleInviteForRoute } from './invitePageDisplay.js'
 
@@ -987,6 +988,8 @@ function PreferencesPage() {
   const [picking, setPicking] = useState(false)
   const [draft, setDraft] = useState(null)
   const [loaded, setLoaded] = useState(false)
+  const [laterOpen, setLaterOpen] = useState(false)
+  const [budgetError, setBudgetError] = useState('')
   // A plan record can exist before the first generation attempt. Preferences
   // become read-only only once the current plan has actual itinerary items.
   const planGenerated = Boolean(app.planId && (app.days || []).some(day => (day.items || []).length > 0))
@@ -1006,6 +1009,7 @@ function PreferencesPage() {
         if (cancelled) return
         setConstraints(data.constraints || [])
         const pref = data.preference
+        if ((pref?.top_interests || []).length || (data.constraints || []).length) setLaterOpen(true)
         const savedAvailability = {
           start: fromISODate(pref?.available_start_date) || tripRange.start,
           end: fromISODate(pref?.available_end_date) || tripRange.end,
@@ -1076,6 +1080,12 @@ function PreferencesPage() {
       app.notify('Choose your availability within the Trip Dates')
       return
     }
+    const budgetProblem = preferenceBudgetError(form.idealBudget, form.maxBudget)
+    if (budgetProblem) {
+      setBudgetError('Ideal budget must be less than or equal to the maximum budget.')
+      return
+    }
+    setBudgetError('')
     try {
       await app.saveMyPreferences({
         preferred_start_date: toISODate(tripRange.start),
@@ -1097,22 +1107,25 @@ function PreferencesPage() {
   if (!currentTrip) return <TripShell />
 
   return <TripShell>
-    <div className={cx('preferenceWrap', 'editorialForm', planGenerated && 'preferenceReadOnly')} aria-readonly={planGenerated || undefined}>
+    <div className={cx('preferenceWrap', 'editorialForm')}>
       <div className="pageHeading"><div><span className="eyebrow">My preferences</span><h1>Share only what matters.</h1>{joinNotice && <p>{joinNotice}</p>}</div></div>
       <section className="preferenceCard preferenceFlow">
         <div className="wide tripDatesCard"><span>Trip Dates</span><strong>{formatDateRange(tripRange)}</strong><small>Set by trip organizer</small></div>
-        <fieldset className="wide availabilityChoice" disabled={planGenerated}><legend>Are you available for the full trip?</legend>
+        <fieldset className="wide availabilityChoice"><legend>Are you available for the full trip?</legend>
           <label><input type="radio" name="availability" checked={availabilityMode === 'full'} onChange={() => { setAvailabilityMode('full'); set('availableRange', tripRange) }}/><span><strong>Yes, all dates</strong><small>I am available for the full Trip Dates.</small></span></label>
           <label><input type="radio" name="availability" checked={availabilityMode === 'limited'} onChange={() => { setAvailabilityMode('limited'); set('availableRange', { start: null, end: null }) }}/><span><strong>No, I have limited availability</strong><small>I will choose a window inside the Trip Dates.</small></span></label>
         </fieldset>
-        {availabilityMode === 'limited' && <div className="wide"><AvailabilityPicker tripRange={tripRange} value={form.availableRange} readOnly={planGenerated} onChange={range => set('availableRange', range)}/></div>}
+        {availabilityMode === 'limited' && <div className="wide"><AvailabilityPicker tripRange={tripRange} value={form.availableRange} onChange={range => set('availableRange', range)}/></div>}
         <div className="wide fieldPair">
-          <label>Ideal total budget<input readOnly={planGenerated} value={form.idealBudget} onChange={e => set('idealBudget', e.target.value)}/></label>
-          <label>Maximum acceptable budget<input readOnly={planGenerated} value={form.maxBudget} onChange={e => set('maxBudget', e.target.value)}/></label>
+          <label>Ideal total budget<input value={form.idealBudget} onChange={e => { setBudgetError(''); set('idealBudget', e.target.value) }}/></label>
+          <label>Maximum acceptable budget<input value={form.maxBudget} onChange={e => { setBudgetError(''); set('maxBudget', e.target.value) }}/></label>
         </div>
-        <CustomSelect className="wide" label="Who can see my budget" value={form.budgetVisibility} readOnly={planGenerated} onChange={value => set('budgetVisibility', value)} options={[{ value: 'planning', label: 'Only Cadensy' }, { value: 'organizer', label: 'Organizer too' }, { value: 'everyone', label: 'Whole group' }]}/>
-        <CustomSelect className="wide" label="Preferred pace" value={form.pace} readOnly={planGenerated} onChange={value => set('pace', value)} options={['Relaxed', 'Balanced', 'Full schedule'].map(option => ({ value: option, label: option }))}/>
-        <div className="wide"><label>Top interests — up to 3</label><div className="styleGrid">{tripStyles.map(style => <button type="button" disabled={planGenerated} key={style} className={cx('styleTile', form.interests?.includes(style) && 'selected')} onClick={planGenerated ? undefined : () => toggleStyle(style)}><span>{style}</span><small>{style === 'Food' ? 'better meals' : style === 'Nature' ? 'parks and views' : style === 'Relaxed' ? 'slower days' : style === 'Culture' ? 'museums and neighborhoods' : 'more active plans'}</small><b className="styleTileCheck" aria-hidden="true">✓</b></button>)}</div></div>
+        {budgetError && <p className="formError">{budgetError}</p>}
+        <details className="wide laterFields" open={laterOpen} onToggle={event => setLaterOpen(event.currentTarget.open)}>
+          <summary>稍后补充</summary>
+        <CustomSelect className="wide" label="Who can see my budget" value={form.budgetVisibility} onChange={value => set('budgetVisibility', value)} options={[{ value: 'planning', label: 'Only Cadensy' }, { value: 'organizer', label: 'Organizer too' }, { value: 'everyone', label: 'Whole group' }]}/>
+        <CustomSelect className="wide" label="Preferred pace" value={form.pace} onChange={value => set('pace', value)} options={['Relaxed', 'Balanced', 'Full schedule'].map(option => ({ value: option, label: option }))}/>
+        <div className="wide"><label>Top interests — up to 3</label><div className="styleGrid">{tripStyles.map(style => <button type="button" key={style} className={cx('styleTile', form.interests?.includes(style) && 'selected')} onClick={() => toggleStyle(style)}><span>{style}</span><small>{style === 'Food' ? 'better meals' : style === 'Nature' ? 'parks and views' : style === 'Relaxed' ? 'slower days' : style === 'Culture' ? 'museums and neighborhoods' : 'more active plans'}</small><b className="styleTileCheck" aria-hidden="true">✓</b></button>)}</div></div>
 
         <div className="wide needsPanel">
           <label>Things that are not negotiable</label>
@@ -1122,10 +1135,10 @@ function PreferencesPage() {
           {constraints.map(entry => <div className="needRow savedNeed" key={entry.id}>
             <div><strong>{labelFor(entry.kind)}</strong><small>{constraintSummary(entry)}</small><small className="needVisibility">Visible to: {visibilityLabel(entry.visibility)}</small></div>
             <Badge tone={entry.importance === 'required' ? 'orange' : 'blue'}>{entry.importance}</Badge>
-            {!planGenerated && <button type="button" className="needRemove" aria-label="Remove" onClick={() => drop(entry.id)}>×</button>}
+            <button type="button" className="needRemove" aria-label="Remove" onClick={() => drop(entry.id)}>×</button>
           </div>)}
 
-          {!planGenerated && draft && <div className="needDraft">
+          {draft && <div className="needDraft">
             <strong>{labelFor(draft.kind)}</strong>
             <ConstraintParams kind={draft.kind} params={draft.params} allowedRange={tripRange} onChange={params => setDraft(current => ({ ...current, params }))}/>
             <label>In your own words
@@ -1136,14 +1149,15 @@ function PreferencesPage() {
             <div className="needDraftActions"><Button disabled={Boolean(constraintDraftProblem(draft))} onClick={commitDraft}>Add</Button><Button ghost onClick={() => setDraft(null)}>Cancel</Button></div>
           </div>}
 
-          {!planGenerated && picking && !draft && <div className="needPicker">
+          {picking && !draft && <div className="needPicker">
             {CONSTRAINT_KINDS.map(entry => <button type="button" key={entry.kind} onClick={() => startDraft(entry.kind)}>
               <strong>{entry.label}</strong><small>{entry.hint}</small>
             </button>)}
           </div>}
 
-          {!planGenerated && !draft && <button type="button" className="needAdd" onClick={() => setPicking(current => !current)}>{picking ? 'Close' : '＋ Add something that is not negotiable'}</button>}
+          {!draft && <button type="button" className="needAdd" onClick={() => setPicking(current => !current)}>{picking ? 'Close' : '＋ Add something that is not negotiable'}</button>}
         </div>
+        </details>
 
         {conflicts.length > 0 && <div className="wide conflictPanel">
           <strong>This clashes with {conflicts.length} {conflicts.length === 1 ? 'part' : 'parts'} of the plan</strong>
@@ -1154,7 +1168,7 @@ function PreferencesPage() {
           </li>)}</ul>
         </div>}
 
-        <div className="formFooter"><span>{loaded ? (planGenerated ? 'Read-only: these preferences were used to generate the current plan.' : '') : 'Loading your preferences...'}</span>{!planGenerated && <Button disabled={app.loading.action} onClick={save}>{app.loading.action ? 'Saving...' : 'Save preferences'}</Button>}</div>
+        <div className="formFooter"><span>{loaded ? (planGenerated ? 'You can still update these. The current plan stays in place and is marked to refresh. Settled group decisions are not rewritten.' : '') : 'Loading your preferences...'}</span><Button disabled={app.loading.action} onClick={save}>{app.loading.action ? 'Saving...' : 'Save preferences'}</Button></div>
       </section>
     </div>
   </TripShell>

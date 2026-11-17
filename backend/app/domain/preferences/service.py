@@ -60,6 +60,12 @@ class InvalidConstraintParams(Exception):
     """支持的类型也必须带可执行的结构化参数。"""
 
 
+class PreferenceBudgetInvalid(Exception):
+    """Ideal budget is above the maximum the member said they can accept."""
+
+    code = "ideal_budget_exceeds_maximum"
+
+
 class PreferenceDateOutOfTripRange(Exception):
     """Preference dates must stay within the trip date window."""
 
@@ -159,9 +165,19 @@ class PreferenceData:
     top_interests: tuple[str, ...] = ()
 
 
+def _validate_preference_budget(data: PreferenceData) -> None:
+    if (
+        data.ideal_budget is not None
+        and data.maximum_budget is not None
+        and data.ideal_budget > data.maximum_budget
+    ):
+        raise PreferenceBudgetInvalid("ideal_budget_exceeds_maximum")
+
+
 def save_mine(
     db: Session, membership: TripMembership, data: PreferenceData
 ) -> dict:
+    _validate_preference_budget(data)
     _validate_preference_dates(db, membership, data)
     pref = db.scalar(
         select(Preference).where(Preference.trip_membership_id == membership.id)

@@ -128,6 +128,12 @@ membership and does not emit another `member_joined`. A credential for a
 different trip does not reuse that membership. A new join is still refused
 with `membership_change_pending_decision` while a vote or confirmation is open.
 
+Preference saves reject `ideal_budget` above `maximum_budget` with HTTP 400
+and detail `ideal_budget_exceeds_maximum`. Members can edit preferences after
+a plan exists. The plan is marked `needs_refresh` and settled decisions stay
+as they were. The first form asks for dates and an optional budget. Pace,
+interests, visibility, and private constraints stay behind “稍后补充”.
+
 ## Production rollout
 
 Do not treat this revision as applied in production. The production migration

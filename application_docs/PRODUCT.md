@@ -276,7 +276,11 @@ suited to evenings.
 
 If preferences or enforceable constraints change after a plan exists, the shared plan stays
 unchanged and is marked as needing refresh. Later replans and change evaluation use the latest
-inputs; saving a preference never silently rewrites existing itinerary decisions.
+inputs; saving a preference never silently rewrites existing itinerary decisions. Members can
+edit preferences after a plan exists. Ideal budget must be less than or equal to maximum
+budget. The first screen asks for dates and an optional budget. Pace, interests, visibility,
+and private constraints stay under “稍后补充”. Private constraint text stays out of analytics,
+share text, and logs.
 
 ## 8. Trust And Provenance
 

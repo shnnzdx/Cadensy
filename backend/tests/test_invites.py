@@ -552,3 +552,22 @@ def test_active_invite_metadata_stays_inside_its_trip(client: TestClient, api_se
     assert listed_b.json()["invite_id"] == invite_b["invite_id"]
     assert invite_b["token"] not in listed_b.text
 
+
+def test_preference_budget_over_maximum_returns_400(client: TestClient, api_session: Session):
+    trip, organizer, _ = _trip(api_session)
+    headers = _member_headers(client, organizer, trip)
+    rejected = client.put(
+        f"/api/trips/{trip.id}/preferences/me",
+        headers=headers,
+        json={"ideal_budget": 900, "maximum_budget": 100},
+    )
+    accepted = client.put(
+        f"/api/trips/{trip.id}/preferences/me",
+        headers=headers,
+        json={"ideal_budget": 100, "maximum_budget": 100},
+    )
+
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "ideal_budget_exceeds_maximum"
+    assert accepted.status_code == 200
+    assert accepted.json()["preference"]["ideal_budget"] == 100

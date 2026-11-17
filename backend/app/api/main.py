@@ -3311,6 +3311,8 @@ def save_my_preferences(
                 session_factory=SessionLocal, scope=scope, credential=credential,
                 command=protected_preferences_save.ProtectedPreferencesSave(key, revision, body.model_dump()), keyring=keyring,
             )
+        except pref_service.PreferenceBudgetInvalid as exc:
+            raise HTTPException(400, "ideal_budget_exceeds_maximum") from exc
         except Exception as exc:
             _protected_trip_error(exc)
         if response is not None:
@@ -3320,6 +3322,8 @@ def save_my_preferences(
         result = pref_service.save_mine(
             db, me, pref_service.PreferenceData(**body.model_dump())
         )
+    except pref_service.PreferenceBudgetInvalid as exc:
+        raise HTTPException(400, "ideal_budget_exceeds_maximum") from exc
     except pref_service.PreferenceDateOutOfTripRange as exc:
         raise HTTPException(422, str(exc)) from exc
     db.commit()
