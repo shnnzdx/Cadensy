@@ -61,6 +61,7 @@ from ..domain.plans import generator_commit as protected_generator_commit
 from ..domain.plans import manual_items
 from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
+from ..domain.analytics.activation import InviteOpenContext
 from ..domain.trips import service as trip_service
 from ..domain.trips import cover_service as trip_cover_service
 from ..observability.telemetry import (
@@ -669,6 +670,14 @@ class ConstraintRequest(BaseModel):
 class ConstraintPatch(BaseModel):
     params: dict | None = None
     importance: str | None = Field(default=None, pattern="^(required|flexible)$")
+
+
+class ActivationShareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_name: str = Field(
+        pattern="^(invite_link_copied|invite_shared_wechat_template)$"
+    )
+    invite_id: str = Field(min_length=32, max_length=32, pattern="^[0-9a-f]{32}$")
 
 
 class TripCreateRequest(BaseModel):
@@ -1562,12 +1571,52 @@ def get_trip_actions(
     }
 
 
-@app.get("/api/invites/{token}")
-def get_invite(token: str, db: Session = Depends(get_session)) -> dict:
+def _invite_open_context(db: Session, authorization: str | None) -> InviteOpenContext:
+    """Classify a public invite open without requiring a session.
+
+    A bad credential stays anonymous. A guest credential from another trip is
+    not attached to this invite.
+    """
+
+    token = _bearer_token(authorization)
+    if not token:
+        return InviteOpenContext()
+    if auth_service.is_guest_token(token):
+        try:
+            membership = auth_service.membership_for_guest_token(db, token)
+        except auth_service.AuthRequired:
+            return InviteOpenContext()
+        return InviteOpenContext(
+            actor_kind="guest",
+            auth_state="guest",
+            membership_id=membership.id,
+            membership_trip_id=membership.trip_id,
+        )
     try:
-        return trip_service.invite_preview(db, token)
+        user = auth_service.user_for_token(db, token)
+    except auth_service.AuthRequired:
+        return InviteOpenContext()
+    return InviteOpenContext(
+        actor_kind="account",
+        auth_state="account",
+        account_user_id=user.id,
+    )
+
+
+@app.get("/api/invites/{token}")
+def get_invite(
+    token: str,
+    db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    try:
+        preview = trip_service.invite_preview(
+            db, token, opener=_invite_open_context(db, authorization)
+        )
     except trip_service.InviteNotFound as exc:
         raise HTTPException(404, "Invite not found") from exc
+    db.commit()
+    return preview
 
 
 def _chat_with_trip_impl(
@@ -1996,6 +2045,36 @@ def create_invite(
         "token": created.token,
         "url": f"{frontend_base}/#/join/{created.token}",
     }
+
+
+@app.post("/api/trips/{trip_id}/activation-events")
+def record_activation_share(
+    trip_id: str,
+    body: ActivationShareRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Record a clipboard or WeChat-template copy after the client write succeeds.
+
+    The client cannot supply metadata. Organizer membership and same-trip invite
+    ownership are checked here. ``invite_sent`` is not accepted.
+    """
+
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        trip_service.record_organizer_share_event(
+            db,
+            trip_id=trip_id,
+            organizer=me,
+            event_name=body.event_name,
+            invite_id=body.invite_id,
+        )
+    except trip_service.OrganizerRequired as exc:
+        raise HTTPException(403, "Only the organizer can record invite sharing") from exc
+    except trip_service.InviteNotFound as exc:
+        raise HTTPException(404, "Invite not found") from exc
+    db.commit()
+    return {"recorded": True}
 
 
 @app.post("/api/invites/{token}/join")

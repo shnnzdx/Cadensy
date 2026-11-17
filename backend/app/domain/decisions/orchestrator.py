@@ -36,6 +36,11 @@ from ...db.models import (
     UpdateNotice,
     Vote,
 )
+from ..analytics.activation import (
+    record_first_decision_completed,
+    record_first_plan_change,
+    record_notice_auto_applied,
+)
 from ..constraints.engine import affected_membership_ids, classify
 from ..membership_policy import current_participant_membership_clause
 from ..constraints.types import (
@@ -277,6 +282,7 @@ def _log(db: Session, item: PlanItem, origin: str, patch: dict, **extra) -> None
             **extra,
         )
     )
+    record_first_plan_change(db, plan_id=item.plan_id, origin=origin)
 
 
 def _is_remove_patch(patch: dict | None) -> bool:
@@ -672,6 +678,7 @@ def _do_notice(db, item, patch, actor_membership_id, verdict) -> Outcome:
         )
     )
     db.flush()
+    record_notice_auto_applied(db, trip_id=item.plan.trip_id)
     return Outcome(classification=verdict, applied=True)
 
 
@@ -835,6 +842,18 @@ def settle_round(db: Session, round_: DecisionRound) -> str:
         )
     )
     db.flush()
+    if (
+        round_.status == "closed"
+        and round_.settled_at is not None
+        and isinstance(round_.winning_option_id, str)
+        and round_.winning_option_id
+    ):
+        outcome = (
+            "round_rejected"
+            if round_.winning_option_id == KEEP_CURRENT
+            else "round_applied"
+        )
+        record_first_decision_completed(db, trip_id=trip_id, outcome=outcome)
     return winner
 
 

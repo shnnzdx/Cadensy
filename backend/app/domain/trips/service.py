@@ -16,6 +16,13 @@ from sqlalchemy.orm import Session
 
 from ...db.models import InviteLink, Plan, PlanItem, Trip, TripMembership, User
 from .. import auth as auth_service
+from ..analytics.activation import (
+    InviteOpenContext,
+    record_client_share,
+    record_invite_created,
+    record_invite_opened,
+    record_trip_created,
+)
 from ..membership_policy import (
     access_authorized_membership_clause,
     is_membership_access_authorized,
@@ -136,6 +143,7 @@ def create_trip(
     )
     db.add_all([membership, plan])
     db.flush()
+    record_trip_created(db, trip_id=trip.id, membership_id=membership.id)
 
     return CreatedTrip(trip=trip, plan=plan, membership=membership)
 
@@ -268,6 +276,9 @@ def create_invite(db: Session, trip_id: str, organizer: TripMembership) -> Creat
     )
     db.add(invite)
     db.flush()
+    record_invite_created(
+        db, trip_id=trip_id, invite_id=invite.id, membership_id=organizer.id
+    )
     return CreatedInvite(invite=invite, token=token)
 
 
@@ -280,8 +291,13 @@ def _valid_invite(db: Session, token: str) -> InviteLink:
     return invite
 
 
-def invite_preview(db: Session, token: str) -> dict:
+def invite_preview(
+    db: Session, token: str, *, opener: InviteOpenContext | None = None
+) -> dict:
     invite = _valid_invite(db, token)
+    record_invite_opened(
+        db, trip_id=invite.trip_id, invite_id=invite.id, opener=opener
+    )
     trip = db.get(Trip, invite.trip_id)
     if trip is None:
         raise InviteNotFound("Invite not found")
@@ -317,6 +333,29 @@ class JoinedInvite:
     membership: TripMembership
     trip_id: str
     guest_session: auth_service.GuestSessionResult | None = None
+
+
+def record_organizer_share_event(
+    db: Session,
+    *,
+    trip_id: str,
+    organizer: TripMembership,
+    event_name: str,
+    invite_id: str,
+) -> None:
+    """Record one organizer clipboard or WeChat-template copy for this trip."""
+
+    _require_organizer(db, trip_id, organizer)
+    invite = db.get(InviteLink, invite_id)
+    if invite is None or invite.trip_id != trip_id or invite.revoked_at is not None:
+        raise InviteNotFound("Invite not found")
+    record_client_share(
+        db,
+        trip_id=trip_id,
+        membership_id=organizer.id,
+        invite_id=invite.id,
+        event_name=event_name,
+    )
 
 
 def revoke_invite(db: Session, invite_id: str, organizer: TripMembership) -> None:

@@ -18,6 +18,7 @@ are not interchangeable.
 | Current operational handoff | [`../HANDOFF.md`](../HANDOFF.md) |
 | Integration status and next work | [`../INTEGRATION-ROADMAP.md`](../INTEGRATION-ROADMAP.md) |
 | Product contract | [`PRODUCT.md`](PRODUCT.md) |
+| Activation funnel events and metrics | [`activation-funnel.md`](activation-funnel.md) |
 | Project description | [`PROJECT_DESCRIPTION.md`](PROJECT_DESCRIPTION.md) |
 | Known navigation limitations | [`navigation-known-wrong-behavior.md`](navigation-known-wrong-behavior.md) |
 | General continuation prompt | [`HANDOFF_PROMPT_CURRENT.md`](HANDOFF_PROMPT_CURRENT.md) |

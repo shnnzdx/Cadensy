@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ...db.models import AuthSession, InviteLink, Plan, Trip, TripMembership, User
 from .. import auth as auth_service
+from ..analytics.activation import record_member_joined
 from ..membership_policy import is_membership_access_authorized
 from ..trips import service as trips
 from .durable import _MAX_PLAN_REVISION
@@ -125,7 +126,7 @@ def join_guest_invite_under_trip_root(
     with session_factory() as session:
         with session.begin():
             trip = _locked_trip(session, trip_id)
-            _locked_invite(session, trip, token)
+            invite = _locked_invite(session, trip, token)
             _locked_memberships(session, trip.id)
             plan = _locked_plan(session, trip.id)
             require_no_decision_window(session, trip.id)
@@ -139,6 +140,14 @@ def join_guest_invite_under_trip_root(
             )
             session.add(membership)
             session.flush()
+            record_member_joined(
+                session,
+                trip_id=trip.id,
+                membership_id=membership.id,
+                invite_id=invite.id,
+                actor_kind="guest",
+                join_method="invite_guest",
+            )
             guest_session = auth_service.start_guest_session(session, membership)
             _advance_membership_revisions(trip, plan)
             session.flush()
@@ -199,7 +208,7 @@ def join_account_invite_under_trip_root(
                 raise LegacyAccountIdentityDenied(
                     "Legacy password-less identity cannot join as an Account"
                 )
-            _locked_invite(session, trip, token)
+            invite = _locked_invite(session, trip, token)
             memberships = _locked_memberships(session, trip.id)
             current = next(
                 (
@@ -229,6 +238,14 @@ def join_account_invite_under_trip_root(
             )
             session.add(membership)
             session.flush()
+            record_member_joined(
+                session,
+                trip_id=trip.id,
+                membership_id=membership.id,
+                invite_id=invite.id,
+                actor_kind="account",
+                join_method="invite_account",
+            )
             _advance_membership_revisions(trip, plan)
             session.flush()
             return trips.JoinedInvite(membership=membership, trip_id=trip.id)

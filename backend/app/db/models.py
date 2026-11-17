@@ -209,6 +209,9 @@ class InviteLink(Base, TimestampMixin):
     """邀请链接。token 只存哈希 —— 数据库被看到也没法拿去冒充别人加入。"""
 
     __tablename__ = "invite_link"
+    __table_args__ = (
+        UniqueConstraint("id", "trip_id", name="uq_invite_link_id_trip"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     trip_id: Mapped[str] = mapped_column(ForeignKey("trip.id"))
@@ -216,6 +219,81 @@ class InviteLink(Base, TimestampMixin):
     is_primary: Mapped[bool] = mapped_column(Boolean, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActivationEvent(Base):
+    """Privacy-minimised product activation fact.
+
+    Rows are written in the same transaction as the business action.
+    ``dedup_key`` is unique so a retry cannot double-count. Payloads are an
+    allowlisted enum object: no tokens, names, emails, preferences, or URLs.
+    """
+
+    __tablename__ = "activation_event"
+    __table_args__ = (
+        CheckConstraint(
+            "event_name IN ("
+            "'trip_created', 'invite_created', 'invite_link_copied', "
+            "'invite_shared_wechat_template', 'invite_sent', 'invite_opened', "
+            "'member_joined', 'preferences_submitted', 'preferences_updated', "
+            "'first_plan_created', 'first_decision_completed', 'notice_auto_applied'"
+            ")",
+            name="ck_activation_event_name",
+        ),
+        CheckConstraint(
+            "actor_kind IN ('account', 'guest', 'system')",
+            name="ck_activation_event_actor_kind",
+        ),
+        CheckConstraint(
+            "char_length(dedup_key) BETWEEN 1 AND 200",
+            name="ck_activation_event_dedup_key_length",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(metadata) = 'object'",
+            name="ck_activation_event_metadata_object",
+        ),
+        CheckConstraint(
+            "NOT jsonb_exists_any(metadata, ARRAY["
+            "'token', 'token_hash', 'invite_token', 'email', 'name', "
+            "'display_name', 'ip', 'user_agent', 'original_text', 'url', "
+            "'ideal_budget', 'maximum_budget', 'budget', 'password', "
+            "'authorization', 'preference', 'params', 'constraint'"
+            "]::text[])",
+            name="ck_activation_event_metadata_privacy",
+        ),
+        ForeignKeyConstraint(["trip_id"], ["trip.id"], name="fk_activation_event_trip"),
+        ForeignKeyConstraint(
+            ["invite_id", "trip_id"],
+            ["invite_link.id", "invite_link.trip_id"],
+            name="fk_activation_event_invite_same_trip",
+        ),
+        ForeignKeyConstraint(
+            ["membership_id", "trip_id"],
+            ["trip_membership.id", "trip_membership.trip_id"],
+            name="fk_activation_event_membership_same_trip",
+        ),
+        UniqueConstraint("dedup_key", name="uq_activation_event_dedup_key"),
+        Index("ix_activation_event_trip_name", "trip_id", "event_name"),
+        Index("ix_activation_event_invite", "invite_id"),
+        Index("ix_activation_event_membership", "membership_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    event_name: Mapped[str] = mapped_column(String(40))
+    trip_id: Mapped[str] = mapped_column(String(32))
+    invite_id: Mapped[str | None] = mapped_column(String(32))
+    membership_id: Mapped[str | None] = mapped_column(String(32))
+    actor_kind: Mapped[str] = mapped_column(String(20))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    dedup_key: Mapped[str] = mapped_column(String(200))
+    event_metadata: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
 
 
 # ————————————————————— 偏好和约束 —————————————————————
@@ -241,6 +319,9 @@ class Preference(Base):
     travel_style: Mapped[str | None] = mapped_column(String(40))
     top_interests: Mapped[list] = mapped_column(JSON, default=list)  # 最多 3 个
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set on the first successful save and never overwritten. submitted_at
+    # remains the latest save time.
+    first_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MemberConstraint(Base, TimestampMixin):

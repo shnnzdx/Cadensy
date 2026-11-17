@@ -29,6 +29,10 @@ from ...db.models import (
     TripMembership,
     User,
 )
+from ..analytics.activation import (
+    record_preferences_submitted,
+    record_preferences_updated,
+)
 from ..constraints.engine import SAFE_TEXT, violates
 from ..membership_policy import current_participant_membership_clause
 from ..constraints.types import (
@@ -165,6 +169,13 @@ def save_mine(
     if pref is None:
         pref = Preference(trip_membership_id=membership.id)
         db.add(pref)
+        first_submission = True
+    else:
+        # A legacy row can already have submitted_at and no first_submitted_at.
+        # Keep that timestamp instead of treating the next edit as the first one.
+        first_submission = pref.submitted_at is None and pref.first_submitted_at is None
+        if pref.first_submitted_at is None and pref.submitted_at is not None:
+            pref.first_submitted_at = pref.submitted_at
 
     pref.preferred_start_date = data.preferred_start_date
     pref.preferred_end_date = data.preferred_end_date
@@ -177,11 +188,18 @@ def save_mine(
     pref.travel_style = data.travel_style
     # 最多三个 —— 什么都想要等于没有偏好
     pref.top_interests = list(data.top_interests)[:3]
-    pref.submitted_at = _now()
+    saved_at = _now()
+    if first_submission:
+        pref.first_submitted_at = saved_at
+    pref.submitted_at = saved_at
 
     # 组织者要看得到"6 个人里几个交了",没有这一行系统根本不知道谁交了。
     membership.status = "preferences_submitted"
     db.flush()
+    if first_submission:
+        record_preferences_submitted(db, membership)
+    else:
+        record_preferences_updated(db, membership)
     _mark_existing_plan_for_refresh(db, membership.trip_id)
     return read_mine(db, membership)
 
