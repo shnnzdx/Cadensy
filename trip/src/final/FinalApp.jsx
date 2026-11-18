@@ -1446,7 +1446,8 @@ function InvitePage() {
     <section className="linkPanel">
       <div><span className="roleChip">{app.inviteCopied ? 'Link copied' : 'Ready to share'}</span><h2>{model.name}</h2><p>{model.destination} · {model.dates}</p></div>
       <label>Invite link<textarea ref={inviteFieldRef} className="inviteLinkField" readOnly rows={3} value={shownLoading ? 'Loading link...' : shownError || shareFieldValue || '生成新链接后，链接会保存在这台设备上。'}/></label>
-      {!inviteUrl && !shownLoading && <p>这台设备没有可复制的链接。点「生成新链接」会停用当前有效链接并创建一条 30 天内有效的新链接。</p>}
+      {!inviteUrl && !shownLoading && <p>这台浏览器里没有可复制的链接。</p>}
+      <p>「生成新链接」会停用已经分享出去的链接。链接只缓存在这台浏览器里，换浏览器或清除站点数据后需要重新生成。</p>
       <div className="copyActions">
         <Button disabled={!inviteUrl} onClick={copyLink}>{copyState === 'copied' ? '已复制' : 'Copy link'}</Button>
         <Button secondary disabled={!inviteUrl} onClick={copyWeChat}>复制微信分享</Button>

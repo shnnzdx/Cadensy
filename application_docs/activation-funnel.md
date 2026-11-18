@@ -1,10 +1,10 @@
 # Activation Funnel
 
 Status: current contract
-Last reviewed: 2026-11-17
+Last reviewed: 2026-11-18
 
 This is the P0 measurement contract for trip creation, invites, joins, first
-preferences, the first plan change, settled group decisions, and notice
+preferences, the first generated plan, settled group decisions, and notice
 auto-apply. It is not a production analytics vendor and it does not send email.
 
 ## Storage
@@ -43,7 +43,7 @@ There is no persistent anonymous browser id and no tracking cookie.
 | `member_joined` | A new invite membership row is created. Idempotent account re-join does not emit | `member_joined:{membership_id}` | `join_method` `invite_guest` or `invite_account` | guest or account |
 | `preferences_submitted` | First preference save for a membership | `preferences_submitted:{membership_id}` | none | account or guest |
 | `preferences_updated` | The first later edit for that membership. Further edits do not emit | `preferences_updated:{membership_id}` | none | account or guest |
-| `first_plan_created` | The first `plan_change` written for the trip | `first_plan_created:{trip_id}` | `origin` when it is a known plan-change origin | system |
+| `first_plan_created` | The first usable itinerary written by plan generation (`_write_items`, origin `ai_generate` or `rule_generate`) | `first_plan_created:{trip_id}` | `origin` `ai_generate` or `rule_generate` | system |
 | `first_decision_completed` | The first counted group outcome below | `first_decision_completed:{trip_id}` | `outcome` | system |
 | `notice_auto_applied` | The first notice direct-apply for the trip | `notice_auto_applied:{trip_id}` | `source=notice` | system |
 
@@ -57,10 +57,13 @@ Counted only when a group decision reaches a final determined outcome.
 1. **Settled decision round.** `settle_round` transitions `decision_round.status`
    from `open` to `closed`, sets `decision_round.settled_at`, and sets a
    non-empty `decision_round.winning_option_id`.
-   - `winning_option_id = 'keep'` (`KEEP_CURRENT`) emits `outcome=round_rejected`.
-     This is a settled rejection: ties, rounds with no votes, and reopen rounds
-     that miss the majority threshold all keep the itinerary content and still
-     count. Calling `settle_round` again on a closed round does not emit again.
+   - `winning_option_id = 'keep'` (`KEEP_CURRENT`) emits `outcome=round_rejected`
+     only when the round has at least one vote. Ties and reopen rounds that
+     miss the majority threshold keep the itinerary content and still count.
+     A round that settles with zero votes is the auto-keep fallback. It still
+     closes with `winning_option_id = 'keep'` and `settled_at` set, and it
+     emits nothing. There is no separate event for that fallback. Calling
+     `settle_round` again on a closed round does not emit again.
    - Any other winning option emits `outcome=round_applied`. The winning patch
      is applied, including a removal.
 2. **Resolved deadlock.** `resolve_deadlock` moves `change_proposal.status`
@@ -88,6 +91,9 @@ Not counted:
 - Withdrawn: `change_proposal.status = 'withdrawn'`. `decision_round.status`
   is only `open` or `closed`. This state machine has no withdrawn, cancelled,
   or revoked round. Those proposal states do not emit.
+- A settled round with zero votes. `settle_round` still auto-keeps the item.
+  That path does not emit `first_decision_completed` and does not emit another
+  event.
 - Proposal creation (`waiting_affected_members`) and opening a round.
 - Notice auto-apply (`_do_notice`). It emits `notice_auto_applied` once per
   trip and does not emit `first_decision_completed`. The event stores no title
@@ -97,13 +103,27 @@ Not counted:
   `escalated` because of a schedule conflict, `expired`, or `withdrawn`.
   Those are not a determined applied or declined result.
 
+## `first_plan_created`
+
+Emitted once per trip, from `generator._write_items`, when the first usable
+itinerary is written. The metadata origin is `ai_generate` or `rule_generate`.
+
+Notice, booking, round, confirm, deadlock, and other ordinary `plan_change`
+rows do not emit it, including when they happen before any generation. An
+empty `plan` row created with the trip is not a generated itinerary. A second
+generation for the same trip does not emit again.
+
 ## Metrics
 
 `backend/analytics/activation_funnel.sql` reports per trip and overall.
 `backend/analytics/run_activation_funnel.py` prints that query for `DATABASE_URL`.
-The sample flag is `样本不足` when a denominator is below 20.
+The sample flag is `样本不足` when a rate denominator is below 20.
+`invite_members_joined` uses `count` because that row has no denominator.
 
-Invitation acceptance rate:
+`invite_links_with_at_least_one_join_rate` is the share of opened invite links
+that brought at least one member. It is not a person-level acceptance rate.
+Reusable links and the absence of an anonymous visitor id mean one open is
+not one person.
 
 - Denominator: invites with a successful public open (`invite_opened` dedup key
   `invite_opened:{invite_id}`). That write happens only when the invite is not
@@ -111,7 +131,15 @@ Invitation acceptance rate:
 - Numerator: those invites with at least one `member_joined` row attributed to
   the same invite (`invite_guest` or `invite_account`).
 
-72-hour preference completion rate:
+`invite_members_joined` is the plain count of new invite memberships
+(`invite_guest` and `invite_account`), per trip and overall. The numerator is
+that count. Denominator and rate are null, and `sample_flag` is `count`. Two
+joins on one link count as two. A join on an invite with no open row is
+included. Organizer and creator joins are excluded. This is a membership
+count, not a count of unique people.
+
+`preference_completion_72h` is preference completion among joined members. Its
+numerator and denominator are the plain counts:
 
 - Denominator: `invite_guest` and `invite_account` joins at least 72 hours
   before the cutoff. Organizer/creator joins are excluded.

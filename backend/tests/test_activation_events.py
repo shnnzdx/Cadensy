@@ -383,16 +383,28 @@ def test_preferences_submitted_once_and_first_submitted_at_preserved(db: Session
     assert first["preference"]["ideal_budget"] == 100
 
 
-def test_first_plan_created_once_per_trip(db: Session, trip_setup):
+def test_notice_and_booking_do_not_emit_first_plan_created(db: Session, trip_setup):
+    item = trip_setup["item"]
+    organizer = trip_setup["organizer"]
+    orchestrator.set_booking_status(db, item, organizer, True)
+    verdict = Classification(path=DecisionPath.NOTICE, headline="Updated", detail="Direct")
+    orchestrator._do_notice(db, item, {"title": "Notice edit"}, organizer.id, verdict)
+    db.flush()
+
+    assert _events(db, "first_plan_created", trip_setup["trip"].id) == []
+    assert len(_events(db, "notice_auto_applied", trip_setup["trip"].id)) == 1
+    assert item.title == "Notice edit"
+
+
+def test_first_plan_created_on_first_generation(db: Session, trip_setup):
     item = trip_setup["item"]
     plan = trip_setup["plan"]
-    orchestrator._log(db, item, "notice", {"title": "First change"})
-    orchestrator._log(db, item, "booking", {"settledness": "booked"})
+    organizer = trip_setup["organizer"]
+    orchestrator.set_booking_status(db, item, organizer, True)
+    verdict = Classification(path=DecisionPath.NOTICE, headline="Updated", detail="Direct")
+    orchestrator._do_notice(db, item, {"title": "Notice edit"}, organizer.id, verdict)
     db.flush()
-    events = _events(db, "first_plan_created", trip_setup["trip"].id)
-    assert len(events) == 1
-    assert events[0].dedup_key == f"first_plan_created:{trip_setup['trip'].id}"
-    assert events[0].event_metadata == {"origin": "notice"}
+    assert _events(db, "first_plan_created", trip_setup["trip"].id) == []
 
     poi = generator.Poi(
         candidate_id="poi-1",
@@ -427,16 +439,16 @@ def test_first_plan_created_once_per_trip(db: Session, trip_setup):
             generated_by="rules",
         ),
     )
-    fresh = _create(db)
-    generator._write_items(db, fresh.plan, draft)
+    generator._write_items(db, plan, draft)
+    generator._write_items(db, plan, draft)
     db.flush()
-    generated = _events(db, "first_plan_created", fresh.trip.id)
+    generated = _events(db, "first_plan_created", trip_setup["trip"].id)
     assert len(generated) == 1
+    assert generated[0].dedup_key == f"first_plan_created:{trip_setup['trip'].id}"
     assert generated[0].event_metadata == {"origin": "rule_generate"}
-    assert plan.id
 
 
-def test_first_decision_completed_counts_approved_round(db: Session, trip_setup):
+def test_voted_apply_counts_as_round_applied(db: Session, trip_setup):
     item = trip_setup["item"]
     original = item.title
     row = _round(db, item, electorate=1, options=_options())
@@ -464,15 +476,44 @@ def test_first_decision_completed_counts_approved_round(db: Session, trip_setup)
     assert "Approved Group Choice" not in str(events[0].event_metadata)
 
 
-def test_first_decision_completed_counts_rejected_round(db: Session, trip_setup):
+def test_zero_vote_auto_keep_does_not_count_first_decision_completed(db: Session, trip_setup):
     item = trip_setup["item"]
     original = item.title
     row = _round(db, item, electorate=2, options=_options())
     winner = orchestrator.settle_round(db, row)
+    orchestrator.settle_round(db, row)
 
     assert winner == "keep"
     assert row.status == "closed"
     assert row.settled_at is not None
+    assert row.winning_option_id == "keep"
+    assert item.title == original
+    assert item.settledness == "settled"
+    assert _events(db, "first_decision_completed", trip_setup["trip"].id) == []
+
+
+def test_voted_keep_counts_as_round_rejected(db: Session, trip_setup):
+    item = trip_setup["item"]
+    original = item.title
+    row = _round(db, item, electorate=2, options=_options())
+    db.add_all(
+        [
+            Vote(
+                round_id=row.id,
+                trip_membership_id=trip_setup["organizer"].id,
+                option_id="keep",
+            ),
+            Vote(
+                round_id=row.id,
+                trip_membership_id=trip_setup["participant"].id,
+                option_id="requested",
+            ),
+        ]
+    )
+    db.flush()
+    winner = orchestrator.settle_round(db, row)
+
+    assert winner == "keep"
     assert row.winning_option_id == "keep"
     assert item.title == original
     events = _events(db, "first_decision_completed", trip_setup["trip"].id)
@@ -537,6 +578,7 @@ def test_first_decision_completed_counts_deadlock_resolved(db: Session, trip_set
     events = _events(db, "first_decision_completed", trip_setup["trip"].id)
     assert len(events) == 1
     assert events[0].event_metadata == {"outcome": "deadlock_resolved"}
+    assert _events(db, "first_plan_created", trip_setup["trip"].id) == []
 
     split_trip = _create(db)
     split_item = PlanItem(
@@ -934,13 +976,25 @@ def test_activation_funnel_sql_acceptance_and_preference_rates(db: Session):
     rows = db.execute(text(FUNNEL_SQL)).mappings().all()
     indexed = {(row["metric"], row["scope_trip_id"], row["audience"]): row for row in rows}
 
-    acceptance_a = indexed[("invitation_acceptance_rate", trip_a.trip.id, None)]
-    acceptance_b = indexed[("invitation_acceptance_rate", trip_b.trip.id, None)]
-    acceptance_all = indexed[("invitation_acceptance_rate", None, None)]
+    link_rate = "invite_links_with_at_least_one_join_rate"
+    acceptance_a = indexed[(link_rate, trip_a.trip.id, None)]
+    acceptance_b = indexed[(link_rate, trip_b.trip.id, None)]
+    acceptance_all = indexed[(link_rate, None, None)]
     assert (acceptance_a["numerator"], acceptance_a["denominator"]) == (2, 3)
     assert (acceptance_b["numerator"], acceptance_b["denominator"]) == (0, 1)
     assert (acceptance_all["numerator"], acceptance_all["denominator"]) == (2, 4)
     assert acceptance_all["sample_flag"] == "样本不足"
+    assert "invitation_acceptance_rate" not in {row["metric"] for row in rows}
+
+    members_a = indexed[("invite_members_joined", trip_a.trip.id, None)]
+    members_b = indexed[("invite_members_joined", trip_b.trip.id, None)]
+    members_all = indexed[("invite_members_joined", None, None)]
+    assert members_a["numerator"] == 3
+    assert members_b["numerator"] == 1
+    assert members_all["numerator"] == 4
+    assert members_all["denominator"] is None
+    assert members_all["rate"] is None
+    assert members_all["sample_flag"] == "count"
 
     guest_a_rate = indexed[("preference_completion_72h", trip_a.trip.id, "invite_guest")]
     account_a_rate = indexed[("preference_completion_72h", trip_a.trip.id, "invite_account")]

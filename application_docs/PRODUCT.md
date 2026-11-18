@@ -340,7 +340,7 @@ Functional success looks like this:
 
 Practical product metrics can include:
 
-- invitation acceptance rate and 72-hour preference completion, defined in [`activation-funnel.md`](activation-funnel.md)
+- share of opened invite links that brought at least one member, invite-member counts, and 72-hour preference completion, defined in [`activation-funnel.md`](activation-funnel.md)
 - time to first viable plan
 - share of changes resolved through Notice
 - round/confirm frequency
