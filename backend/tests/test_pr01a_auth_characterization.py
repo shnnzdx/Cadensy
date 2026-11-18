@@ -292,5 +292,6 @@ def test_invite_revocation_does_not_revoke_an_already_joined_guest_session(
         )
 
     assert revoked.status_code == 200
-    assert preview_after_revoke.status_code == 404
+    assert preview_after_revoke.status_code == 410
+    assert preview_after_revoke.json()["detail"] == "invite_revoked"
     assert guest_after_revoke.status_code == 200

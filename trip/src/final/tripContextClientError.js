@@ -29,6 +29,9 @@ export const tripContextClientText = error => {
 export const friendlyError = err => {
   const tripContext = tripContextClientText(err)
   if (tripContext) return tripContext
+  if (err?.message === 'ideal_budget_exceeds_maximum') {
+    return 'Ideal budget must be less than or equal to the maximum budget.'
+  }
   if (err?.status === 409) return 'A vote is already open for this time block.'
   if (err?.status === 422) return err.message || 'Reopening this block needs a written reason.'
   if (err?.status >= 500) return err.message || 'The backend hit an error while processing this request.'

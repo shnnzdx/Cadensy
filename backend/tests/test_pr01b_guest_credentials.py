@@ -201,8 +201,10 @@ def test_invite_revocation_blocks_future_join_without_revoking_joined_guest(db: 
         )
 
     assert revoked.status_code == 200
-    assert preview.status_code == 404
-    assert repeat_join.status_code == 404
+    assert preview.status_code == 410
+    assert preview.json()["detail"] == "invite_revoked"
+    assert repeat_join.status_code == 410
+    assert repeat_join.json()["detail"] == "invite_revoked"
     assert existing_guest.status_code == 200
 
 

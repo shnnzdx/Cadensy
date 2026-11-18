@@ -22,6 +22,7 @@ from ...db.models import (
     Trip,
     TripMembership,
 )
+from ..analytics.activation import record_first_plan_change
 from ..constraints.engine import violates
 from ..constraints.types import (
     Constraint,
@@ -1775,6 +1776,7 @@ def _write_items(
                 ),
             )
         )
+        record_first_plan_change(db, plan_id=plan.id, origin=origin)
         items.append(row)
     db.flush()
     return tuple(items)

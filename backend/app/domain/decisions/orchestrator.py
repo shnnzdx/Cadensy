@@ -36,6 +36,10 @@ from ...db.models import (
     UpdateNotice,
     Vote,
 )
+from ..analytics.activation import (
+    record_first_decision_completed,
+    record_notice_auto_applied,
+)
 from ..constraints.engine import affected_membership_ids, classify
 from ..membership_policy import current_participant_membership_clause
 from ..constraints.types import (
@@ -672,6 +676,7 @@ def _do_notice(db, item, patch, actor_membership_id, verdict) -> Outcome:
         )
     )
     db.flush()
+    record_notice_auto_applied(db, trip_id=item.plan.trip_id)
     return Outcome(classification=verdict, applied=True)
 
 
@@ -835,6 +840,21 @@ def settle_round(db: Session, round_: DecisionRound) -> str:
         )
     )
     db.flush()
+    # Zero votes still settle to KEEP_CURRENT. That auto-keep is not a group
+    # decision, so it emits nothing. A keep after at least one vote remains
+    # round_rejected, and any other winner remains round_applied.
+    if votes and (
+        round_.status == "closed"
+        and round_.settled_at is not None
+        and isinstance(round_.winning_option_id, str)
+        and round_.winning_option_id
+    ):
+        outcome = (
+            "round_rejected"
+            if round_.winning_option_id == KEEP_CURRENT
+            else "round_applied"
+        )
+        record_first_decision_completed(db, trip_id=trip_id, outcome=outcome)
     return winner
 
 
@@ -970,6 +990,7 @@ def decide_proposal(
     if any(d.status == "declined" for d in decisions):
         proposal.status = "declined"
         db.flush()
+        _record_confirm_terminal(db, proposal, "confirm_declined")
         return False
 
     if not all(d.status == "accepted" for d in decisions):
@@ -1012,7 +1033,23 @@ def decide_proposal(
         )
     )
     db.flush()
+    _record_confirm_terminal(db, proposal, "confirm_applied")
     return True
+
+
+def _record_confirm_terminal(db: Session, proposal: ChangeProposal, outcome: str) -> None:
+    """Count a Confirm proposal that reached applied or declined.
+
+    Confirm is a group mechanism: every affected member must accept, and any
+    decline is a final rejection. A one-person affected set still uses that
+    rule and stores the same terminal status. Waiting, withdrawn, expired,
+    and escalated proposals are not terminal confirm results.
+    """
+
+    item = db.get(PlanItem, proposal.plan_item_id)
+    if item is None or item.plan is None:
+        return
+    record_first_decision_completed(db, trip_id=item.plan.trip_id, outcome=outcome)
 
 
 def withdraw_proposal(db: Session, proposal: ChangeProposal) -> None:

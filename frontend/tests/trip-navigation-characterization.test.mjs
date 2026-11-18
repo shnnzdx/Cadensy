@@ -65,12 +65,12 @@ test("characterizes current invite fact availability and policy-driven join dest
   assert.match(finalApp, /inviteTripId: savedInviteSession\?\.tripId \|\| null/);
   assert.match(finalApp, /const joined = await app\.joinInvite\(token, name\)/);
   assert.match(finalApp, /const joined = await app\.joinAccountInvite\(token\)/);
-  assert.match(finalApp, /if \(mapped\.kind === 'invite'\) setInvalid\(true\)/);
-  assert.match(finalApp, /This link is no longer active/);
+  assert.match(finalApp, /mapped\.kind === 'invite' \|\| mapped\.kind === 'revoked' \|\| mapped\.kind === 'expired'/);
+  assert.match(finalApp, /This invite link is not valid\./);
   assert.doesNotMatch(finalApp, /navigate\(`\/trip\/\$\{saved\.tripId\}\/plan`, \{ replace: true \}\)/);
   assert.doesNotMatch(finalApp, /navigate\(`\/trip\/\$\{joined\.trip_id\}\/preferences`, \{ replace: true \}\)/);
   assert.match(tripAppState, /sessionRuntime\.adoptTechnicalTripContext\(\{/);
-  assert.match(backendTripService, /def invite_preview\(db: Session, token: str\) -> dict:/);
+  assert.match(backendTripService, /def invite_preview\(/);
   assert.doesNotMatch(backendTripService, /"trip_id": invite\.trip_id/);
   assert.doesNotMatch(backendTripService, /def join_invite\(/);
   assert.match(backendMembershipJoin, /def join_guest_invite_under_trip_root\(/);

@@ -78,6 +78,12 @@ An organizer creates a trip with:
 ### Join
 
 Members join through an invite flow and only become members after an explicit join step.
+An organizer reuses one active invite. Opening the invite page does not mint a new
+token. The raw link stays in the organizer's browser for that trip and invite.
+Generating a new link revokes the trip's previous active invites. New invites
+expire after 30 days. Older invites with no expiry keep working until they are
+revoked or replaced. The same guest session joining the same trip again does not
+create another membership.
 
 ### Preferences
 
@@ -270,7 +276,11 @@ suited to evenings.
 
 If preferences or enforceable constraints change after a plan exists, the shared plan stays
 unchanged and is marked as needing refresh. Later replans and change evaluation use the latest
-inputs; saving a preference never silently rewrites existing itinerary decisions.
+inputs; saving a preference never silently rewrites existing itinerary decisions. Members can
+edit preferences after a plan exists. Ideal budget must be less than or equal to maximum
+budget. The first screen asks for dates and an optional budget. Pace, interests, visibility,
+and private constraints stay under “稍后补充”. Private constraint text stays out of analytics,
+share text, and logs.
 
 ## 8. Trust And Provenance
 
@@ -330,7 +340,7 @@ Functional success looks like this:
 
 Practical product metrics can include:
 
-- preference completion rate
+- share of opened invite links that brought at least one member, invite-member counts, and 72-hour preference completion, defined in [`activation-funnel.md`](activation-funnel.md)
 - time to first viable plan
 - share of changes resolved through Notice
 - round/confirm frequency

@@ -8,7 +8,14 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import MemberConstraint, MemberConstraintPrivate, Plan, PlanItem
+from app.db.models import (
+    ActivationEvent,
+    MemberConstraint,
+    MemberConstraintPrivate,
+    Plan,
+    PlanItem,
+    Preference,
+)
 from app.domain.preferences import service as pref
 
 
@@ -136,6 +143,66 @@ def test_saving_preferences_flags_but_does_not_rewrite_the_current_plan(db, full
     }
     assert plan.needs_refresh is True
     assert after == before
+
+
+def test_ideal_budget_cannot_exceed_maximum_and_does_not_save(db, full_trip):
+    with pytest.raises(pref.PreferenceBudgetInvalid) as caught:
+        pref.save_mine(
+            db,
+            full_trip["me"],
+            pref.PreferenceData(ideal_budget=800, maximum_budget=500),
+        )
+
+    assert str(caught.value) == "ideal_budget_exceeds_maximum"
+    assert (
+        db.scalar(select(Preference).where(Preference.trip_membership_id == full_trip["me"].id))
+        is None
+    )
+    assert (
+        db.scalar(
+            select(ActivationEvent).where(
+                ActivationEvent.membership_id == full_trip["me"].id,
+                ActivationEvent.event_name == "preferences_submitted",
+            )
+        )
+        is None
+    )
+    saved = pref.save_mine(
+        db,
+        full_trip["me"],
+        pref.PreferenceData(ideal_budget=500, maximum_budget=500),
+    )
+    assert saved["preference"]["ideal_budget"] == 500
+    assert saved["preference"]["maximum_budget"] == 500
+
+
+def test_edit_preferences_after_plan_keeps_items_and_decision_state(db, full_trip):
+    plan = db.get(Plan, full_trip["plan"].id)
+    dinner = full_trip["dinner"]
+    assert dinner.settledness == "booked"
+    before = {
+        item.id: (item.title, item.start_hour, item.settledness)
+        for item in db.scalars(select(PlanItem).where(PlanItem.plan_id == plan.id))
+    }
+
+    pref.save_mine(db, full_trip["me"], pref.PreferenceData(ideal_budget=100, maximum_budget=200))
+    pref.save_mine(db, full_trip["me"], pref.PreferenceData(ideal_budget=150, maximum_budget=250))
+
+    after = {
+        item.id: (item.title, item.start_hour, item.settledness)
+        for item in db.scalars(select(PlanItem).where(PlanItem.plan_id == plan.id))
+    }
+    assert plan.needs_refresh is True
+    assert after == before
+    assert dinner.settledness == "booked"
+    submitted = db.scalars(
+        select(ActivationEvent).where(
+            ActivationEvent.membership_id == full_trip["me"].id,
+            ActivationEvent.event_name == "preferences_submitted",
+        )
+    ).all()
+    assert len(submitted) == 1
+    assert "150" not in str(submitted[0].event_metadata)
 
 
 def test_top_interests_are_capped_at_three(db, full_trip):

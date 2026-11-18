@@ -15,6 +15,10 @@ import {
 } from './workspace-navigation-model.js'
 import { resolveTripCover, tripCoverImageUrlForVariant } from './trip-cover.js'
 import { describeInviteJoinError } from './invite-join-flow.js'
+import { clearInviteLink, readInviteLink, rememberInviteLink } from './inviteLinkCache.js'
+import { wechatShareTemplate, writeClipboard } from './inviteShare.js'
+import { clearInviteJoinResume, inviteJoinResumeMatches, markInviteJoinResume } from './inviteJoinResume.js'
+import { preferenceBudgetError } from './preferenceBudget.js'
 import { extendRoundFailureNotice } from './tripContextClientError.js'
 import { invitePageRenderModel, visibleInviteForRoute } from './invitePageDisplay.js'
 
@@ -971,6 +975,12 @@ function PreferencesPage() {
   const app = useTripApp()
   const currentTrip = useCurrentTrip()
   const navigate = useNavigate()
+  const [joinNotice] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    const notice = window.sessionStorage.getItem('cadensy.joinNotice') || ''
+    if (notice) window.sessionStorage.removeItem('cadensy.joinNotice')
+    return notice
+  })
   const [form, setForm] = useState(app.preferences)
   const [availabilityMode, setAvailabilityMode] = useState('full')
   const [constraints, setConstraints] = useState([])
@@ -978,6 +988,8 @@ function PreferencesPage() {
   const [picking, setPicking] = useState(false)
   const [draft, setDraft] = useState(null)
   const [loaded, setLoaded] = useState(false)
+  const [laterOpen, setLaterOpen] = useState(false)
+  const [budgetError, setBudgetError] = useState('')
   // A plan record can exist before the first generation attempt. Preferences
   // become read-only only once the current plan has actual itinerary items.
   const planGenerated = Boolean(app.planId && (app.days || []).some(day => (day.items || []).length > 0))
@@ -997,6 +1009,7 @@ function PreferencesPage() {
         if (cancelled) return
         setConstraints(data.constraints || [])
         const pref = data.preference
+        if ((pref?.top_interests || []).length || (data.constraints || []).length) setLaterOpen(true)
         const savedAvailability = {
           start: fromISODate(pref?.available_start_date) || tripRange.start,
           end: fromISODate(pref?.available_end_date) || tripRange.end,
@@ -1067,6 +1080,12 @@ function PreferencesPage() {
       app.notify('Choose your availability within the Trip Dates')
       return
     }
+    const budgetProblem = preferenceBudgetError(form.idealBudget, form.maxBudget)
+    if (budgetProblem) {
+      setBudgetError('Ideal budget must be less than or equal to the maximum budget.')
+      return
+    }
+    setBudgetError('')
     try {
       await app.saveMyPreferences({
         preferred_start_date: toISODate(tripRange.start),
@@ -1088,22 +1107,25 @@ function PreferencesPage() {
   if (!currentTrip) return <TripShell />
 
   return <TripShell>
-    <div className={cx('preferenceWrap', 'editorialForm', planGenerated && 'preferenceReadOnly')} aria-readonly={planGenerated || undefined}>
-      <div className="pageHeading"><div><span className="eyebrow">My preferences</span><h1>Share only what matters.</h1></div></div>
+    <div className={cx('preferenceWrap', 'editorialForm')}>
+      <div className="pageHeading"><div><span className="eyebrow">My preferences</span><h1>Share only what matters.</h1>{joinNotice && <p>{joinNotice}</p>}</div></div>
       <section className="preferenceCard preferenceFlow">
         <div className="wide tripDatesCard"><span>Trip Dates</span><strong>{formatDateRange(tripRange)}</strong><small>Set by trip organizer</small></div>
-        <fieldset className="wide availabilityChoice" disabled={planGenerated}><legend>Are you available for the full trip?</legend>
+        <fieldset className="wide availabilityChoice"><legend>Are you available for the full trip?</legend>
           <label><input type="radio" name="availability" checked={availabilityMode === 'full'} onChange={() => { setAvailabilityMode('full'); set('availableRange', tripRange) }}/><span><strong>Yes, all dates</strong><small>I am available for the full Trip Dates.</small></span></label>
           <label><input type="radio" name="availability" checked={availabilityMode === 'limited'} onChange={() => { setAvailabilityMode('limited'); set('availableRange', { start: null, end: null }) }}/><span><strong>No, I have limited availability</strong><small>I will choose a window inside the Trip Dates.</small></span></label>
         </fieldset>
-        {availabilityMode === 'limited' && <div className="wide"><AvailabilityPicker tripRange={tripRange} value={form.availableRange} readOnly={planGenerated} onChange={range => set('availableRange', range)}/></div>}
+        {availabilityMode === 'limited' && <div className="wide"><AvailabilityPicker tripRange={tripRange} value={form.availableRange} onChange={range => set('availableRange', range)}/></div>}
         <div className="wide fieldPair">
-          <label>Ideal total budget<input readOnly={planGenerated} value={form.idealBudget} onChange={e => set('idealBudget', e.target.value)}/></label>
-          <label>Maximum acceptable budget<input readOnly={planGenerated} value={form.maxBudget} onChange={e => set('maxBudget', e.target.value)}/></label>
+          <label>Ideal total budget<input value={form.idealBudget} onChange={e => { setBudgetError(''); set('idealBudget', e.target.value) }}/></label>
+          <label>Maximum acceptable budget<input value={form.maxBudget} onChange={e => { setBudgetError(''); set('maxBudget', e.target.value) }}/></label>
         </div>
-        <CustomSelect className="wide" label="Who can see my budget" value={form.budgetVisibility} readOnly={planGenerated} onChange={value => set('budgetVisibility', value)} options={[{ value: 'planning', label: 'Only Cadensy' }, { value: 'organizer', label: 'Organizer too' }, { value: 'everyone', label: 'Whole group' }]}/>
-        <CustomSelect className="wide" label="Preferred pace" value={form.pace} readOnly={planGenerated} onChange={value => set('pace', value)} options={['Relaxed', 'Balanced', 'Full schedule'].map(option => ({ value: option, label: option }))}/>
-        <div className="wide"><label>Top interests — up to 3</label><div className="styleGrid">{tripStyles.map(style => <button type="button" disabled={planGenerated} key={style} className={cx('styleTile', form.interests?.includes(style) && 'selected')} onClick={planGenerated ? undefined : () => toggleStyle(style)}><span>{style}</span><small>{style === 'Food' ? 'better meals' : style === 'Nature' ? 'parks and views' : style === 'Relaxed' ? 'slower days' : style === 'Culture' ? 'museums and neighborhoods' : 'more active plans'}</small><b className="styleTileCheck" aria-hidden="true">✓</b></button>)}</div></div>
+        {budgetError && <p className="formError">{budgetError}</p>}
+        <details className="wide laterFields" open={laterOpen} onToggle={event => setLaterOpen(event.currentTarget.open)}>
+          <summary>稍后补充</summary>
+        <CustomSelect className="wide" label="Who can see my budget" value={form.budgetVisibility} onChange={value => set('budgetVisibility', value)} options={[{ value: 'planning', label: 'Only Cadensy' }, { value: 'organizer', label: 'Organizer too' }, { value: 'everyone', label: 'Whole group' }]}/>
+        <CustomSelect className="wide" label="Preferred pace" value={form.pace} onChange={value => set('pace', value)} options={['Relaxed', 'Balanced', 'Full schedule'].map(option => ({ value: option, label: option }))}/>
+        <div className="wide"><label>Top interests — up to 3</label><div className="styleGrid">{tripStyles.map(style => <button type="button" key={style} className={cx('styleTile', form.interests?.includes(style) && 'selected')} onClick={() => toggleStyle(style)}><span>{style}</span><small>{style === 'Food' ? 'better meals' : style === 'Nature' ? 'parks and views' : style === 'Relaxed' ? 'slower days' : style === 'Culture' ? 'museums and neighborhoods' : 'more active plans'}</small><b className="styleTileCheck" aria-hidden="true">✓</b></button>)}</div></div>
 
         <div className="wide needsPanel">
           <label>Things that are not negotiable</label>
@@ -1113,10 +1135,10 @@ function PreferencesPage() {
           {constraints.map(entry => <div className="needRow savedNeed" key={entry.id}>
             <div><strong>{labelFor(entry.kind)}</strong><small>{constraintSummary(entry)}</small><small className="needVisibility">Visible to: {visibilityLabel(entry.visibility)}</small></div>
             <Badge tone={entry.importance === 'required' ? 'orange' : 'blue'}>{entry.importance}</Badge>
-            {!planGenerated && <button type="button" className="needRemove" aria-label="Remove" onClick={() => drop(entry.id)}>×</button>}
+            <button type="button" className="needRemove" aria-label="Remove" onClick={() => drop(entry.id)}>×</button>
           </div>)}
 
-          {!planGenerated && draft && <div className="needDraft">
+          {draft && <div className="needDraft">
             <strong>{labelFor(draft.kind)}</strong>
             <ConstraintParams kind={draft.kind} params={draft.params} allowedRange={tripRange} onChange={params => setDraft(current => ({ ...current, params }))}/>
             <label>In your own words
@@ -1127,14 +1149,15 @@ function PreferencesPage() {
             <div className="needDraftActions"><Button disabled={Boolean(constraintDraftProblem(draft))} onClick={commitDraft}>Add</Button><Button ghost onClick={() => setDraft(null)}>Cancel</Button></div>
           </div>}
 
-          {!planGenerated && picking && !draft && <div className="needPicker">
+          {picking && !draft && <div className="needPicker">
             {CONSTRAINT_KINDS.map(entry => <button type="button" key={entry.kind} onClick={() => startDraft(entry.kind)}>
               <strong>{entry.label}</strong><small>{entry.hint}</small>
             </button>)}
           </div>}
 
-          {!planGenerated && !draft && <button type="button" className="needAdd" onClick={() => setPicking(current => !current)}>{picking ? 'Close' : '＋ Add something that is not negotiable'}</button>}
+          {!draft && <button type="button" className="needAdd" onClick={() => setPicking(current => !current)}>{picking ? 'Close' : '＋ Add something that is not negotiable'}</button>}
         </div>
+        </details>
 
         {conflicts.length > 0 && <div className="wide conflictPanel">
           <strong>This clashes with {conflicts.length} {conflicts.length === 1 ? 'part' : 'parts'} of the plan</strong>
@@ -1145,7 +1168,7 @@ function PreferencesPage() {
           </li>)}</ul>
         </div>}
 
-        <div className="formFooter"><span>{loaded ? (planGenerated ? 'Read-only: these preferences were used to generate the current plan.' : '') : 'Loading your preferences...'}</span>{!planGenerated && <Button disabled={app.loading.action} onClick={save}>{app.loading.action ? 'Saving...' : 'Save preferences'}</Button>}</div>
+        <div className="formFooter"><span>{loaded ? (planGenerated ? 'You can still update these. The current plan stays in place and is marked to refresh. Settled group decisions are not rewritten.' : '') : 'Loading your preferences...'}</span><Button disabled={app.loading.action} onClick={save}>{app.loading.action ? 'Saving...' : 'Save preferences'}</Button></div>
       </section>
     </div>
   </TripShell>
@@ -1298,6 +1321,9 @@ function InvitePage() {
   const navigate = useNavigate()
   const [inviteState, setInviteState] = useState({ routeTripId: '', invite: null, error: '' })
   const [loadingInvite, setLoadingInvite] = useState(false)
+  const [copyState, setCopyState] = useState('')
+  const [shareDraft, setShareDraft] = useState('')
+  const inviteFieldRef = useRef(null)
   const model = invitePageRenderModel({
     routeTripId,
     trips: app.trips,
@@ -1309,23 +1335,34 @@ function InvitePage() {
   const shownInvite = visibleInviteForRoute(routeTripId, inviteState)
   const shownError = inviteState.routeTripId === routeTripId ? inviteState.error : ''
   const shownLoading = inviteState.routeTripId === routeTripId && loadingInvite
-  const inviteUrl = shownInvite ? buildTripPreviewAbsoluteUrl(window.location.origin, joinHref(shownInvite.token)) : ''
+  const inviteUrl = shownInvite?.token ? buildTripPreviewAbsoluteUrl(window.location.origin, joinHref(shownInvite.token)) : ''
+  const shareFieldValue = shareDraft || inviteUrl
   useEffect(() => {
     let cancelled = false
-    if (!model.shouldCreateInvite) {
+    if (!model.shouldLoadInvite) {
       return () => {
         cancelled = true
         app.invalidateInviteCreation()
       }
     }
     setLoadingInvite(true)
+    setCopyState('')
+    setShareDraft('')
     setInviteState({ routeTripId, invite: null, error: '' })
-    app.createInvite(routeTripId)
-      .then(nextInvite => {
-        if (!cancelled) setInviteState({ routeTripId, invite: nextInvite, error: '' })
+    app.loadActiveInvite(routeTripId)
+      .then(metadata => {
+        if (cancelled) return
+        const token = readInviteLink(routeTripId, metadata.invite_id)
+        setInviteState({
+          routeTripId,
+          invite: token ? { ...metadata, token } : { ...metadata, token: '' },
+          error: '',
+        })
       })
       .catch(err => {
-        if (!cancelled) setInviteState({ routeTripId, invite: null, error: err.message || 'Could not create an invite link' })
+        if (cancelled) return
+        if (err.status === 404) setInviteState({ routeTripId, invite: null, error: '' })
+        else setInviteState({ routeTripId, invite: null, error: err.message || 'Could not load the invite link' })
       })
       .finally(() => {
         if (!cancelled) setLoadingInvite(false)
@@ -1334,18 +1371,59 @@ function InvitePage() {
       cancelled = true
       app.invalidateInviteCreation()
     }
-  }, [app.createInvite, app.invalidateInviteCreation, model.shouldCreateInvite, routeTripId])
+  }, [app.invalidateInviteCreation, app.loadActiveInvite, model.shouldLoadInvite, routeTripId])
+  const showStoredInvite = nextInvite => {
+    rememberInviteLink(routeTripId, nextInvite.invite_id, nextInvite.token)
+    setInviteState({ routeTripId, invite: nextInvite, error: '' })
+    setCopyState('')
+    setShareDraft('')
+  }
+  const generateLink = async () => {
+    setLoadingInvite(true)
+    setCopyState('')
+    setShareDraft('')
+    try {
+      const nextInvite = await app.createInvite(routeTripId)
+      showStoredInvite(nextInvite)
+    } catch (err) {
+      setInviteState({ routeTripId, invite: null, error: err.message || 'Could not create an invite link' })
+    } finally {
+      setLoadingInvite(false)
+    }
+  }
+  const reportShare = (eventName) => {
+    if (!shownInvite?.invite_id) return
+    app.reportInviteShare(routeTripId, shownInvite.invite_id, eventName).catch(() => {})
+  }
+  const copyText = async (value, eventName) => {
+    setShareDraft(value)
+    const result = await writeClipboard(value)
+    if (result.ok) {
+      setCopyState('copied')
+      reportShare(eventName)
+      return
+    }
+    setCopyState('failed')
+    requestAnimationFrame(() => {
+      inviteFieldRef.current?.focus()
+      inviteFieldRef.current?.select()
+    })
+  }
   const copyLink = () => {
     if (!inviteUrl) return
-    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(inviteUrl).catch(() => {})
-    app.setInviteCopied(true)
-    app.notify('Invite link copied')
+    copyText(inviteUrl, 'invite_link_copied')
+  }
+  const copyWeChat = () => {
+    if (!inviteUrl) return
+    copyText(wechatShareTemplate({ tripName: model.name, url: inviteUrl }), 'invite_shared_wechat_template')
   }
   const revokeLink = async () => {
     if (!shownInvite?.invite_id) return
     await app.revokeInvite(shownInvite.invite_id)
+    clearInviteLink(routeTripId, shownInvite.invite_id)
     setInviteState({ routeTripId, invite: null, error: '' })
-    app.setInviteCopied(false)
+    setCopyState('')
+    setShareDraft('')
     app.notify('Invite link revoked')
   }
   if (model.status !== 'ready' || !model.trip || model.trip.id !== routeTripId) {
@@ -1367,9 +1445,18 @@ function InvitePage() {
     </TripCoverHero>
     <section className="linkPanel">
       <div><span className="roleChip">{app.inviteCopied ? 'Link copied' : 'Ready to share'}</span><h2>{model.name}</h2><p>{model.destination} · {model.dates}</p></div>
-      <label>Invite link<textarea className="inviteLinkField" readOnly rows={2} value={shownLoading ? 'Creating link...' : shownError || inviteUrl}/></label>
-      <div className="copyActions"><Button disabled={!inviteUrl} onClick={copyLink}>{app.inviteCopied ? 'Copied' : 'Copy link'}</Button><Button secondary onClick={() => navigate(model.startPlanningHref)}>Start planning</Button>{shownInvite && <Button ghost onClick={revokeLink}>Revoke link</Button>}</div>
-      {app.inviteCopied && <div className="copiedState"><strong>Link ready to share</strong></div>}
+      <label>Invite link<textarea ref={inviteFieldRef} className="inviteLinkField" readOnly rows={3} value={shownLoading ? 'Loading link...' : shownError || shareFieldValue || '生成新链接后，链接会保存在这台设备上。'}/></label>
+      {!inviteUrl && !shownLoading && <p>这台浏览器里没有可复制的链接。</p>}
+      <p>「生成新链接」会停用已经分享出去的链接。链接只缓存在这台浏览器里，换浏览器或清除站点数据后需要重新生成。</p>
+      <div className="copyActions">
+        <Button disabled={!inviteUrl} onClick={copyLink}>{copyState === 'copied' ? '已复制' : 'Copy link'}</Button>
+        <Button secondary disabled={!inviteUrl} onClick={copyWeChat}>复制微信分享</Button>
+        <Button ghost disabled={shownLoading} onClick={generateLink}>生成新链接</Button>
+        <Button secondary onClick={() => navigate(model.startPlanningHref)}>Start planning</Button>
+        {shownInvite?.token && <Button ghost onClick={revokeLink}>Revoke link</Button>}
+      </div>
+      {copyState === 'copied' && <div className="copiedState"><strong>已复制</strong></div>}
+      {copyState === 'failed' && <div className="copiedState copyFailure"><strong>复制失败，请手动选择链接</strong></div>}
       {shownError && <div className="copiedState"><strong>{shownError}</strong></div>}
     </section>
   </div>
@@ -1390,6 +1477,7 @@ function JoinInvitePage() {
   const [loadingInvite, setLoadingInvite] = useState(true)
   const [joining, setJoining] = useState(false)
   const [invalid, setInvalid] = useState(false)
+  const [inviteProblem, setInviteProblem] = useState(null)
   const [error, setError] = useState('')
   const savedInviteSession = useMemo(() => app.readInviteAdoption(token), [app, token])
   const dateText = preview ? [formatInviteDate(preview.preferred_start_date), formatInviteDate(preview.preferred_end_date)].filter(Boolean).join(' – ') : ''
@@ -1408,8 +1496,14 @@ function JoinInvitePage() {
       })
       .catch(err => {
         if (!cancelled) {
-          setInvalid(err.status === 404)
-          setError(err.status === 404 ? '' : (err.message || 'Could not load this invite'))
+          const mapped = describeInviteJoinError(err)
+          if (mapped.kind === 'invite' || mapped.kind === 'revoked' || mapped.kind === 'expired') {
+            setInviteProblem(mapped)
+            setInvalid(true)
+          } else {
+            setInvalid(false)
+            setError(mapped.message || 'Could not load this invite')
+          }
         }
       })
       .finally(() => {
@@ -1460,19 +1554,24 @@ function JoinInvitePage() {
     }
   }, [inviteOpenResolution, navigate])
   const completeJoin = (joined, { isGuest, profile }) => {
-    app.adoptTechnicalTripContext({
-      membershipId: joined.membership_id,
-      tripId: joined.trip_id,
-      ...(isGuest ? { guestToken: joined.guest_token } : {}),
-      inviteToken: token,
-      profile: {
-        id: profile?.id,
-        name: profile?.name || (isGuest ? name.trim() : 'Account member'),
-        email: isGuest ? null : profile?.email || null,
-        role: joined.role || 'participant',
-        isGuest,
-      },
-    })
+    if (joined.already_member && typeof window !== 'undefined') {
+      window.sessionStorage.setItem('cadensy.joinNotice', "You're already a member of this trip.")
+    }
+    if (!(isGuest && joined.already_member)) {
+      app.adoptTechnicalTripContext({
+        membershipId: joined.membership_id,
+        tripId: joined.trip_id,
+        ...(isGuest ? { guestToken: joined.guest_token } : {}),
+        inviteToken: token,
+        profile: {
+          id: profile?.id,
+          name: profile?.name || (isGuest ? name.trim() : 'Account member'),
+          email: isGuest ? null : profile?.email || null,
+          role: joined.role || 'participant',
+          isGuest,
+        },
+      })
+    }
     const completionResolution = resolveInviteJoinRoute({
       currentRoutePath: joinHref(token),
       currentUser: { tripId: joined.trip_id, role: joined.role || 'participant', isGuest },
@@ -1487,8 +1586,10 @@ function JoinInvitePage() {
   }
   const handleJoinError = err => {
     const mapped = describeInviteJoinError(err)
-    if (mapped.kind === 'invite') setInvalid(true)
-    else setError(mapped.message)
+    if (mapped.kind === 'invite' || mapped.kind === 'revoked' || mapped.kind === 'expired') {
+      setInviteProblem(mapped)
+      setInvalid(true)
+    } else setError(mapped.message)
   }
   const joinGuest = async () => {
     if (app.hasAccountSession) {
@@ -1523,12 +1624,19 @@ function JoinInvitePage() {
       setJoining(false)
     }
   }
+  useEffect(() => {
+    if (!preview || !token || !app.hasAccountSession || !accountProfile) return undefined
+    if (!inviteJoinResumeMatches(token)) return undefined
+    clearInviteJoinResume()
+    joinAccount()
+    return undefined
+  }, [accountProfile, app.hasAccountSession, joinAccount, preview, token])
   if (invalid) {
     return <div className="invitePage">
       <header className="inviteGlass"><Logo/></header>
       <main className="inviteLayout">
         <section className="invitePanel">
-          <span className="eyebrow">Invite unavailable</span><h2>This link is no longer active</h2>
+          <span className="eyebrow">Invite unavailable</span><h2>{inviteProblem?.message || 'This invite link is not valid.'}</h2>
           <p>Ask the organizer for a new invite link.</p>
         </section>
       </main>
@@ -1540,7 +1648,7 @@ function JoinInvitePage() {
       <TripCoverHero className="invitePhoto" trip={preview || {}}><Badge tone="blue">{dateText || 'Trip invite'}</Badge><h1>{preview?.destination || 'Join the group trip'} with the group.</h1></TripCoverHero>
       <section className="invitePanel">
         <span className="eyebrow">Join Cadensy</span><h2>{loadingInvite ? 'Loading invite' : preview?.name || 'You have been invited'}</h2>
-        {preview && <p>{preview.destination} · {dateText || 'Dates to be confirmed'} · {preview.member_count} members · Organized by {preview.organizer_name}</p>}
+        {preview && <p>{preview.organizer_name ? `${preview.organizer_name} invited you.` : 'You have been invited.'} {preview.destination} · {dateText || 'Dates to be confirmed'} · {preview.member_count} members</p>}
         {app.hasAccountSession ? <>
           <p>Your authenticated Account will be used to join. We never use an email field as Account identity.</p>
           <Button secondary disabled={joining || loadingInvite || !preview || accountProfileLoading || !accountProfile} onClick={joinAccount}>
@@ -1552,8 +1660,8 @@ function JoinInvitePage() {
           <Button disabled={joining || loadingInvite || !preview} onClick={joinGuest}>{joining ? 'Joining...' : 'Continue as guest'}</Button>
           <div className="dividerText">or</div>
           <p>Join with an Account to keep this Membership tied to your authenticated session.</p>
-          <a className="btn btnSecondary" href={loginHref} target="_top">Sign in to join with an Account</a>
-          <a className="btn btnGhost" href={signupHref} target="_top">Create an Account</a>
+          <a className="btn btnSecondary" href={loginHref} target="_top" onClick={() => markInviteJoinResume(token)}>Sign in to join with an Account</a>
+          <a className="btn btnGhost" href={signupHref} target="_top" onClick={() => markInviteJoinResume(token)}>Create an Account</a>
         </>}
         {error && <p className="formError">{error}</p>}
       </section>

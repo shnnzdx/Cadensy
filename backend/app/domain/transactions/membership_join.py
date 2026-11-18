@@ -9,8 +9,17 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...db.models import AuthSession, InviteLink, Plan, Trip, TripMembership, User
+from ...db.models import (
+    AuthSession,
+    GuestSession,
+    InviteLink,
+    Plan,
+    Trip,
+    TripMembership,
+    User,
+)
 from .. import auth as auth_service
+from ..analytics.activation import record_member_joined
 from ..membership_policy import is_membership_access_authorized
 from ..trips import service as trips
 from .durable import _MAX_PLAN_REVISION
@@ -33,6 +42,10 @@ class AccountMembershipJoinDenied(Exception):
 
 class GuestJoinAccountIdentityRejected(Exception):
     pass
+
+
+class GuestRejoinDenied(Exception):
+    """A presented Guest credential belongs to this trip but cannot rejoin."""
 
 
 def _token_hash(token: str) -> str:
@@ -74,12 +87,15 @@ def _locked_invite(session: Session, trip: Trip, token: str) -> InviteLink:
         .execution_options(populate_existing=True)
         .with_for_update()
     )
-    if (
-        invite is None
-        or invite.revoked_at is not None
-        or (invite.expires_at is not None and invite.expires_at <= _now())
-    ):
-        raise trips.InviteNotFound("Invite not found")
+    if invite is None:
+        raise trips.InviteNotFound("invite_invalid")
+    if invite.revoked_at is not None:
+        raise trips.InviteRevoked("invite_revoked")
+    expires_at = invite.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at <= _now():
+        raise trips.InviteExpired("invite_expired")
     return invite
 
 
@@ -116,8 +132,49 @@ def _advance_membership_revisions(trip: Trip, plan: Plan | None) -> None:
         plan.revision += 1
 
 
+def _existing_guest_membership(
+    session: Session, trip: Trip, guest_token: str | None
+) -> TripMembership | None:
+    """Return this trip's Guest membership for a live credential, or None.
+
+    A credential for another trip is ignored. No new tracking identifier is
+    created. An inactive membership for this trip is refused instead of
+    duplicated.
+    """
+
+    if not guest_token or not auth_service.is_guest_token(guest_token):
+        return None
+    guest_session = session.scalar(
+        select(GuestSession)
+        .where(GuestSession.token_hash == auth_service.token_hash(guest_token))
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if guest_session is None or guest_session.revoked_at is not None:
+        return None
+    expires_at = guest_session.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is None or expires_at <= _now() or guest_session.trip_id != trip.id:
+        return None
+    membership = session.get(TripMembership, guest_session.membership_id)
+    if (
+        membership is None
+        or membership.trip_id != trip.id
+        or membership.user_id is not None
+    ):
+        return None
+    if not is_membership_access_authorized(membership):
+        raise GuestRejoinDenied("Guest membership cannot rejoin")
+    return membership
+
+
 def join_guest_invite_under_trip_root(
-    *, session_factory: Callable[[], Session], token: str, display_name: str
+    *,
+    session_factory: Callable[[], Session],
+    token: str,
+    display_name: str,
+    guest_token: str | None = None,
 ) -> trips.JoinedInvite:
     """Create an isolated Guest Membership and one bounded Guest credential."""
 
@@ -125,8 +182,16 @@ def join_guest_invite_under_trip_root(
     with session_factory() as session:
         with session.begin():
             trip = _locked_trip(session, trip_id)
-            _locked_invite(session, trip, token)
+            invite = _locked_invite(session, trip, token)
             _locked_memberships(session, trip.id)
+            existing = _existing_guest_membership(session, trip, guest_token)
+            if existing is not None:
+                return trips.JoinedInvite(
+                    membership=existing,
+                    trip_id=trip.id,
+                    guest_session=None,
+                    already_member=True,
+                )
             plan = _locked_plan(session, trip.id)
             require_no_decision_window(session, trip.id)
             membership = TripMembership(
@@ -139,6 +204,14 @@ def join_guest_invite_under_trip_root(
             )
             session.add(membership)
             session.flush()
+            record_member_joined(
+                session,
+                trip_id=trip.id,
+                membership_id=membership.id,
+                invite_id=invite.id,
+                actor_kind="guest",
+                join_method="invite_guest",
+            )
             guest_session = auth_service.start_guest_session(session, membership)
             _advance_membership_revisions(trip, plan)
             session.flush()
@@ -199,7 +272,7 @@ def join_account_invite_under_trip_root(
                 raise LegacyAccountIdentityDenied(
                     "Legacy password-less identity cannot join as an Account"
                 )
-            _locked_invite(session, trip, token)
+            invite = _locked_invite(session, trip, token)
             memberships = _locked_memberships(session, trip.id)
             current = next(
                 (
@@ -217,7 +290,9 @@ def join_account_invite_under_trip_root(
                         "Existing Account Membership is not joinable"
                     )
                 # This is not a Membership-set change, even during a Decision Window.
-                return trips.JoinedInvite(membership=current, trip_id=trip.id)
+                return trips.JoinedInvite(
+                    membership=current, trip_id=trip.id, already_member=True
+                )
             plan = _locked_plan(session, trip.id)
             require_no_decision_window(session, trip.id)
             membership = TripMembership(
@@ -229,6 +304,14 @@ def join_account_invite_under_trip_root(
             )
             session.add(membership)
             session.flush()
+            record_member_joined(
+                session,
+                trip_id=trip.id,
+                membership_id=membership.id,
+                invite_id=invite.id,
+                actor_kind="account",
+                join_method="invite_account",
+            )
             _advance_membership_revisions(trip, plan)
             session.flush()
             return trips.JoinedInvite(membership=membership, trip_id=trip.id)

@@ -61,6 +61,7 @@ from ..domain.plans import generator_commit as protected_generator_commit
 from ..domain.plans import manual_items
 from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
+from ..domain.analytics.activation import InviteOpenContext
 from ..domain.trips import service as trip_service
 from ..domain.trips import cover_service as trip_cover_service
 from ..observability.telemetry import (
@@ -669,6 +670,14 @@ class ConstraintRequest(BaseModel):
 class ConstraintPatch(BaseModel):
     params: dict | None = None
     importance: str | None = Field(default=None, pattern="^(required|flexible)$")
+
+
+class ActivationShareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_name: str = Field(
+        pattern="^(invite_link_copied|invite_shared_wechat_template)$"
+    )
+    invite_id: str = Field(min_length=32, max_length=32, pattern="^[0-9a-f]{32}$")
 
 
 class TripCreateRequest(BaseModel):
@@ -1562,12 +1571,63 @@ def get_trip_actions(
     }
 
 
-@app.get("/api/invites/{token}")
-def get_invite(token: str, db: Session = Depends(get_session)) -> dict:
+def _invite_open_context(db: Session, authorization: str | None) -> InviteOpenContext:
+    """Classify a public invite open without requiring a session.
+
+    A bad credential stays anonymous. A guest credential from another trip is
+    not attached to this invite.
+    """
+
+    token = _bearer_token(authorization)
+    if not token:
+        return InviteOpenContext()
+    if auth_service.is_guest_token(token):
+        try:
+            membership = auth_service.membership_for_guest_token(db, token)
+        except auth_service.AuthRequired:
+            return InviteOpenContext()
+        return InviteOpenContext(
+            actor_kind="guest",
+            auth_state="guest",
+            membership_id=membership.id,
+            membership_trip_id=membership.trip_id,
+        )
     try:
-        return trip_service.invite_preview(db, token)
+        user = auth_service.user_for_token(db, token)
+    except auth_service.AuthRequired:
+        return InviteOpenContext()
+    return InviteOpenContext(
+        actor_kind="account",
+        auth_state="account",
+        account_user_id=user.id,
+    )
+
+
+@app.get("/api/invites/{token}")
+def get_invite(
+    token: str,
+    db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    try:
+        preview = trip_service.invite_preview(
+            db, token, opener=_invite_open_context(db, authorization)
+        )
     except trip_service.InviteNotFound as exc:
-        raise HTTPException(404, "Invite not found") from exc
+        _raise_public_invite(exc)
+    db.commit()
+    return preview
+
+
+def _raise_public_invite(exc: trip_service.InviteNotFound) -> None:
+    code = getattr(exc, "code", "invite_invalid")
+    if code == "invite_revoked":
+        raise HTTPException(410, "invite_revoked") from exc
+    if code == "invite_expired":
+        raise HTTPException(410, "invite_expired") from exc
+    if code == "invite_invalid":
+        raise HTTPException(404, "invite_invalid") from exc
+    raise HTTPException(404, "Invite not found") from exc
 
 
 def _chat_with_trip_impl(
@@ -1995,7 +2055,57 @@ def create_invite(
         "invite_id": created.invite.id,
         "token": created.token,
         "url": f"{frontend_base}/#/join/{created.token}",
+        "expires_at": (
+            created.invite.expires_at.isoformat() if created.invite.expires_at else None
+        ),
     }
+
+
+@app.get("/api/trips/{trip_id}/invite")
+def get_active_invite(
+    trip_id: str,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Reusable invite metadata. The raw token is never returned again."""
+
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        return trip_service.active_invite_metadata(db, trip_id, me)
+    except trip_service.OrganizerRequired as exc:
+        raise HTTPException(403, "Only the organizer can view this trip invite") from exc
+    except trip_service.InviteNotFound as exc:
+        raise HTTPException(404, "Invite not found") from exc
+
+
+@app.post("/api/trips/{trip_id}/activation-events")
+def record_activation_share(
+    trip_id: str,
+    body: ActivationShareRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    """Record a clipboard or WeChat-template copy after the client write succeeds.
+
+    The client cannot supply metadata. Organizer membership and same-trip invite
+    ownership are checked here. ``invite_sent`` is not accepted.
+    """
+
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        trip_service.record_organizer_share_event(
+            db,
+            trip_id=trip_id,
+            organizer=me,
+            event_name=body.event_name,
+            invite_id=body.invite_id,
+        )
+    except trip_service.OrganizerRequired as exc:
+        raise HTTPException(403, "Only the organizer can record invite sharing") from exc
+    except trip_service.InviteNotFound as exc:
+        raise HTTPException(404, "Invite not found") from exc
+    db.commit()
+    return {"recorded": True}
 
 
 @app.post("/api/invites/{token}/join")
@@ -2003,6 +2113,7 @@ def join_invite(
     token: str,
     body: InviteJoinRequest,
     db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
 ) -> dict:
     if not body.display_name.strip():
         raise HTTPException(422, "Display name is required")
@@ -2011,18 +2122,26 @@ def join_invite(
             409,
             "account_join_requires_authenticated_session",
         )
+    presented = _bearer_token(authorization)
+    guest_token = presented if auth_service.is_guest_token(presented) else None
     try:
         joined = protected_membership_join.join_guest_invite_under_trip_root(
-            session_factory=SessionLocal, token=token, display_name=body.display_name,
+            session_factory=SessionLocal,
+            token=token,
+            display_name=body.display_name,
+            guest_token=guest_token,
         )
     except trip_service.InviteNotFound as exc:
-        raise HTTPException(404, "Invite not found") from exc
+        _raise_public_invite(exc)
+    except protected_membership_join.GuestRejoinDenied as exc:
+        raise HTTPException(403, "invite_join_forbidden") from exc
     except MembershipChangePendingDecision as exc:
         raise HTTPException(409, "membership_change_pending_decision") from exc
     response = {
         "membership_id": joined.membership.id,
         "trip_id": joined.trip_id,
         "role": "participant",
+        "already_member": joined.already_member,
     }
     if joined.guest_session is not None:
         response["guest_token"] = joined.guest_session.token
@@ -2051,7 +2170,7 @@ def account_join_invite(
             account_user_id=user.id,
         )
     except trip_service.InviteNotFound as exc:
-        raise HTTPException(404, "Invite not found") from exc
+        _raise_public_invite(exc)
     except protected_membership_join.LegacyAccountIdentityDenied as exc:
         raise HTTPException(403, "Legacy identity is not an authenticated Account") from exc
     except protected_membership_join.MembershipQuarantined as exc:
@@ -2066,6 +2185,7 @@ def account_join_invite(
         "membership_id": joined.membership.id,
         "trip_id": joined.trip_id,
         "role": joined.membership.role,
+        "already_member": joined.already_member,
     }
 
 
@@ -3191,6 +3311,8 @@ def save_my_preferences(
                 session_factory=SessionLocal, scope=scope, credential=credential,
                 command=protected_preferences_save.ProtectedPreferencesSave(key, revision, body.model_dump()), keyring=keyring,
             )
+        except pref_service.PreferenceBudgetInvalid as exc:
+            raise HTTPException(400, "ideal_budget_exceeds_maximum") from exc
         except Exception as exc:
             _protected_trip_error(exc)
         if response is not None:
@@ -3200,6 +3322,8 @@ def save_my_preferences(
         result = pref_service.save_mine(
             db, me, pref_service.PreferenceData(**body.model_dump())
         )
+    except pref_service.PreferenceBudgetInvalid as exc:
+        raise HTTPException(400, "ideal_budget_exceeds_maximum") from exc
     except pref_service.PreferenceDateOutOfTripRange as exc:
         raise HTTPException(422, str(exc)) from exc
     db.commit()

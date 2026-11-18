@@ -32,6 +32,7 @@ from ...db.models import (
     TripMembership,
     UpdateNotice,
 )
+from ..analytics.activation import record_first_decision_completed
 
 # One reminder per member per day. A nudge, not a nag.
 REMIND_COOLDOWN = timedelta(hours=24)
@@ -228,4 +229,7 @@ def resolve_deadlock(
         )
     )
     db.flush()
+    record_first_decision_completed(
+        db, trip_id=item.plan.trip_id, outcome="deadlock_resolved"
+    )
     return item

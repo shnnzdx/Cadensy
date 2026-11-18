@@ -27,7 +27,7 @@ test("phase 6 createTrip and invite flows use shared technical trip adoption wit
   assert.match(tripAppStateSource, /if \(created\.membership_id\) \{\s*adoptTechnicalTripContext\(\{\s*membershipId: created\.membership_id,\s*tripId: created\.id,\s*profile:/s);
   assert.match(finalAppSource, /const savedInviteSession = useMemo\(\(\) => app\.readInviteAdoption\(token\), \[app, token\]\)/);
   assert.doesNotMatch(finalAppSource, /app\.adoptTechnicalTripContext\(\{\s*membershipId: savedInviteSession\.membershipId/s);
-  assert.match(finalAppSource, /const completeJoin = \(joined, \{ isGuest, profile \}\) => \{\s*app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,/s);
+  assert.match(finalAppSource, /const completeJoin = \(joined, \{ isGuest, profile \}\) => \{[\s\S]*?app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,/);
   assert.match(finalAppSource, /resolveInviteJoinRoute\(\{/);
   assert.doesNotMatch(finalAppSource, /navigate\(`\/trip\/\$\{saved\.tripId\}\/plan`/);
   assert.doesNotMatch(finalAppSource, /navigate\(`\/trip\/\$\{joined\.trip_id\}\/preferences`/);
