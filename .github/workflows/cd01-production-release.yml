@@ -298,9 +298,7 @@ jobs:
             --start-from-head \
             --output json > /tmp/gate-m-cloudwatch.json
           jq -e '[.events[].message] | join("\n") |
-            contains("Running upgrade c2a4b6d8e0f1 -> 9db6f1a1041b") and
-            contains("Running upgrade 9db6f1a1041b -> 7a6c8e1d5f04") and
-            contains("Running upgrade 7a6c8e1d5f04 -> b7d3a1e9c642")
+            contains("Running upgrade b7d3a1e9c642 -> c8e1d4a90b27")
           ' /tmp/gate-m-cloudwatch.json >/dev/null
           aws ecs describe-tasks --cluster "${ECS_CLUSTER}" --tasks "${MIGRATION_TASK_ARN}" --output json > /tmp/gate-m-task.json
           if jq -e '.failures | length == 0' /tmp/gate-m-task.json >/dev/null && jq -e '.tasks | length == 1' /tmp/gate-m-task.json >/dev/null; then

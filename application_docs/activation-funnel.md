@@ -183,7 +183,7 @@ and release workflows are pinned to `c8e1d4a90b27`; production migration and dep
 A production rollout still needs the existing backup and maintenance-window
 evidence and a separate owner-gated execution, in this order:
 
-1. Migrate the production database from `b7d3a1e9c642` to `c8e1d4a90b27`.
+1. Migrate the production database from `b7d3a1e9c642` to `c8e1d4a90b27`. Gate M recovery mode accepts start revision `b7d3a1e9c642` and upgrades only to `c8e1d4a90b27`. Release evidence requires `Running upgrade b7d3a1e9c642 -> c8e1d4a90b27`.
 2. Deploy the backend that writes `activation_event` and
    `preference.first_submitted_at`.
 3. Deploy the frontend that reports clipboard and WeChat-template copies.
