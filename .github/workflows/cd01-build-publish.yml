@@ -112,7 +112,7 @@ jobs:
     # production-release schema preflight, which remains fail-closed at the
     # deployed c2a4 baseline until a dedicated PR-06B migration is approved.
     env:
-      BUILD_ALEMBIC_HEAD: b7d3a1e9c642
+      BUILD_ALEMBIC_HEAD: c8e1d4a90b27
 
     steps:
       - name: Check out the selected immutable source

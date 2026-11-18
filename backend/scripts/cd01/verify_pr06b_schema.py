@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 
-PR06B_HEAD = "b7d3a1e9c642"
+PR06B_HEAD = "c8e1d4a90b27"
 REQUIRED_TABLES = (
     "conversation",
     "conversation_message",

@@ -527,7 +527,7 @@ def test_pr06b_build_artifacts_require_the_reviewed_head_without_authorizing_rel
     build_job = build["jobs"]["build-and-push"]
     build_script = _workflow_script(build)
 
-    assert build_job["env"]["BUILD_ALEMBIC_HEAD"] == "b7d3a1e9c642"
+    assert build_job["env"]["BUILD_ALEMBIC_HEAD"] == "c8e1d4a90b27"
     assert 'backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py' in build_script
     assert "docker run --rm --network none --env build_alembic_head" in build_script
     assert '"${build_alembic_head}"' in build_script
@@ -535,7 +535,7 @@ def test_pr06b_build_artifacts_require_the_reviewed_head_without_authorizing_rel
     # verifier proves the deployed revision and objects. A migration-bound
     # release additionally verifies its exact Gate M run; code-only releases
     # record the historical migration reference without relabelling it.
-    assert release["env"]["APPROVED_ALEMBIC_HEAD"] == "b7d3a1e9c642"
+    assert release["env"]["APPROVED_ALEMBIC_HEAD"] == "c8e1d4a90b27"
     assert "migration_run_id" in release["on"]["workflow_dispatch"]["inputs"]
     assert "schema_migration_evidence_ref" in release["on"]["workflow_dispatch"]["inputs"]
     assert "cd01-pr06b-schema-migration.yml" in _workflow_script(release)

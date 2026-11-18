@@ -19,7 +19,7 @@ from sqlalchemy.pool import NullPool
 
 
 LOCK_NAMESPACE = 906_061
-DEFAULT_TARGET = "b7d3a1e9c642"
+DEFAULT_TARGET = "c8e1d4a90b27"
 
 
 class MigrationContractError(RuntimeError):

@@ -67,7 +67,7 @@ env:
   ECS_CLUSTER: tripsync-cluster
   ECS_SERVICE: tripsync-backend-service
   CONTAINER_NAME: tripsync-backend
-  APPROVED_ALEMBIC_HEAD: b7d3a1e9c642
+  APPROVED_ALEMBIC_HEAD: c8e1d4a90b27
   PRODUCTION_API_BASE_URL: https://app.cadensy.top
   EXPECTED_GATE_M_TASK_DEFINITION: arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:21
   BACKEND_LOG_GROUP: /ecs/tripsync-backend

@@ -58,7 +58,7 @@ env:
   OLD_ALEMBIC_HEAD: c2a4b6d8e0f1
   CHECKPOINT_ALEMBIC_HEAD: 9db6f1a1041b
   PR06B_INDEX_HEAD: 7a6c8e1d5f04
-  PR06B_ALEMBIC_HEAD: b7d3a1e9c642
+  PR06B_ALEMBIC_HEAD: c8e1d4a90b27
 
 jobs:
   assert-migration-approval:

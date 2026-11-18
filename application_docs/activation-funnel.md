@@ -174,14 +174,14 @@ interests, visibility, and private constraints stay behind “稍后补充”.
 ## Production rollout
 
 Do not treat this revision as applied in production. The production migration
-and release workflows remain pinned to `b7d3a1e9c642`:
+and release workflows are pinned to `c8e1d4a90b27`; production migration and deploy remain separately owner-gated:
 
 - `.github/workflows/cd01-pr06b-schema-migration.yml` (`PR06B_ALEMBIC_HEAD`)
 - `.github/workflows/cd01-production-release.yml` (`APPROVED_ALEMBIC_HEAD`)
 - `.github/workflows/cd01-build-publish.yml` (`BUILD_ALEMBIC_HEAD`)
 
-A production rollout needs an owner-approved change to those pins, the
-existing backup and maintenance-window evidence, and this order:
+A production rollout still needs the existing backup and maintenance-window
+evidence and a separate owner-gated execution, in this order:
 
 1. Migrate the production database from `b7d3a1e9c642` to `c8e1d4a90b27`.
 2. Deploy the backend that writes `activation_event` and
