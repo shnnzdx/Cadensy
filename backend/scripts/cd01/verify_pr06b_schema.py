@@ -9,15 +9,17 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 
-PR06B_HEAD = "b7d3a1e9c642"
+PR06B_HEAD = "c8e1d4a90b27"
 REQUIRED_TABLES = (
     "conversation",
     "conversation_message",
     "conversation_message_option",
     "conversation_submission",
     "conversation_submission_recovery",
+    "activation_event",
 )
 ACTIVE_ACCOUNT_INDEX = "ux_trip_membership_active_account"
+ACTIVATION_DEDUP_INDEX = "uq_activation_event_dedup_key"
 
 
 class SchemaVerificationError(RuntimeError):
@@ -88,6 +90,44 @@ def verify(engine, *, expected_head: str = PR06B_HEAD) -> None:  # type: ignore[
             or _normalize(index["predicate"]) != _normalize(expected_predicate)
         ):
             raise SchemaVerificationError("active-account index is not the reviewed valid PR-06B definition")
+        dedup_index = connection.execute(
+            text(
+                """
+                SELECT index_data.indisunique, index_data.indisvalid, index_data.indisready,
+                       index_data.indnkeyatts,
+                       coalesce(pg_get_expr(index_data.indpred, index_data.indrelid), '') AS predicate,
+                       array_agg(attribute.attname ORDER BY index_key.ordinality)
+                           FILTER (WHERE index_key.ordinality <= index_data.indnkeyatts) AS columns,
+                       bool_or(index_key.ordinality <= index_data.indnkeyatts AND index_key.attnum = 0)
+                           AS has_expression_key
+                FROM pg_index AS index_data
+                JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
+                JOIN pg_namespace AS index_namespace ON index_namespace.oid = index_class.relnamespace
+                LEFT JOIN unnest(index_data.indkey) WITH ORDINALITY AS index_key(attnum, ordinality) ON TRUE
+                LEFT JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = index_data.indrelid AND attribute.attnum = index_key.attnum
+                WHERE index_namespace.nspname = current_schema()
+                  AND index_class.relname = :index_name
+                  AND index_data.indrelid = 'activation_event'::regclass
+                GROUP BY index_data.indisunique, index_data.indisvalid, index_data.indisready,
+                         index_data.indnkeyatts, index_data.indpred, index_data.indrelid
+                """
+            ),
+            {"index_name": ACTIVATION_DEDUP_INDEX},
+        ).mappings().one_or_none()
+        if (
+            dedup_index is None
+            or not dedup_index["indisunique"]
+            or not dedup_index["indisvalid"]
+            or not dedup_index["indisready"]
+            or dedup_index["indnkeyatts"] != 1
+            or tuple(dedup_index["columns"] or ()) != ("dedup_key",)
+            or dedup_index["has_expression_key"]
+            or _normalize(dedup_index["predicate"]) != ""
+        ):
+            raise SchemaVerificationError(
+                "activation_event dedup_key unique index is not the reviewed definition"
+            )
 
 
 def main() -> None:

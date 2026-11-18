@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -527,7 +531,7 @@ def test_pr06b_build_artifacts_require_the_reviewed_head_without_authorizing_rel
     build_job = build["jobs"]["build-and-push"]
     build_script = _workflow_script(build)
 
-    assert build_job["env"]["BUILD_ALEMBIC_HEAD"] == "b7d3a1e9c642"
+    assert build_job["env"]["BUILD_ALEMBIC_HEAD"] == "c8e1d4a90b27"
     assert 'backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py' in build_script
     assert "docker run --rm --network none --env build_alembic_head" in build_script
     assert '"${build_alembic_head}"' in build_script
@@ -535,7 +539,7 @@ def test_pr06b_build_artifacts_require_the_reviewed_head_without_authorizing_rel
     # verifier proves the deployed revision and objects. A migration-bound
     # release additionally verifies its exact Gate M run; code-only releases
     # record the historical migration reference without relabelling it.
-    assert release["env"]["APPROVED_ALEMBIC_HEAD"] == "b7d3a1e9c642"
+    assert release["env"]["APPROVED_ALEMBIC_HEAD"] == "c8e1d4a90b27"
     assert "migration_run_id" in release["on"]["workflow_dispatch"]["inputs"]
     assert "schema_migration_evidence_ref" in release["on"]["workflow_dispatch"]["inputs"]
     assert "cd01-pr06b-schema-migration.yml" in _workflow_script(release)
@@ -574,7 +578,19 @@ def test_pr06b_gate_m_is_manual_protected_and_cannot_promote_ecs():
     assert inputs["maintenance_window_ref"]["required"] == "true"
     assert inputs["migration_owner"]["required"] == "true"
     assert "attestation only" in inputs["backup_restore_evidence_ref"]["description"]
-    assert "7a6c8e1d5f04" in inputs["expected_start_revision"]["options"]
+    assert inputs["expected_start_revision"]["options"] == [
+        "c2a4b6d8e0f1",
+        "9db6f1a1041b",
+        "7a6c8e1d5f04",
+        "b7d3a1e9c642",
+    ]
+    assert migration["env"]["PR06B_CONVERSATION_HEAD"] == "b7d3a1e9c642"
+    assert migration["env"]["OLD_ALEMBIC_HEAD"] == "c2a4b6d8e0f1"
+    assert migration["env"]["CHECKPOINT_ALEMBIC_HEAD"] == "9db6f1a1041b"
+    assert migration["env"]["PR06B_INDEX_HEAD"] == "7a6c8e1d5f04"
+    assert 'test "${expected_start}" = "${old_alembic_head}"' in migration_script
+    assert 'test "${expected_start}" = "${pr06b_conversation_head}"' in migration_script
+    assert "c8e1d4a90b27_activation_event_and_first_submitted.py" in migration_script
     assert migration["jobs"]["migrate"]["environment"] == "Main"
     assert migration["jobs"]["migrate"]["needs"] == "assert-migration-approval"
     assert migration["jobs"]["migrate"]["steps"][0]["with"]["ref"] == "${{ inputs.source_sha }}"
@@ -628,3 +644,113 @@ def test_cd01_workflows_do_not_reuse_provisioning_or_mutable_latest_tags():
         assert ":latest" not in script
         assert "aws secretsmanager get-secret-value" not in script
         assert "aws ssm get-parameter" not in script
+
+
+def _gate_m_upgrade_program() -> str:
+    workflow_text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"jq -e '(\[\.events\[\]\.message\] \| join\(\"\\n\"\) \|.*?)'\s+/tmp/gate-m-cloudwatch\.json",
+        workflow_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None, "Gate M CloudWatch upgrade evidence check is missing"
+    program = match.group(1)
+    assert 'contains("Running upgrade b7d3a1e9c642 -> c8e1d4a90b27")' in program
+    assert "7a6c8e1d5f04 -> b7d3a1e9c642" not in program
+    return program
+
+
+def _jq_upgrade_evidence(program: str, messages: list[str]) -> int:
+    payload = json.dumps({"events": [{"message": message} for message in messages]})
+    completed = subprocess.run(
+        ["jq", "-e", program],
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode
+
+
+def test_release_evidence_accepts_activation_upgrade_and_rejects_the_old_head():
+    """Migration-bound release proof is the b7d3 -> c8e1 upgrade, not the old chain."""
+    program = _gate_m_upgrade_program()
+    release_text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    assert "verify_pr06b_schema.py --expected-head '${APPROVED_ALEMBIC_HEAD}'" in release_text
+    activation_log = "Running upgrade b7d3a1e9c642 -> c8e1d4a90b27, activation events and preference first-submitted time"
+    assert _jq_upgrade_evidence(program, [activation_log]) == 0
+    assert _jq_upgrade_evidence(
+        program,
+        [
+            "Running upgrade c2a4b6d8e0f1 -> 9db6f1a1041b",
+            "Running upgrade 9db6f1a1041b -> 7a6c8e1d5f04",
+            activation_log,
+        ],
+    ) == 0
+    assert _jq_upgrade_evidence(
+        program,
+        [
+            "Running upgrade c2a4b6d8e0f1 -> 9db6f1a1041b",
+            "Running upgrade 9db6f1a1041b -> 7a6c8e1d5f04",
+            "Running upgrade 7a6c8e1d5f04 -> b7d3a1e9c642",
+        ],
+    ) != 0
+    assert _jq_upgrade_evidence(
+        program,
+        ["Running upgrade b7d3a1e9c642 -> c8e1d4a90b28"],
+    ) != 0
+
+
+def _load_migration_runner():
+    path = REPOSITORY_ROOT / "backend" / "scripts" / "cd01" / "run_pr06b_schema_migration.py"
+    spec = importlib.util.spec_from_file_location("cd01_run_pr06b_schema_migration_contract", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_migration_runner_approves_b7d3_start_and_rejects_unknown_revisions():
+    runner = _load_migration_runner()
+    assert runner.APPROVED_STARTS == frozenset(
+        {
+            "c2a4b6d8e0f1",
+            "9db6f1a1041b",
+            "7a6c8e1d5f04",
+            "b7d3a1e9c642",
+        }
+    )
+    assert runner.DEFAULT_TARGET == "c8e1d4a90b27"
+    script = REPOSITORY_ROOT / "backend" / "scripts" / "cd01" / "run_pr06b_schema_migration.py"
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--expected-start",
+            "aaaaaaaaaaaa",
+            "--target",
+            "c8e1d4a90b27",
+        ],
+        cwd=REPOSITORY_ROOT / "backend",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "unsupported approved PR-06B migration start revision" in rejected.stderr
+    wrong_target = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--expected-start",
+            "b7d3a1e9c642",
+            "--target",
+            "aaaaaaaaaaaa",
+        ],
+        cwd=REPOSITORY_ROOT / "backend",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert wrong_target.returncode != 0
+    assert "unsupported PR-06B migration target or timeout" in wrong_target.stderr

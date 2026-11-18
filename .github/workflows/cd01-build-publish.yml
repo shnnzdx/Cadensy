@@ -108,11 +108,11 @@ jobs:
     # can publish artifacts but contains no ECS, RDS, or migration operation.
     environment: Main
     timeout-minutes: 35
-    # This is an artifact contract only. It is deliberately separate from the
-    # production-release schema preflight, which remains fail-closed at the
-    # deployed c2a4 baseline until a dedicated PR-06B migration is approved.
+    # This is an artifact contract only. It verifies the image Alembic head
+    # and does not migrate or deploy. Production migration and release stay
+    # separately owner-gated and expect c8e1d4a90b27 after b7d3a1e9c642.
     env:
-      BUILD_ALEMBIC_HEAD: b7d3a1e9c642
+      BUILD_ALEMBIC_HEAD: c8e1d4a90b27
 
     steps:
       - name: Check out the selected immutable source

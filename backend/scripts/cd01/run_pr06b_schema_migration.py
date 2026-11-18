@@ -19,7 +19,15 @@ from sqlalchemy.pool import NullPool
 
 
 LOCK_NAMESPACE = 906_061
-DEFAULT_TARGET = "b7d3a1e9c642"
+DEFAULT_TARGET = "c8e1d4a90b27"
+APPROVED_STARTS = frozenset(
+    {
+        "c2a4b6d8e0f1",
+        "9db6f1a1041b",
+        "7a6c8e1d5f04",
+        "b7d3a1e9c642",
+    }
+)
 
 
 class MigrationContractError(RuntimeError):
@@ -92,7 +100,7 @@ def main() -> None:
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--timeout-seconds", type=int, default=900)
     args = parser.parse_args()
-    if args.expected_start not in {"c2a4b6d8e0f1", "9db6f1a1041b", "7a6c8e1d5f04"}:
+    if args.expected_start not in APPROVED_STARTS:
         raise SystemExit("unsupported approved PR-06B migration start revision")
     if args.target != DEFAULT_TARGET or args.timeout_seconds < 1 or args.timeout_seconds > 1800:
         raise SystemExit("unsupported PR-06B migration target or timeout")

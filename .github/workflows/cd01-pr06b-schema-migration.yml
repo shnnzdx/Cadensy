@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       migration_mode:
-        description: Initial chain from c2, or separately approved recovery from a recorded PR-06B checkpoint
+        description: Initial chain from c2, or separately approved recovery from a recorded PR-06B checkpoint including b7d3a1e9c642
         required: true
         default: initial
         type: choice
@@ -22,7 +22,7 @@ on:
         required: true
         default: c2a4b6d8e0f1
         type: choice
-        options: [c2a4b6d8e0f1, 9db6f1a1041b, 7a6c8e1d5f04]
+        options: [c2a4b6d8e0f1, 9db6f1a1041b, 7a6c8e1d5f04, b7d3a1e9c642]
       migration_owner:
         description: Named operator accountable for this one execution
         required: true
@@ -58,7 +58,8 @@ env:
   OLD_ALEMBIC_HEAD: c2a4b6d8e0f1
   CHECKPOINT_ALEMBIC_HEAD: 9db6f1a1041b
   PR06B_INDEX_HEAD: 7a6c8e1d5f04
-  PR06B_ALEMBIC_HEAD: b7d3a1e9c642
+  PR06B_CONVERSATION_HEAD: b7d3a1e9c642
+  PR06B_ALEMBIC_HEAD: c8e1d4a90b27
 
 jobs:
   assert-migration-approval:
@@ -85,7 +86,7 @@ jobs:
           if [ "${MODE}" = initial ]; then
             test "${EXPECTED_START}" = "${OLD_ALEMBIC_HEAD}"
           else
-            test "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" || test "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}"
+            test "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" || test "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}" || test "${EXPECTED_START}" = "${PR06B_CONVERSATION_HEAD}"
           fi
           curl --fail --silent --show-error \
             --header "Authorization: Bearer ${GH_TOKEN}" \
@@ -131,9 +132,10 @@ jobs:
           test -f backend/alembic/versions/9db6f1a1041b_pr06b1a_membership_lifecycle_schema.py
           test -f backend/alembic/versions/7a6c8e1d5f04_pr06b1a_active_account_index_cutover.py
           test -f backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py
+          test -f backend/alembic/versions/c8e1d4a90b27_activation_event_and_first_submitted.py
           if [ "${MODE}" = initial ] && [ "${EXPECTED_START}" = "${OLD_ALEMBIC_HEAD}" ]; then
             echo "expected_start=${EXPECTED_START}" >> "${GITHUB_OUTPUT}"
-          elif [ "${MODE}" = recovery ] && { [ "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" ] || [ "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}" ]; }; then
+          elif [ "${MODE}" = recovery ] && { [ "${EXPECTED_START}" = "${CHECKPOINT_ALEMBIC_HEAD}" ] || [ "${EXPECTED_START}" = "${PR06B_INDEX_HEAD}" ] || [ "${EXPECTED_START}" = "${PR06B_CONVERSATION_HEAD}" ]; }; then
             echo "expected_start=${EXPECTED_START}" >> "${GITHUB_OUTPUT}"
           else
             echo "::error::unknown migration mode"
