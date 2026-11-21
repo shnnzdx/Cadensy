@@ -1,12 +1,25 @@
 # Cadensy Current Handoff
 
 Status: current operational handoff
-Last reviewed: 2026-11-07
+Last reviewed: 2026-11-20
 Release evidence baseline: Cadensy v0.3.0
 
 This file summarizes the state recorded in the repository. It is not a fresh live-AWS inspection. For documentation ownership and evidence rules, start at [`application_docs/README.md`](application_docs/README.md).
 
 ## Contribution log
+
+### 2026-11-20 — P0 activation-funnel handoff refresh
+
+- The current source now records privacy-safe activation events, reusable
+  organizer invite links, and the first-preference flow. The active contract
+  and metric definitions are in
+  [`application_docs/activation-funnel.md`](application_docs/activation-funnel.md).
+- Release and migration gates are pinned to Alembic revision `c8e1d4a90b27`.
+  That pin prepares the controlled rollout path from `b7d3a1e9c642`; it does
+  not prove that the production database was migrated or that either service
+  was deployed.
+- No production migration, ECS deployment, or production-data change is
+  recorded by this handoff update.
 
 ### 2026-11-07 — Return-URL documentation correction
 
@@ -75,6 +88,9 @@ If `trip/` changes and the embedded `/trip` experience must reflect it, run `cd 
 - The host `/trip` shell still defaults to the iframe path; host-owned workspace restoration is not the sole entry model.
 - CD-03 did not execute real Pydantic provider acceptance.
 - Provider cost/rate governance should not be described as complete unless a newer contract and evidence prove it.
+- The P0 activation migration and the dependent backend/frontend rollout remain
+  separately owner-gated; current source and release-gate pins are not live
+  production evidence.
 
 The first two items are tracked in [`application_docs/navigation-known-wrong-behavior.md`](application_docs/navigation-known-wrong-behavior.md).
 
