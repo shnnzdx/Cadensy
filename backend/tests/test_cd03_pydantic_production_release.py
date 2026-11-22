@@ -17,6 +17,9 @@ HELPER_PATH = (
 WORKFLOW_PATH = (
     REPOSITORY_ROOT / ".github" / "workflows" / "cd03-pydantic-production-release.yml"
 )
+CODE_RELEASE_WORKFLOW_PATH = (
+    REPOSITORY_ROOT / ".github" / "workflows" / "cd04-pydantic-code-production-release.yml"
+)
 IMAGE = "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "a" * 64
 PYDANTIC_IMAGE = "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "b" * 64
 TASK_DEFINITION_ARN = "arn:aws:ecs:us-east-1:448678332746:task-definition/tripsync-backend:26"
@@ -119,6 +122,24 @@ def test_prepare_pydantic_profile_changes_only_image_and_runtime_selector():
     assert prepared["memory"] == source["taskDefinition"]["memory"]
     helper.validate_pydantic_task_definition(prepared)
     helper.validate_pydantic_transition(source, prepared, PYDANTIC_IMAGE)
+
+
+def test_pydantic_code_refresh_preserves_the_active_runtime_profile():
+    helper = _load_helper()
+    active = helper.prepare_pydantic_task_definition(_legacy_task_definition(), PYDANTIC_IMAGE)
+    refreshed_image = "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "c" * 64
+
+    refreshed = helper.prepare_pydantic_code_refresh_task_definition(active, refreshed_image)
+
+    assert _container(refreshed)["image"] == refreshed_image
+    assert _environment(refreshed) == _environment(active)
+    assert _container(refreshed)["secrets"] == _container(active)["secrets"]
+    helper.validate_pydantic_task_definition(refreshed)
+    helper.validate_pydantic_code_refresh_transition(active, refreshed, refreshed_image)
+
+    _environment_entry(refreshed, "DEEPSEEK_MODEL", "unexpected-model")
+    with pytest.raises(helper.ContractError, match="DEEPSEEK_MODEL=deepseek-flash"):
+        helper.validate_pydantic_code_refresh_transition(active, refreshed, refreshed_image)
 
 
 def test_rejects_baseline_mismatch_and_unapproved_image():
@@ -251,6 +272,52 @@ def test_workflow_is_manual_protected_and_has_required_safety_contracts():
     ):
         assert required in script
     for forbidden in ("get-secret-value", "get-parameter", "--with-decryption", "alembic upgrade", "aws rds", "aws ecs update-service --cluster ${ecs_cluster} --services"):
+        assert forbidden not in script
+
+
+def test_code_release_is_manual_and_preserves_the_active_pydantic_profile():
+    workflow = yaml.load(CODE_RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert {
+        "tooling_sha",
+        "source_sha",
+        "runtime_image_digest",
+        "schema_verifier_image_digest",
+        "schema_migration_evidence_ref",
+        "expected_current_task_definition_arn",
+        "rollback_task_definition_arn",
+        "confirmation",
+    } <= set(inputs)
+    assert workflow["jobs"]["assert-approval-gate"]["if"] == "github.ref == 'refs/heads/main'"
+    assert workflow["jobs"]["promote"]["environment"] == "Main"
+    assert workflow["concurrency"]["cancel-in-progress"] == "false"
+
+    script = "\n".join(
+        step.get("run", "") for job in workflow["jobs"].values() for step in job.get("steps", [])
+    ).casefold()
+    for required in (
+        "promote_pydantic_code_only",
+        "prepare-pydantic-code-refresh",
+        "validate-code-refresh-transition-from",
+        "validate-pydantic-profile",
+        "verify_pr06b_schema.py --expected-head",
+        "schema_migration_evidence_ref",
+        "deploymentcircuitbreaker={enable=true,rollback=true}",
+        "describe-target-health",
+        "/api/health",
+        "automatic pydantic rollback could not be fully verified",
+    ):
+        assert required in script
+    for forbidden in (
+        "alembic upgrade",
+        "alembic downgrade",
+        "alembic stamp",
+        "get-secret-value",
+        "get-parameter",
+        "aws rds",
+        "force-new-deployment",
+    ):
         assert forbidden not in script
 
 

@@ -198,6 +198,33 @@ def prepare_pydantic_task_definition(
     return prepared
 
 
+def prepare_pydantic_code_refresh_task_definition(
+    payload: dict[str, Any], image: str, *, expected_baseline_arn: str | None = None
+) -> dict[str, Any]:
+    """Clone an already-active Pydantic profile, changing only its image.
+
+    This is deliberately separate from ``prepare_pydantic_task_definition``.
+    CD-03 promotes a Legacy baseline to Pydantic; a later application-code
+    delivery must preserve the already-approved Pydantic selector, Runtime
+    gates, and DeepSeek secret reference rather than silently reverting them
+    to the older Runtime-off profile.
+    """
+
+    if not _release_helper.APPROVED_IMAGE_RE.fullmatch(image):
+        _fail("Image must be the approved backend ECR repository pinned by sha256 digest.")
+    _validate_expected_baseline(payload, expected_baseline_arn)
+    validate_pydantic_task_definition(payload)
+    task_definition = _task_definition(payload)
+    prepared = {
+        field: copy.deepcopy(task_definition[field])
+        for field in _release_helper.REGISTRABLE_FIELDS
+        if field in task_definition
+    }
+    _application_container(prepared)["image"] = image
+    validate_pydantic_task_definition(prepared)
+    return prepared
+
+
 def validate_pydantic_transition(
     baseline: dict[str, Any], candidate: dict[str, Any], image: str
 ) -> None:
@@ -215,6 +242,18 @@ def validate_pydantic_transition(
         _fail("Pydantic transition changes task-definition configuration outside the approved image/runtime changes.")
 
 
+def validate_pydantic_code_refresh_transition(
+    baseline: dict[str, Any], candidate: dict[str, Any], image: str
+) -> None:
+    """Reject a Pydantic code refresh that changes anything but the image."""
+
+    validate_pydantic_task_definition(baseline)
+    validate_pydantic_task_definition(candidate)
+    expected = prepare_pydantic_code_refresh_task_definition(baseline, image)
+    if candidate != expected:
+        _fail("Pydantic code refresh changes task-definition configuration outside the approved image.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
@@ -224,6 +263,8 @@ def main() -> None:
     parser.add_argument("--validate-legacy-profile", action="store_true")
     parser.add_argument("--validate-pydantic-profile", action="store_true")
     parser.add_argument("--validate-transition-from", type=Path)
+    parser.add_argument("--prepare-pydantic-code-refresh", action="store_true")
+    parser.add_argument("--validate-code-refresh-transition-from", type=Path)
     args = parser.parse_args()
     try:
         payload = json.loads(args.input.read_text(encoding="utf-8"))
@@ -233,10 +274,11 @@ def main() -> None:
                 args.validate_legacy_profile,
                 args.validate_pydantic_profile,
                 args.validate_transition_from,
+                args.validate_code_refresh_transition_from,
             )
         )
         if modes:
-            if modes != 1 or args.output:
+            if modes != 1 or args.output or args.prepare_pydantic_code_refresh:
                 _fail("Validation modes are mutually exclusive and do not accept --output.")
             if args.validate_legacy_profile:
                 if args.image:
@@ -249,16 +291,29 @@ def main() -> None:
                     _fail("Pydantic-profile validation does not accept image or baseline arguments.")
                 validate_pydantic_task_definition(payload)
             else:
-                if not args.image or args.expected_baseline_arn:
-                    _fail("Transition validation requires --image only.")
-                baseline = json.loads(args.validate_transition_from.read_text(encoding="utf-8"))
-                validate_pydantic_transition(baseline, payload, args.image)
+                if args.validate_transition_from:
+                    if not args.image or args.expected_baseline_arn:
+                        _fail("Transition validation requires --image only.")
+                    baseline = json.loads(args.validate_transition_from.read_text(encoding="utf-8"))
+                    validate_pydantic_transition(baseline, payload, args.image)
+                else:
+                    if not args.image or args.expected_baseline_arn:
+                        _fail("Code-refresh transition validation requires --image only.")
+                    baseline = json.loads(
+                        args.validate_code_refresh_transition_from.read_text(encoding="utf-8")
+                    )
+                    validate_pydantic_code_refresh_transition(baseline, payload, args.image)
             return
         if not args.output or not args.image:
             _fail("Pydantic task-definition generation requires --output and --image.")
-        prepared = prepare_pydantic_task_definition(
-            payload, args.image, expected_baseline_arn=args.expected_baseline_arn
-        )
+        if args.prepare_pydantic_code_refresh:
+            prepared = prepare_pydantic_code_refresh_task_definition(
+                payload, args.image, expected_baseline_arn=args.expected_baseline_arn
+            )
+        else:
+            prepared = prepare_pydantic_task_definition(
+                payload, args.image, expected_baseline_arn=args.expected_baseline_arn
+            )
     except (OSError, json.JSONDecodeError, ContractError) as exc:
         raise SystemExit(f"CD-03 Pydantic task-definition contract failed: {exc}") from exc
     args.output.write_text(json.dumps(prepared, indent=2, sort_keys=True) + "\n", encoding="utf-8")

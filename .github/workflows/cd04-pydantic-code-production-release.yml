@@ -1,0 +1,320 @@
+name: CD-04 — Manually Approved Pydantic Code Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tooling_sha:
+        description: Reviewed main SHA that contains this CD-04 workflow and helpers
+        required: true
+        type: string
+      source_sha:
+        description: Main SHA that owns the immutable backend and schema-verifier images
+        required: true
+        type: string
+      runtime_image_digest:
+        description: Immutable backend sha256 digest published for source_sha
+        required: true
+        type: string
+      schema_verifier_image_digest:
+        description: Immutable schema-verifier sha256 digest published for source_sha
+        required: true
+        type: string
+      schema_migration_evidence_ref:
+        description: Successful historical Gate M GitHub Actions run URL for the current schema
+        required: true
+        type: string
+      expected_current_task_definition_arn:
+        description: Exact active Pydantic Task Definition ARN; fail closed if it differs
+        required: true
+        type: string
+      rollback_task_definition_arn:
+        description: Exact active Pydantic Task Definition ARN used for automatic rollback
+        required: true
+        type: string
+      confirmation:
+        description: Type PROMOTE_PYDANTIC_CODE_ONLY after reviewing every immutable input
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cd04-pydantic-code-production-release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_AWS_ACCOUNT_ID: "448678332746"
+  APPROVED_AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripsync-backend
+  ECS_CLUSTER: tripsync-cluster
+  ECS_SERVICE: tripsync-backend-service
+  CONTAINER_NAME: tripsync-backend
+  APPROVED_ALEMBIC_HEAD: c8e1d4a90b27
+  PRODUCTION_API_BASE_URL: https://app.cadensy.top
+
+jobs:
+  assert-approval-gate:
+    name: Require a protected Main approval environment
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless Main has required reviewers
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/Main" \
+            > /tmp/main-environment.json
+          jq -e 'any(.protection_rules[]?; .type == "required_reviewers")' /tmp/main-environment.json >/dev/null
+
+  promote:
+    name: Promote one immutable Pydantic backend image after production approval
+    needs: assert-approval-gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: Main
+    timeout-minutes: 40
+    steps:
+      - name: Check out reviewed CD-04 tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tooling_sha }}
+          fetch-depth: 0
+
+      - name: Require one recorded non-bypassed Main approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals" \
+            > /tmp/cd04-approvals.json
+          jq -e '
+            any(.[]?; .state == "approved" and any(.environments[]?; .name == "Main")) and
+            (any(.[]?; .state == "skipped" and any(.environments[]?; .name == "Main")) | not)
+          ' /tmp/cd04-approvals.json >/dev/null
+
+      - name: Validate immutable inputs and reviewed tooling
+        id: inputs
+        shell: bash
+        env:
+          TOOLING_SHA: ${{ inputs.tooling_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          SCHEMA_VERIFIER_DIGEST: ${{ inputs.schema_verifier_image_digest }}
+          SCHEMA_MIGRATION_EVIDENCE_REF: ${{ inputs.schema_migration_evidence_ref }}
+          EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
+          ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION}" = "PROMOTE_PYDANTIC_CODE_ONLY"
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RUNTIME_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${SCHEMA_VERIFIER_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${SCHEMA_MIGRATION_EVIDENCE_REF}" =~ ^https://github\.com/shnnzdx/Cadensy/actions/runs/[1-9][0-9]*$ ]]
+          [[ "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}" =~ ^arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task-definition/${CONTAINER_NAME}:[0-9]+$ ]]
+          test "${ROLLBACK_TASK_DEFINITION_ARN}" = "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}"
+          test "$(git rev-parse HEAD)" = "${TOOLING_SHA}"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${TOOLING_SHA}" origin/main
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
+          test -f scripts/cd01/prepare_ecs_task_definition.py
+          test -f scripts/cd01/prepare_pydantic_release_task_definition.py
+          test -f backend/scripts/cd01/verify_pr06b_schema.py
+          echo "runtime_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "schema_verifier_image=${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${SCHEMA_VERIFIER_DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure AWS credentials from the approved Main environment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.APPROVED_AWS_REGION }}
+
+      - name: Verify provenance, Pydantic baseline, and historical schema evidence
+        id: current
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          SCHEMA_VERIFIER_DIGEST: ${{ inputs.schema_verifier_image_digest }}
+          SCHEMA_MIGRATION_EVIDENCE_REF: ${{ inputs.schema_migration_evidence_ref }}
+          EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "${APPROVED_AWS_ACCOUNT_ID}"
+          aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${RUNTIME_DIGEST}" --output json > /tmp/runtime-image.json
+          aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageDigest=${SCHEMA_VERIFIER_DIGEST}" --output json > /tmp/schema-verifier-image.json
+          jq -e --arg tag "${SOURCE_SHA}" '(.imageDetails | length == 1) and (.imageDetails[0].imageTags | index($tag))' /tmp/runtime-image.json >/dev/null
+          jq -e --arg tag "${SOURCE_SHA}-migration" '(.imageDetails | length == 1) and (.imageDetails[0].imageTags | index($tag))' /tmp/schema-verifier-image.json >/dev/null
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/service.json
+          jq -e '.services | length == 1 and .[0].status == "ACTIVE" and .[0].desiredCount >= 1 and .[0].runningCount >= 1 and .[0].pendingCount == 0' /tmp/service.json >/dev/null
+          jq -e '.services[0].deployments | length == 1 and .[0].status == "PRIMARY" and (.[0].rolloutState // "COMPLETED") == "COMPLETED"' /tmp/service.json >/dev/null
+          jq -e '.services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true and .services[0].deploymentConfiguration.minimumHealthyPercent == 100 and .services[0].deploymentConfiguration.maximumPercent == 200' /tmp/service.json >/dev/null
+          current_task_definition="$(jq -r '.services[0].taskDefinition' /tmp/service.json)"
+          test "${current_task_definition}" = "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}"
+          aws ecs describe-task-definition --task-definition "${current_task_definition}" --output json > /tmp/current-task-definition.json
+          python scripts/cd01/prepare_pydantic_release_task_definition.py --input /tmp/current-task-definition.json --validate-pydantic-profile
+          jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/service.json > /tmp/baseline-target-groups.txt
+          test -s /tmp/baseline-target-groups.txt
+          while read -r target_group; do
+            aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/baseline-target-health.json
+            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/baseline-target-health.json >/dev/null
+          done < /tmp/baseline-target-groups.txt
+          curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/baseline-health.json
+          jq -e '.ok == true' /tmp/baseline-health.json >/dev/null
+          schema_evidence_run_id="${SCHEMA_MIGRATION_EVIDENCE_REF##*/}"
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${schema_evidence_run_id}" \
+            > /tmp/gate-m-run.json
+          jq -e '.event == "workflow_dispatch" and .conclusion == "success" and .head_branch == "main" and .path == ".github/workflows/cd01-pr06b-schema-migration.yml"' /tmp/gate-m-run.json >/dev/null
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${schema_evidence_run_id}/jobs?per_page=100" \
+            > /tmp/gate-m-jobs.json
+          jq -e '.jobs | any(.[]; .name == "Execute one approved PR-06B schema migration" and .conclusion == "success" and any(.steps[]?; .name == "Run bounded migration and read-only catalog verification" and .conclusion == "success"))' /tmp/gate-m-jobs.json >/dev/null
+          echo "current_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
+          echo "schema_evidence_run_id=${schema_evidence_run_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run a read-only c8 schema preflight in an isolated task
+        id: schema
+        shell: bash
+        env:
+          SCHEMA_VERIFIER_IMAGE: ${{ steps.inputs.outputs.schema_verifier_image }}
+        run: |
+          set -euo pipefail
+          python scripts/cd01/prepare_ecs_task_definition.py \
+            --input /tmp/current-task-definition.json \
+            --output /tmp/schema-preflight-task-definition.json \
+            --image "${SCHEMA_VERIFIER_IMAGE}"
+          verifier_task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/schema-preflight-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          test -n "${verifier_task_definition}" && test "${verifier_task_definition}" != "None"
+          network_configuration="$(jq -c '{awsvpcConfiguration: .services[0].networkConfiguration.awsvpcConfiguration}' /tmp/service.json)"
+          command="python scripts/cd01/verify_pr06b_schema.py --expected-head '${APPROVED_ALEMBIC_HEAD}'"
+          overrides="$(jq -nc --arg name "${CONTAINER_NAME}" --arg command "${command}" '{containerOverrides: [{name: $name, command: ["sh", "-eu", "-c", $command]}]}')"
+          task_arn="$(aws ecs run-task --cluster "${ECS_CLUSTER}" --launch-type FARGATE --platform-version LATEST --task-definition "${verifier_task_definition}" --network-configuration "${network_configuration}" --overrides "${overrides}" --query 'tasks[0].taskArn' --output text)"
+          test -n "${task_arn}" && test "${task_arn}" != "None"
+          aws ecs wait tasks-stopped --cluster "${ECS_CLUSTER}" --tasks "${task_arn}"
+          exit_code="$(aws ecs describe-tasks --cluster "${ECS_CLUSTER}" --tasks "${task_arn}" --query "tasks[0].containers[?name=='${CONTAINER_NAME}'].exitCode | [0]" --output text)"
+          test "${exit_code}" = "0"
+          echo "task=${task_arn}" >> "${GITHUB_OUTPUT}"
+          echo "status=at-approved-head-no-schema-mutation" >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare the Pydantic-preserving application task definition
+        id: taskdef
+        shell: bash
+        env:
+          RUNTIME_IMAGE: ${{ steps.inputs.outputs.runtime_image }}
+          EXPECTED_CURRENT_TASK_DEFINITION_ARN: ${{ inputs.expected_current_task_definition_arn }}
+        run: |
+          set -euo pipefail
+          python scripts/cd01/prepare_pydantic_release_task_definition.py \
+            --input /tmp/current-task-definition.json \
+            --output /tmp/pydantic-code-task-definition.json \
+            --image "${RUNTIME_IMAGE}" \
+            --expected-baseline-arn "${EXPECTED_CURRENT_TASK_DEFINITION_ARN}" \
+            --prepare-pydantic-code-refresh
+          python scripts/cd01/prepare_pydantic_release_task_definition.py \
+            --input /tmp/pydantic-code-task-definition.json \
+            --validate-pydantic-profile
+          python scripts/cd01/prepare_pydantic_release_task_definition.py \
+            --input /tmp/pydantic-code-task-definition.json \
+            --image "${RUNTIME_IMAGE}" \
+            --validate-code-refresh-transition-from /tmp/current-task-definition.json
+          task_definition="$(aws ecs register-task-definition --cli-input-json file:///tmp/pydantic-code-task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)"
+          test -n "${task_definition}" && test "${task_definition}" != "None"
+          echo "arn=${task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Promote with automatic rollback to the verified Pydantic baseline
+        shell: bash
+        env:
+          ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+          NEW_TASK_DEFINITION_ARN: ${{ steps.taskdef.outputs.arn }}
+        run: |
+          set -euo pipefail
+          deployment_started=0
+          verify_rollback() {
+            aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/rollback-service.json
+            test "$(jq -r '.services[0].taskDefinition' /tmp/rollback-service.json)" = "${ROLLBACK_TASK_DEFINITION_ARN}"
+            jq -e '.services[0].desiredCount >= 1 and .services[0].runningCount >= 1 and .services[0].pendingCount == 0' /tmp/rollback-service.json >/dev/null
+            jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/rollback-service.json > /tmp/rollback-target-groups.txt
+            test -s /tmp/rollback-target-groups.txt
+            while read -r target_group; do
+              aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/rollback-target-health.json
+              jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/rollback-target-health.json >/dev/null
+            done < /tmp/rollback-target-groups.txt
+            curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/rollback-health.json
+            aws ecs describe-task-definition --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --output json > /tmp/rollback-task-definition.json
+            python scripts/cd01/prepare_pydantic_release_task_definition.py --input /tmp/rollback-task-definition.json --validate-pydantic-profile
+          }
+          rollback_on_error() {
+            if [[ "${deployment_started}" == "1" ]]; then
+              rollback_failed=0
+              aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --task-definition "${ROLLBACK_TASK_DEFINITION_ARN}" --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null || rollback_failed=1
+              timeout 900 aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" || rollback_failed=1
+              verify_rollback || rollback_failed=1
+              if [[ "${rollback_failed}" != "0" ]]; then
+                echo '::error::Automatic Pydantic rollback could not be fully verified; stop and investigate before any retry.'
+                return 1
+              fi
+            fi
+          }
+          trap rollback_on_error ERR
+          deployment_started=1
+          aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --task-definition "${NEW_TASK_DEFINITION_ARN}" --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}" >/dev/null
+          timeout 900 aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json > /tmp/final-service.json
+          test "$(jq -r '.services[0].taskDefinition' /tmp/final-service.json)" = "${NEW_TASK_DEFINITION_ARN}"
+          jq -e '.services[0].desiredCount >= 1 and .services[0].runningCount >= 1 and .services[0].pendingCount == 0' /tmp/final-service.json >/dev/null
+          jq -r '.services[0].loadBalancers[].targetGroupArn' /tmp/final-service.json > /tmp/final-target-groups.txt
+          test -s /tmp/final-target-groups.txt
+          while read -r target_group; do
+            aws elbv2 describe-target-health --target-group-arn "${target_group}" --output json > /tmp/final-target-health.json
+            jq -e '.TargetHealthDescriptions | length > 0 and all(.[]; .TargetHealth.State == "healthy")' /tmp/final-target-health.json >/dev/null
+          done < /tmp/final-target-groups.txt
+          curl --fail --silent --show-error --max-time 15 "${PRODUCTION_API_BASE_URL}/api/health" > /tmp/final-health.json
+          jq -e '.ok == true' /tmp/final-health.json >/dev/null
+          aws ecs describe-task-definition --task-definition "${NEW_TASK_DEFINITION_ARN}" --output json > /tmp/final-task-definition.json
+          python scripts/cd01/prepare_pydantic_release_task_definition.py --input /tmp/final-task-definition.json --validate-pydantic-profile
+
+      - name: Write release summary
+        shell: bash
+        env:
+          TOOLING_SHA: ${{ inputs.tooling_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_image_digest }}
+          SCHEMA_VERIFIER_DIGEST: ${{ inputs.schema_verifier_image_digest }}
+          SCHEMA_MIGRATION_EVIDENCE_REF: ${{ inputs.schema_migration_evidence_ref }}
+          ROLLBACK_TASK_DEFINITION_ARN: ${{ inputs.rollback_task_definition_arn }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## CD-04 Pydantic code-only production release result'
+            echo
+            echo "- Reviewed CD-04 tooling commit: ${TOOLING_SHA}"
+            echo "- Application source commit: ${SOURCE_SHA}"
+            echo "- Runtime image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
+            echo "- Schema-verifier image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${SCHEMA_VERIFIER_DIGEST}"
+            echo "- Historical schema migration evidence: ${SCHEMA_MIGRATION_EVIDENCE_REF}"
+            echo "- Schema status: ${{ steps.schema.outputs.status }} (read-only preflight task ${{ steps.schema.outputs.task }})"
+            echo "- Pydantic rollback baseline: ${ROLLBACK_TASK_DEFINITION_ARN}"
+            echo "- New Pydantic task definition: ${{ steps.taskdef.outputs.arn }}"
+            echo '- Runtime boundary: existing Pydantic selector, Durable Runtime gates, and the approved DeepSeek secret reference were preserved; no Provider configuration was added, changed, or read.'
+            echo '- Rollback boundary: an unhealthy release returns only the backend service to the verified Pydantic baseline. No database downgrade or automatic schema operation occurs.'
+          } >> "${GITHUB_STEP_SUMMARY}"

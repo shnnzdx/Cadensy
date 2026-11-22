@@ -16,6 +16,7 @@ Only workflows that remain valid CI, artifact, release, or production-operation 
 | Release | `cd01-production-release.yml` | protected manual dispatch | Promote a validated backend image with rollback checks |
 | Release | `cd01-frontend-production-release.yml` | protected manual dispatch | Promote a validated frontend image with rollback checks |
 | Release | `cd03-pydantic-production-release.yml` | protected manual dispatch | Validate, activate, or roll back the Pydantic runtime profile |
+| Release | `cd04-pydantic-code-production-release.yml` | protected manual dispatch | Promote a digest-pinned backend code image while preserving the active Pydantic Runtime profile after a read-only schema preflight |
 | Operations | `cloud-fixed-accounts-upsert.yml` | protected manual dispatch | Upsert the two fixed cloud accounts through an isolated ECS task |
 | Operations | `cloud-demo-purge.yml` | protected manual dispatch | Remove obsolete demo data through an isolated ECS task |
 | Operations | `phase9-public-e2e.yml` | manual dispatch | Run browser acceptance against the public production URL |
