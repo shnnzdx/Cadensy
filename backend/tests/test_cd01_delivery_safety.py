@@ -18,9 +18,9 @@ HELPER_PATH = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_ecs_task_definitio
 RELEASE_INPUT_HELPER_PATH = (
     REPOSITORY_ROOT / "scripts" / "cd01" / "validate_release_evidence.py"
 )
-BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-build-publish.yml"
-RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-production-release.yml"
-MIGRATION_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-pr06b-schema-migration.yml"
+BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "artifact-backend-images.yml"
+RELEASE_WORKFLOW = REPOSITORY_ROOT / "AWS" / "archive" / "workflows" / "retired-release" / "release-runtime-off-backend.yml"
+MIGRATION_WORKFLOW = REPOSITORY_ROOT / "AWS" / "archive" / "workflows" / "retired-release" / "release-pr06b-schema-migration.yml"
 
 spec = importlib.util.spec_from_file_location("cd01_prepare_task_definition", HELPER_PATH)
 assert spec and spec.loader

@@ -1,4 +1,4 @@
-name: Artifacts — Immutable Backend Images
+name: Artifacts — Immutable Frontend Image
 
 on:
   workflow_run:
@@ -19,17 +19,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: cd01-build-publish-${{ github.repository }}
+  group: artifact-frontend-images-${{ github.repository }}
   cancel-in-progress: false
 
 env:
   APPROVED_AWS_ACCOUNT_ID: "448678332746"
   APPROVED_AWS_REGION: us-east-1
-  ECR_REPOSITORY: tripsync-backend
+  ECR_REPOSITORY: tripsync-frontend
+  PRODUCTION_API_BASE_URL: https://app.cadensy.top
 
 jobs:
   classify-artifact-source:
-    name: Determine whether backend artifacts are needed
+    name: Determine whether frontend artifacts are needed
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
@@ -65,7 +66,7 @@ jobs:
           ref: ${{ steps.source.outputs.sha }}
           fetch-depth: 0
 
-      - name: Determine whether backend build inputs changed
+      - name: Determine whether frontend build inputs changed
         id: scope
         shell: bash
         env:
@@ -85,12 +86,12 @@ jobs:
           build_required=false
           while IFS= read -r file; do
             case "${file}" in
-              # Documentation, tests, and release-workflow changes are
-              # validated in CI but do not alter the runtime image. A workflow
+              # Documentation and release-workflow changes are validated in
+              # CI but do not alter the frontend runtime image. A workflow
               # change can be exercised by controlled manual rebuild only.
-              docs/**|application_docs/**|AI_enhanced/**|AWS/**|*.md|backend/tests/**)
+              docs/**|application_docs/**|AI_enhanced/**|AWS/**|*.md)
                 ;;
-              backend/**)
+              frontend/**|trip/**|shared/**|.dockerignore)
                 build_required=true
                 break
                 ;;
@@ -99,20 +100,14 @@ jobs:
           echo "build_required=${build_required}" >> "${GITHUB_OUTPUT}"
 
   build-and-push:
-    name: Build and publish immutable backend artifacts
+    name: Build, validate, and publish one immutable frontend image
     needs: classify-artifact-source
     if: ${{ needs.classify-artifact-source.outputs.build_required == 'true' }}
     runs-on: ubuntu-latest
-    # This environment is the existing AWS credential boundary. It may require
-    # approval according to the repository Environment configuration; this job
-    # can publish artifacts but contains no ECS, RDS, or migration operation.
+    # Main remains the artifact-publication approval boundary. This workflow
+    # has no ECS, RDS, migration, or shared-infrastructure operation.
     environment: Main
     timeout-minutes: 35
-    # This is an artifact contract only. It verifies the image Alembic head
-    # and does not migrate or deploy. Production migration and release stay
-    # separately owner-gated and expect c8e1d4a90b27 after b7d3a1e9c642.
-    env:
-      BUILD_ALEMBIC_HEAD: c8e1d4a90b27
 
     steps:
       - name: Check out the selected immutable source
@@ -121,7 +116,7 @@ jobs:
           ref: ${{ needs.classify-artifact-source.outputs.source_sha }}
           fetch-depth: 0
 
-      - name: Verify selected source belongs to main
+      - name: Verify selected source and full-stack build inputs
         shell: bash
         env:
           SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
@@ -131,11 +126,10 @@ jobs:
           test "${actual_sha}" = "${SOURCE_SHA}"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
-          test -f backend/Dockerfile
-          test -f backend/Dockerfile.r5-migration-runner
-          test -f backend/alembic.ini
-          test -f backend/alembic/versions/c2a4b6d8e0f1_pr05b_phase1_trip_ledger_schema.py
-          test -f backend/alembic/versions/b7d3a1e9c642_pr06b1b_conversation_schema.py
+          test -f frontend/Dockerfile
+          test -f frontend/package.json
+          test -f trip/package.json
+          test -d shared
 
       - name: Configure AWS credentials from the Main environment
         uses: aws-actions/configure-aws-credentials@v6
@@ -144,7 +138,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.APPROVED_AWS_REGION }}
 
-      - name: Verify approved AWS account and existing ECR repository
+      - name: Verify approved account and existing frontend repository
         id: target
         shell: bash
         run: |
@@ -157,23 +151,21 @@ jobs:
           test "${repository_uri}" = "${account_id}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
           echo "repository_uri=${repository_uri}" >> "${GITHUB_OUTPUT}"
 
-      - name: Refuse mutable or previously used release tags
+      - name: Refuse a previously used immutable release tag
         shell: bash
         env:
           SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
-          for tag in "${SOURCE_SHA}" "${SOURCE_SHA}-migration"; do
-            error_file="$(mktemp)"
-            if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${tag}" >/dev/null 2>"${error_file}"; then
-              echo "::error::Refusing to overwrite existing immutable ECR tag ${tag}."
-              exit 1
-            fi
-            grep -q 'ImageNotFoundException' "${error_file}" || {
-              echo "::error::Unable to prove that ECR tag ${tag} is unused."
-              exit 1
-            }
-          done
+          error_file="$(mktemp)"
+          if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}" >/dev/null 2>"${error_file}"; then
+            echo "::error::Refusing to overwrite existing immutable ECR tag ${SOURCE_SHA}."
+            exit 1
+          fi
+          grep -q 'ImageNotFoundException' "${error_file}" || {
+            echo "::error::Unable to prove that ECR tag ${SOURCE_SHA} is unused."
+            exit 1
+          }
 
       - name: Authenticate Docker to the existing ECR repository
         shell: bash
@@ -183,34 +175,46 @@ jobs:
             docker login --username AWS --password-stdin \
               "${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com"
 
-      - name: Build runtime and dedicated migration-runner images
+      - name: Build frontend, Trip preview, and shared source from repository root
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
           SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
         run: |
           set -euo pipefail
-          docker build --file backend/Dockerfile --tag "${ECR_URI}:${SOURCE_SHA}" backend
-          docker build --file backend/Dockerfile.r5-migration-runner --tag "${ECR_URI}:${SOURCE_SHA}-migration" backend
+          docker build \
+            --file frontend/Dockerfile \
+            --tag "${ECR_URI}:${SOURCE_SHA}" \
+            --build-arg NEXT_PUBLIC_API_BASE_URL="${PRODUCTION_API_BASE_URL}" \
+            --build-arg VITE_API_BASE_URL="${PRODUCTION_API_BASE_URL}" \
+            .
 
-      - name: Verify migration runner offline without a database
+      - name: Validate local container routes before publication
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
           SOURCE_SHA: ${{ needs.classify-artifact-source.outputs.source_sha }}
+          CONTAINER_NAME: tripsync-frontend-release-proof
         run: |
           set -euo pipefail
-          migration_image="${ECR_URI}:${SOURCE_SHA}-migration"
-          docker run --rm --network none --env BUILD_ALEMBIC_HEAD "${migration_image}" sh -eu -c '
-            test ! -f /app/.env
-            python -m pip check
-            test -f alembic.ini
-            test "$(python -m alembic -c alembic.ini heads | awk "{print \$1}")" = "${BUILD_ALEMBIC_HEAD}"
-            python -c "import app.db.legacy_schema_compat"
-          '
+          cleanup() {
+            docker logs "${CONTAINER_NAME}" --tail 80 || true
+            docker rm --force "${CONTAINER_NAME}" || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name "${CONTAINER_NAME}" --publish 3000:3000 "${ECR_URI}:${SOURCE_SHA}"
+          for attempt in {1..45}; do
+            if curl --fail --silent --show-error http://127.0.0.1:3000/login --output /tmp/tripsync-login.html; then
+              break
+            fi
+            test "${attempt}" -lt 45
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:3000/trip-app/index.html --output /tmp/tripsync-trip-app.html
+          docker inspect --format='container={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}not-configured{{end}}' "${CONTAINER_NAME}"
 
-      - name: Push immutable artifacts and resolve digests
-        id: artifacts
+      - name: Push immutable frontend artifact and resolve digest
+        id: artifact
         shell: bash
         env:
           ECR_URI: ${{ steps.target.outputs.repository_uri }}
@@ -218,19 +222,15 @@ jobs:
         run: |
           set -euo pipefail
           docker push "${ECR_URI}:${SOURCE_SHA}"
-          docker push "${ECR_URI}:${SOURCE_SHA}-migration"
-          runtime_digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}" --query 'imageDetails[0].imageDigest' --output text)"
-          migration_digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}-migration" --query 'imageDetails[0].imageDigest' --output text)"
-          [[ "${runtime_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${migration_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "runtime_digest=${runtime_digest}" >> "${GITHUB_OUTPUT}"
-          echo "migration_digest=${migration_digest}" >> "${GITHUB_OUTPUT}"
+          digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${SOURCE_SHA}" --query 'imageDetails[0].imageDigest' --output text)"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
           {
-            echo '## CD-01 immutable build result'
+            echo '## Immutable frontend artifact result'
             echo
             echo "- Git commit: ${SOURCE_SHA}"
-            echo "- Runtime image: ${ECR_URI}@${runtime_digest}"
-            echo "- Migration runner image: ${ECR_URI}@${migration_digest}"
-            echo '- Deployment: not requested; this workflow cannot call ECS, RDS, or Alembic migration commands.'
-            echo '- Next step: use the separately dispatched CD-01 production release workflow after Main Environment approval.'
+            echo "- Frontend image: ${ECR_URI}@${digest}"
+            echo '- Container proof: /login and /trip-app/index.html returned successfully before publication.'
+            echo '- Deployment: not requested; this workflow cannot update ECS, run a database migration, or modify shared infrastructure.'
+            echo '- Next step: use the separately dispatched frontend promotion workflow after Main Environment approval and successful backend promotion.'
           } >> "${GITHUB_STEP_SUMMARY}"

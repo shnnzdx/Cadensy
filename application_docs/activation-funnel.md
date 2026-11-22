@@ -173,12 +173,13 @@ interests, visibility, and private constraints stay behind “稍后补充”.
 
 ## Production rollout
 
-Do not treat this revision as applied in production. The production migration
-and release workflows are pinned to `c8e1d4a90b27`; production migration and deploy remain separately owner-gated:
+The production schema migration completed on 2026-11-22 from
+`b7d3a1e9c642` to `c8e1d4a90b27`. Backend and frontend promotion remain
+separate owner-gated operations:
 
-- `.github/workflows/cd01-pr06b-schema-migration.yml` (`PR06B_ALEMBIC_HEAD`)
-- `.github/workflows/cd01-production-release.yml` (`APPROVED_ALEMBIC_HEAD`)
-- `.github/workflows/cd01-build-publish.yml` (`BUILD_ALEMBIC_HEAD`)
+- `AWS/archive/workflows/retired-release/release-pr06b-schema-migration.yml` preserves the completed historical migration contract.
+- `.github/workflows/release-pydantic-backend.yml` (`APPROVED_ALEMBIC_HEAD`) is the active Pydantic-preserving backend release gate.
+- `.github/workflows/artifact-backend-images.yml` (`BUILD_ALEMBIC_HEAD`) publishes the immutable candidate images.
 
 A production rollout still needs the existing backup and maintenance-window
 evidence and a separate owner-gated execution, in this order:

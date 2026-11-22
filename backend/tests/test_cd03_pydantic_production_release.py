@@ -15,10 +15,10 @@ HELPER_PATH = (
     REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_pydantic_release_task_definition.py"
 )
 WORKFLOW_PATH = (
-    REPOSITORY_ROOT / ".github" / "workflows" / "cd03-pydantic-production-release.yml"
+    REPOSITORY_ROOT / ".github" / "workflows" / "release-pydantic-runtime.yml"
 )
 CODE_RELEASE_WORKFLOW_PATH = (
-    REPOSITORY_ROOT / ".github" / "workflows" / "cd04-pydantic-code-production-release.yml"
+    REPOSITORY_ROOT / ".github" / "workflows" / "release-pydantic-backend.yml"
 )
 IMAGE = "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "a" * 64
 PYDANTIC_IMAGE = "448678332746.dkr.ecr.us-east-1.amazonaws.com/tripsync-backend@sha256:" + "b" * 64

@@ -1,7 +1,7 @@
 # Archived GitHub Actions Workflows
 
 Status: non-executable historical evidence
-Last reviewed: 2026-10-29
+Last reviewed: 2026-11-22
 
 These YAML files were moved out of `.github/workflows/` so GitHub no longer presents them as runnable Actions. Their contents are preserved for infrastructure history, audit reconstruction, and rollback context. Do not copy them back into the active workflow directory without a fresh architecture and security review.
 
@@ -24,7 +24,9 @@ These YAML files were moved out of `.github/workflows/` so GitHub no longer pres
 
 | Workflow | Superseded by | Last recorded use |
 | --- | --- | --- |
-| `retired-release/r5-manual-ecr-build.yml` | `.github/workflows/cd01-build-publish.yml` | 2026-10-14 |
-| `retired-release/cd01-release-b-ai-activation.yml` | `.github/workflows/cd03-pydantic-production-release.yml` | 2026-10-22 |
+| `retired-release/r5-manual-ecr-build.yml` | `.github/workflows/artifact-backend-images.yml` | 2026-10-14 |
+| `retired-release/cd01-release-b-ai-activation.yml` | `.github/workflows/release-pydantic-runtime.yml` | 2026-10-22 |
+| `retired-release/release-pr06b-schema-migration.yml` | Completed P0 migration; future schema changes require a newly reviewed, migration-specific release contract | 2026-11-22 |
+| `retired-release/release-runtime-off-backend.yml` | `.github/workflows/release-pydantic-backend.yml` for code delivery on the active Pydantic profile | Never used for the active Pydantic profile |
 
-Historical static contract tests intentionally reference the two retired release files at their archive paths. This preserves evidence without exposing obsolete production actions in the GitHub Actions UI.
+Historical static contract tests intentionally reference retired release files at their archive paths. This preserves evidence without exposing obsolete production actions in the GitHub Actions UI.

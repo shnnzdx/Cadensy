@@ -65,7 +65,7 @@ Cloud Demo Purge successful run:
 https://github.com/shnnzdx/cap_stone/actions/runs/31663298728
 
 Current Pydantic production release workflow:
-https://github.com/shnnzdx/Cadensy/actions/workflows/cd03-pydantic-production-release.yml
+https://github.com/shnnzdx/Cadensy/actions/workflows/release-pydantic-runtime.yml
 
 The former DeepSeek-only Release B workflow is archived in the repository at:
 AWS/archive/workflows/retired-release/cd01-release-b-ai-activation.yml
