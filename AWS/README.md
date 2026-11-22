@@ -37,17 +37,21 @@ Use `DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md` only as a historical retirement
 plan; verify current metadata before acting on it.
 
 Recorded v0.3.0 production state is Pydantic on `tripsync-backend:31`, with the
-Durable Conversation production latch enabled. The current protected activation
-entry point is `.github/workflows/cd03-pydantic-production-release.yml`; do not
-edit ECS task definitions by hand. The older CD-01/CD-02 Release B workflow is
-historical activation evidence, not the current runtime instruction. CD-03 run
-`40382252075` did not execute real Pydantic provider acceptance.
+Durable Conversation production latch enabled. Use
+`.github/workflows/cd03-pydantic-production-release.yml` only to validate,
+activate, or roll back the Pydantic runtime profile. Use
+`.github/workflows/cd04-pydantic-code-production-release.yml` for a later
+digest-pinned backend code release that must preserve that active profile after
+a read-only schema preflight. Do not edit ECS task definitions by hand. The
+older CD-01/CD-02 Release B workflow is historical activation evidence, not the
+current runtime instruction. CD-03 run `40382252075` did not execute real
+Pydantic provider acceptance.
 
 ## Active GitHub Actions Workflows
 
 The authoritative workflow inventory and ownership boundaries are in
 [`../.github/workflows/README.md`](../.github/workflows/README.md). Active
-workflows are limited to ten CI, artifact, release, and production-operation
+workflows are limited to eleven CI, artifact, release, and production-operation
 entry points.
 
 Current protected manual AWS operations are:
@@ -57,6 +61,7 @@ Current protected manual AWS operations are:
 .github/workflows/cd01-production-release.yml
 .github/workflows/cd01-frontend-production-release.yml
 .github/workflows/cd03-pydantic-production-release.yml
+.github/workflows/cd04-pydantic-code-production-release.yml
 .github/workflows/cloud-fixed-accounts-upsert.yml
 .github/workflows/cloud-demo-purge.yml
 ```
@@ -165,9 +170,10 @@ If the old demo trip still exists in cloud RDS and should be removed while
 keeping the fixed accounts, use the manual `Operations — Cloud Demo Purge` GitHub Action.
 
 If the deployed backend runtime must change, use the protected CD-03 Pydantic
-workflow from the reviewed `main` revision after an authorized preflight; do
-not edit ECS task definitions by hand. First confirm the workflow's expected
-baseline because the repository records Pydantic as already active.
+workflow from the reviewed `main` revision after an authorized preflight. If a
+backend code image must be promoted while retaining the already-active Pydantic
+profile, use protected CD-04 instead. Do not edit ECS task definitions by hand;
+both workflows require the exact healthy baseline task definition.
 
 The Phase 10 workflow is archived and must not be restored merely to change the
 current domain. If a future, separately reviewed Route 53 migration is approved,
