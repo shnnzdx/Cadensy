@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       frontend_image_digest:
-        description: Frontend sha256 digest produced by the matching CD-01 frontend build
+        description: Frontend sha256 digest produced by the matching immutable frontend artifact build
         required: true
         type: string
 
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cd01-frontend-production-release-${{ github.repository }}
+  group: release-frontend-${{ github.repository }}
   cancel-in-progress: false
 
 env:
@@ -161,7 +161,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo '## CD-01 production frontend release result'
+            echo '## Production frontend release result'
             echo
             echo "- Git commit: ${SOURCE_SHA}"
             echo "- Frontend image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${FRONTEND_DIGEST}"

@@ -13,8 +13,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_HELPER = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_ecs_task_definition.py"
 BOOTSTRAP_HELPER = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_backend_bootstrap_task_definition.py"
 FRONTEND_HELPER = REPOSITORY_ROOT / "scripts" / "cd01" / "prepare_frontend_task_definition.py"
-FRONTEND_BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-frontend-build-publish.yml"
-FRONTEND_RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-frontend-production-release.yml"
+FRONTEND_BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "artifact-frontend-images.yml"
+FRONTEND_RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "release-frontend.yml"
 FRONTEND_DOCKERFILE = REPOSITORY_ROOT / "frontend" / "Dockerfile"
 
 

@@ -1,10 +1,10 @@
-name: CD-04 — Manually Approved Pydantic Code Release
+name: Release — Pydantic Backend Code
 
 on:
   workflow_dispatch:
     inputs:
       tooling_sha:
-        description: Reviewed main SHA that contains this CD-04 workflow and helpers
+        description: Reviewed main SHA that contains this release workflow and helpers
         required: true
         type: string
       source_sha:
@@ -41,7 +41,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: cd04-pydantic-code-production-release-${{ github.repository }}
+  group: release-pydantic-backend-${{ github.repository }}
   cancel-in-progress: false
 
 env:
@@ -82,7 +82,7 @@ jobs:
     environment: Main
     timeout-minutes: 40
     steps:
-      - name: Check out reviewed CD-04 tooling
+      - name: Check out reviewed release tooling
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tooling_sha }}
@@ -305,9 +305,9 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo '## CD-04 Pydantic code-only production release result'
+            echo '## Pydantic backend code-only production release result'
             echo
-            echo "- Reviewed CD-04 tooling commit: ${TOOLING_SHA}"
+            echo "- Reviewed release tooling commit: ${TOOLING_SHA}"
             echo "- Application source commit: ${SOURCE_SHA}"
             echo "- Runtime image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
             echo "- Schema-verifier image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${SCHEMA_VERIFIER_DIGEST}"

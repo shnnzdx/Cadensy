@@ -204,7 +204,7 @@ def prepare_pydantic_code_refresh_task_definition(
     """Clone an already-active Pydantic profile, changing only its image.
 
     This is deliberately separate from ``prepare_pydantic_task_definition``.
-    CD-03 promotes a Legacy baseline to Pydantic; a later application-code
+    The Pydantic Runtime release promotes a Legacy baseline to Pydantic; a later application-code
     delivery must preserve the already-approved Pydantic selector, Runtime
     gates, and DeepSeek secret reference rather than silently reverting them
     to the older Runtime-off profile.
@@ -315,7 +315,7 @@ def main() -> None:
                 payload, args.image, expected_baseline_arn=args.expected_baseline_arn
             )
     except (OSError, json.JSONDecodeError, ContractError) as exc:
-        raise SystemExit(f"CD-03 Pydantic task-definition contract failed: {exc}") from exc
+        raise SystemExit(f"Pydantic Runtime release task-definition contract failed: {exc}") from exc
     args.output.write_text(json.dumps(prepared, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 

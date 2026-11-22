@@ -1,7 +1,7 @@
 # TripSync AWS Documentation
 
 Status: current operator index, with historical records linked below
-Last reviewed: 2026-10-29
+Last reviewed: 2026-11-22
 
 This folder is the AWS source-of-truth area for the TripSync capstone deployment.
 
@@ -38,9 +38,9 @@ plan; verify current metadata before acting on it.
 
 Recorded v0.3.0 production state is Pydantic on `tripsync-backend:31`, with the
 Durable Conversation production latch enabled. Use
-`.github/workflows/cd03-pydantic-production-release.yml` only to validate,
+`.github/workflows/release-pydantic-runtime.yml` only to validate,
 activate, or roll back the Pydantic runtime profile. Use
-`.github/workflows/cd04-pydantic-code-production-release.yml` for a later
+`.github/workflows/release-pydantic-backend.yml` for a later
 digest-pinned backend code release that must preserve that active profile after
 a read-only schema preflight. Do not edit ECS task definitions by hand. The
 older CD-01/CD-02 Release B workflow is historical activation evidence, not the
@@ -51,23 +51,21 @@ Pydantic provider acceptance.
 
 The authoritative workflow inventory and ownership boundaries are in
 [`../.github/workflows/README.md`](../.github/workflows/README.md). Active
-workflows are limited to eleven CI, artifact, release, and production-operation
+workflows are limited to nine CI, artifact, release, and production-operation
 entry points.
 
 Current protected manual AWS operations are:
 
 ```text
-.github/workflows/cd01-pr06b-schema-migration.yml
-.github/workflows/cd01-production-release.yml
-.github/workflows/cd01-frontend-production-release.yml
-.github/workflows/cd03-pydantic-production-release.yml
-.github/workflows/cd04-pydantic-code-production-release.yml
+.github/workflows/release-frontend.yml
+.github/workflows/release-pydantic-runtime.yml
+.github/workflows/release-pydantic-backend.yml
 .github/workflows/cloud-fixed-accounts-upsert.yml
 .github/workflows/cloud-demo-purge.yml
 ```
 
 The public browser acceptance workflow remains a separate non-deployment
-operation at `.github/workflows/phase9-public-e2e.yml`.
+operation at `.github/workflows/operation-public-production-e2e.yml`.
 
 Important:
 
@@ -124,7 +122,8 @@ TRIPSYNC_AWS_URLS.md
 CUSTOM_DOMAIN_HTTPS_RESULT.md
 PHASE10_HTTPS_CUSTOM_DOMAIN_PLAN.md
 Cloud Fixed Accounts Runbook: CLOUD_FIXED_ACCOUNTS_RUNBOOK.md
-Pydantic production activation: .github/workflows/cd03-pydantic-production-release.yml
+Pydantic runtime control: .github/workflows/release-pydantic-runtime.yml
+Pydantic backend code release: .github/workflows/release-pydantic-backend.yml
 Historical DeepSeek/Legacy activation: AWS/archive/workflows/retired-release/cd01-release-b-ai-activation.yml
 Ollama retirement plan: DEEPSEEK_ONLY_OLLAMA_RETIREMENT_PLAN.md
 PHASE6_RUNTIME_SECRETS_PLAN.md
@@ -169,10 +168,10 @@ instead of opening RDS to direct laptop access.
 If the old demo trip still exists in cloud RDS and should be removed while
 keeping the fixed accounts, use the manual `Operations — Cloud Demo Purge` GitHub Action.
 
-If the deployed backend runtime must change, use the protected CD-03 Pydantic
+If the deployed backend runtime must change, use the protected Pydantic Runtime
 workflow from the reviewed `main` revision after an authorized preflight. If a
 backend code image must be promoted while retaining the already-active Pydantic
-profile, use protected CD-04 instead. Do not edit ECS task definitions by hand;
+profile, use protected Pydantic Backend Release instead. Do not edit ECS task definitions by hand;
 both workflows require the exact healthy baseline task definition.
 
 The Phase 10 workflow is archived and must not be restored merely to change the

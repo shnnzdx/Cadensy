@@ -15,9 +15,8 @@ This file summarizes the state recorded in the repository. It is not a fresh liv
   and metric definitions are in
   [`application_docs/activation-funnel.md`](application_docs/activation-funnel.md).
 - Release and migration gates are pinned to Alembic revision `c8e1d4a90b27`.
-  That pin prepares the controlled rollout path from `b7d3a1e9c642`; it does
-  not prove that the production database was migrated or that either service
-  was deployed.
+  The protected schema-migration gate completed on 2026-11-22 from
+  `b7d3a1e9c642` to `c8e1d4a90b27`. It did not deploy either ECS service.
 - No production migration, ECS deployment, or production-data change is
   recorded by this handoff update.
 
@@ -88,9 +87,9 @@ If `trip/` changes and the embedded `/trip` experience must reflect it, run `cd 
 - The host `/trip` shell still defaults to the iframe path; host-owned workspace restoration is not the sole entry model.
 - CD-03 did not execute real Pydantic provider acceptance.
 - Provider cost/rate governance should not be described as complete unless a newer contract and evidence prove it.
-- The P0 activation migration and the dependent backend/frontend rollout remain
-  separately owner-gated; current source and release-gate pins are not live
-  production evidence.
+- The P0 activation schema migration is live at `c8e1d4a90b27`. Backend and
+  frontend promotion remain separate owner-gated operations; source or image
+  evidence alone is not deployment evidence.
 
 The first two items are tracked in [`application_docs/navigation-known-wrong-behavior.md`](application_docs/navigation-known-wrong-behavior.md).
 

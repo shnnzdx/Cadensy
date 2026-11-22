@@ -116,7 +116,7 @@ jobs:
           git merge-base --is-ancestor "${TOOLING_SHA}" origin/main
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/main
           test -f scripts/cd01/prepare_pydantic_release_task_definition.py
-          # CD-03 is a code/runtime-selector release.  Schema mutation is not allowed.
+          # This Runtime-selector release never performs schema mutation.
           git diff --quiet "${SOURCE_SHA}^" "${SOURCE_SHA}" -- backend/alembic backend/app/db/migrations
 
       - name: Configure AWS credentials from the approved Main environment
@@ -304,7 +304,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## CD-03 Pydantic production release"
+            echo "## Pydantic Runtime production release"
             echo "- Operation: ${OPERATION}"
             if [[ "${OPERATION}" == "activate" ]]; then
               echo "- INFRASTRUCTURE ACTIVATION: PASS"

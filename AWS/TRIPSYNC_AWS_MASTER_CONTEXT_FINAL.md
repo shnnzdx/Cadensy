@@ -1990,7 +1990,7 @@ Current Phase 9 files:
 ```text
 AWS/archive/completed-phases/PHASE9_PUBLIC_E2E_RUNBOOK.md
 AWS/archive/completed-phases/PHASE9_PUBLIC_E2E_RESULT.md
-.github/workflows/phase9-public-e2e.yml
+.github/workflows/operation-public-production-e2e.yml
 frontend/tests/aws-public-e2e.mjs
 ```
 
