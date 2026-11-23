@@ -230,16 +230,16 @@ Still open:
 
 Docs to review, not rewritten here:
 
-- [`navigation-known-wrong-behavior.md`](navigation-known-wrong-behavior.md),
+- [`navigation-known-wrong-behavior.md`](../navigation-known-wrong-behavior.md),
   section "Login and Return Intent" (last verified against source 2026-10-28).
   It says the login page accepts a host-level `next` when it starts with `/`,
   then redirects to `window.location.href = nextPath` after that minimal check,
   so a slash-prefixed path can win. The file does not name
   `isSafeInternalReturnPath`. On `main` at `4d3bdceb`,
-  [`frontend/app/login/page.tsx`](../frontend/app/login/page.tsx) and
-  [`frontend/app/signup/page.tsx`](../frontend/app/signup/page.tsx) resolve
+  [`frontend/app/login/page.tsx`](../../frontend/app/login/page.tsx) and
+  [`frontend/app/signup/page.tsx`](../../frontend/app/signup/page.tsx) resolve
   `next` with `isSafeInternalReturnPath` from
-  [`shared/trip-navigation-policy/invite-auth-return.js`](../shared/trip-navigation-policy/invite-auth-return.js)
+  [`shared/trip-navigation-policy/invite-auth-return.js`](../../shared/trip-navigation-policy/invite-auth-return.js)
   before `window.location.href` or `window.location.replace`. That function
   rejects more than a missing leading slash. The known-wrong section needs
   review against this merge. This pull request does not change it.
