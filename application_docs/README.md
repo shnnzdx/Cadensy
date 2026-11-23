@@ -19,6 +19,7 @@ are not interchangeable.
 | Integration status and next work | [`../INTEGRATION-ROADMAP.md`](../INTEGRATION-ROADMAP.md) |
 | Product contract | [`PRODUCT.md`](PRODUCT.md) |
 | Activation funnel events and metrics | [`activation-funnel.md`](activation-funnel.md) |
+| Governed real-time collaboration decision record (design only) | [`decisions/2026-11-23-governed-realtime-collaboration-decision-log.md`](decisions/2026-11-23-governed-realtime-collaboration-decision-log.md) |
 | Project description | [`PROJECT_DESCRIPTION.md`](PROJECT_DESCRIPTION.md) |
 | Known navigation limitations | [`navigation-known-wrong-behavior.md`](navigation-known-wrong-behavior.md) |
 | General continuation prompt | [`HANDOFF_PROMPT_CURRENT.md`](HANDOFF_PROMPT_CURRENT.md) |
@@ -46,6 +47,7 @@ Index entry added: 2026-11-06. These files record a completed task. They are not
 | [`MERGE-PHASE1_2026-11-05.md`](MERGE-PHASE1_2026-11-05.md) | 2026-11-05 squash of PR #49, then PR #48, onto `main`. Merged to `main`. Not a production deployment. Not verified in production. |
 | [`design-04-phase1-task0-coverage-note.md`](design-04-phase1-task0-coverage-note.md) | 2026-11-06 read-only re-run of the DESIGN-04 Phase 1 Task 0 caller searches. No success-path header fix. Not runtime proof and not exhaustive. |
 | [`P0-ACTIVATION-FUNNEL-FINAL-RECORD_2026-11-22.md`](P0-ACTIVATION-FUNNEL-FINAL-RECORD_2026-11-22.md) | 2026-11-17 to 2026-11-22 P0 Activation Funnel task: owner decisions, PR #54/#55 QA, backend image release incident, and the 2026-11-22 production release as reported by Cadensy_DD. Raw migration log, PR #57 / `3c3ce0f6` team QA, and real-account smoke are NOT VERIFIED. |
+| [`decisions/2026-11-23-governed-realtime-collaboration-decision-log.md`](decisions/2026-11-23-governed-realtime-collaboration-decision-log.md) | 2026-11-23 owner/advisor design trade-offs for governed multi-person editing, SSE vs WebSocket/managed alternatives, Postgres LISTEN/NOTIFY, concurrency safeguards, costs, validation gates, deferred options. **Design record only; not implementation or live deployment evidence.** |
 
 ## Maintenance rules
 
