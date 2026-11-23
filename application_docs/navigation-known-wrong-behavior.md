@@ -2,7 +2,7 @@
 
 Status: active limitation record
 Originally recorded: 2026-08-11
-Last verified against source: 2026-11-07
+Last verified against source: 2026-11-23
 
 These notes describe current observable behavior that should not be silently frozen as
 desired product policy. Resolved characterization details remain only when they explain
@@ -31,6 +31,10 @@ the boundary around an active limitation.
 - The remaining known limitation is not the restored-selection policy itself; it is that
   pre-login transport still only carries a host-level `next` string rather than a
   structured workspace return intent.
+- A reachable `#/trip/<tripId>/...` route is stronger than the restored workspace.
+  Direct links and the post-join landing stay on that trip when the user is a member.
+  Inaccessible and organizer-only routes keep their existing fallback. The route id
+  and the trip id are the same `Trip.id`; there is no separate workspace id.
 
 ## Organizer-Only Workspace Routes
 
@@ -68,6 +72,10 @@ the boundary around an active limitation.
 - Frozen policy cases: `restored-selection-used-when-no-stronger-valid-intent-exists`,
   `stale-restored-selection-absent-from-trip-facts-falls-back-to-default`, and
   `restored-selection-with-unknown-state-is-accepted-when-trip-is-reachable`.
+- A later correction treats a validated current trip route as that stronger intent
+  (`reachable-current-trip-route-beats-different-restored-selection`). Restored
+  selection still wins only when the route is missing, inaccessible, or not a
+  stronger validated intent.
 
 ## Candidate 2 Closeout Note
 

@@ -21,6 +21,7 @@ import { clearInviteJoinResume, inviteJoinResumeMatches, markInviteJoinResume } 
 import { preferenceBudgetError } from './preferenceBudget.js'
 import { extendRoundFailureNotice } from './tripContextClientError.js'
 import { invitePageRenderModel, visibleInviteForRoute } from './invitePageDisplay.js'
+import { membershipAdoptionForRouteTrip, selectDisplayedTrip } from './route-trip-selection.js'
 
 const dayKey = date => date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : ''
 const sameDay = (a, b) => a && b && dayKey(a) === dayKey(b)
@@ -96,11 +97,16 @@ function useClickOutside(active, onClose) {
   return ref
 }
 
-// Return the user-created trip when route tripId matches; otherwise fall back to the Chicago demo trip.
+// The route trip is the workspace being viewed. A different cached trip is not a stand-in.
 function useCurrentTrip() {
   const { tripId } = useParams()
   const app = useTripApp()
-  return app.trips.find(item => item.id === tripId) || app.trip || trip || null
+  return selectDisplayedTrip({
+    routeTripId: tripId,
+    trips: app.trips,
+    activeTrip: app.trip || null,
+    tripSummaries: app.tripSummaries,
+  })
 }
 
 const todayAtMidnight = () => {
@@ -359,6 +365,34 @@ function WorkspaceRouteGuard() {
     }
   }, [app.hasAccountSession, app.currentUser, app.loading.initial, app.tripSummariesStatus, location.pathname])
 
+  const allowedTripId = resolution?.disposition === 'allow' && resolution.destination?.kind === 'trip'
+    ? resolution.destination.tripId
+    : null
+  const routeTripAdoption = useMemo(() => membershipAdoptionForRouteTrip({
+    routeTripId: allowedTripId,
+    activeTripId: app.activeTripId,
+    membershipId: app.membershipId,
+    currentUser: app.currentUser,
+    tripSummaries: app.tripSummaries,
+  }), [allowedTripId, app.activeTripId, app.currentUser, app.membershipId, app.tripSummaries])
+  const adoptTechnicalTripContext = app.adoptTechnicalTripContext
+  useEffect(() => {
+    if (!routeTripAdoption) return
+    adoptTechnicalTripContext({
+      membershipId: routeTripAdoption.membershipId,
+      tripId: routeTripAdoption.tripId,
+      profile: {
+        id: app.currentUser?.id,
+        name: app.currentUser?.name,
+        initials: app.currentUser?.initials,
+        email: app.currentUser?.email,
+        role: routeTripAdoption.role,
+        tripId: routeTripAdoption.tripId,
+        isGuest: false,
+      },
+    })
+  }, [adoptTechnicalTripContext, app.currentUser, routeTripAdoption])
+
   if (app.loading.initial || (app.hasAccountSession && !app.currentUser)) {
     return null
   }
@@ -373,6 +407,16 @@ function WorkspaceRouteGuard() {
 
   if (resolution?.disposition === 'redirect') {
     return <Navigate to={resolution.destinationHref} replace/>
+  }
+
+  // Don't paint the cached workspace under a different trip URL.
+  if (
+    allowedTripId &&
+    app.trip?.id !== allowedTripId &&
+    !app.error &&
+    (routeTripAdoption || app.activeTripId === allowedTripId)
+  ) {
+    return null
   }
 
   return <Outlet/>
@@ -508,7 +552,7 @@ function LoadedTripShell({ children, app, currentUser, currentTrip, location }) 
           : <Link className="brandBack brandBack--return" to={navigation.contextHref}><BrandAssets /><span className="backArrow">←</span><span>My Trips</span></Link>}
       </div>
       <div className="tripUnifiedCenter">
-        <div className="tripUnifiedTitleRow tripUnifiedTitleRow--tabsOnly"><nav className="tripUnifiedTabs" aria-label={`${currentTrip.name || 'Trip'} sections`}>
+        <div className="tripUnifiedTitleRow"><h1>{currentTrip.name || 'Untitled trip'}</h1><nav className="tripUnifiedTabs" aria-label={`${currentTrip.name || 'Trip'} sections`}>
           {navigation.entries.map(entry => <Link key={entry.id} className={entry.active ? 'active' : ''} to={entry.href}>
             {tripNavigationLabels[entry.id] || entry.id}
             {entry.id === 'updates' && pending > 0 && <i>{pending}</i>}
@@ -1108,7 +1152,7 @@ function PreferencesPage() {
 
   return <TripShell>
     <div className={cx('preferenceWrap', 'editorialForm')}>
-      <div className="pageHeading"><div><span className="eyebrow">My preferences</span><h1>Share only what matters.</h1>{joinNotice && <p>{joinNotice}</p>}</div></div>
+      <div className="pageHeading"><div><span className="eyebrow">{currentTrip.name || 'My preferences'}</span><h1>Share only what matters.</h1>{joinNotice && <p>{joinNotice}</p>}</div></div>
       <section className="preferenceCard preferenceFlow">
         <div className="wide tripDatesCard"><span>Trip Dates</span><strong>{formatDateRange(tripRange)}</strong><small>Set by trip organizer</small></div>
         <fieldset className="wide availabilityChoice"><legend>Are you available for the full trip?</legend>

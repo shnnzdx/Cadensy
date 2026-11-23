@@ -58,7 +58,7 @@ test("phase 9 restoration keeps a valid restored trip eligible when the current 
 
   assert.equal(resolution.disposition, "allow");
   assert.equal(resolution.destinationHref, "/trip/t1/plan");
-  assert.equal(resolution.diagnostics?.acceptedCode, "restored-selection-accepted");
+  assert.equal(resolution.diagnostics?.acceptedCode, "current-route-allowed");
 });
 
 test("phase 9 restoration rejects stale restored selections through policy when authoritative trip facts disagree", () => {
@@ -83,6 +83,80 @@ test("phase 9 restoration rejects stale restored selections through policy when 
   assert.equal(resolution.diagnostics?.rejectedIntents?.[0]?.code, "stale-restored-selection");
 });
 
+test("a member trip URL stays on that trip when a different workspace is restored", () => {
+  const resolution = resolveRestoration({
+    currentRoutePath: "/trip/t-smoke/plan",
+    currentUser: accountUser({ tripId: "t-mia", role: "organizer" }),
+    membershipId: "m-mia",
+    tripSummaries: [
+      { id: "t-mia", status: "Planning", my_role: "organizer", name: "mia" },
+      { id: "t-smoke", status: "Planning", my_role: "organizer", name: "SMOKE-P0-2026-11-23" },
+    ],
+    activeTrip: {
+      id: "t-mia",
+      name: "mia",
+      status: "Planning",
+    },
+    activeTripId: "t-mia",
+    restoredTripId: "t-mia",
+    explain: true,
+  });
+
+  assert.equal(resolution.disposition, "allow");
+  assert.equal(resolution.destinationHref, "/trip/t-smoke/plan");
+  assert.equal(resolution.destination.tripId, "t-smoke");
+  assert.equal(resolution.diagnostics?.acceptedCode, "current-route-allowed");
+  assert.notEqual(resolution.destination.tripId, "t-mia");
+});
+
+test("post-join preferences URL stays on the joined trip when an older workspace is restored", () => {
+  const resolution = resolveRestoration({
+    currentRoutePath: "/trip/t-joined/preferences",
+    currentUser: accountUser({ tripId: "t-joined", role: "participant" }),
+    membershipId: "m-joined",
+    tripSummaries: [
+      { id: "t-mia", status: "Planning", my_role: "organizer", name: "mia" },
+      { id: "t-joined", status: "Planning", my_role: "participant", name: "SMOKE-P0-2026-11-23" },
+    ],
+    activeTrip: {
+      id: "t-joined",
+      name: "SMOKE-P0-2026-11-23",
+      status: "Planning",
+    },
+    activeTripId: "t-joined",
+    restoredTripId: "t-mia",
+    explain: true,
+  });
+
+  assert.equal(resolution.disposition, "allow");
+  assert.equal(resolution.destinationHref, "/trip/t-joined/preferences");
+  assert.equal(resolution.destination.tripId, "t-joined");
+  assert.equal(resolution.diagnostics?.acceptedCode, "current-route-allowed");
+});
+
+test("a trip URL the user cannot access still falls back to the restored workspace", () => {
+  const resolution = resolveRestoration({
+    currentRoutePath: "/trip/t-foreign/plan",
+    currentUser: accountUser({ tripId: "t-mia", role: "organizer" }),
+    membershipId: "m-mia",
+    tripSummaries: [
+      { id: "t-mia", status: "Planning", my_role: "organizer", name: "mia" },
+    ],
+    activeTrip: {
+      id: "t-mia",
+      name: "mia",
+      status: "Planning",
+    },
+    activeTripId: "t-mia",
+    restoredTripId: "t-mia",
+    explain: true,
+  });
+
+  assert.equal(resolution.disposition, "redirect");
+  assert.equal(resolution.destinationHref, "/trip/t-mia/plan");
+  assert.equal(resolution.diagnostics?.acceptedCode, "restored-selection-accepted");
+});
+
 test("phase 9 restoration preserves unknown trip state when the current route is already the restored trip", () => {
   const resolution = resolveRestoration({
     currentRoutePath: "/trip/t1/plan",
@@ -97,7 +171,7 @@ test("phase 9 restoration preserves unknown trip state when the current route is
 
   assert.equal(resolution.disposition, "allow");
   assert.equal(resolution.destinationHref, "/trip/t1/plan");
-  assert.equal(resolution.diagnostics?.acceptedCode, "restored-selection-accepted");
+  assert.equal(resolution.diagnostics?.acceptedCode, "current-route-allowed");
 });
 
 test("phase 9 runtime resolves restoration inside the workspace guard while leaving join outside that bootstrap flow", async () => {
