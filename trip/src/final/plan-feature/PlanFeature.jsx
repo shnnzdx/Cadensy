@@ -8,6 +8,7 @@ import { serializeWorkspaceRoute } from '../../../../shared/trip-navigation-rout
 import { useAssistantChangeRequestFlow } from './useAssistantChangeRequestFlow.js'
 import { usePlanInteractionRuntime } from './usePlanInteractionRuntime.js'
 import { addStopWarningText, extendRoundFailureNotice, generateItineraryErrorText } from '../tripContextClientError.js'
+import { selectDisplayedTrip } from '../route-trip-selection.js'
 
 const visibleStatus = status => ['Booked', 'Updated'].includes(status) ? status : ''
 const statusTone = status => status === 'Booked' ? 'purple' : status === 'Updated' ? 'green' : 'blue'
@@ -304,7 +305,12 @@ function Button({ children, secondary, ghost, className, ...props }) {
 function usePlanCurrentTrip() {
   const { tripId } = useParams()
   const app = useTripApp()
-  return app.trips.find(item => item.id === tripId) || app.trip || trip || null
+  return selectDisplayedTrip({
+    routeTripId: tripId,
+    trips: app.trips,
+    activeTrip: app.trip || null,
+    tripSummaries: app.tripSummaries,
+  })
 }
 
 const tripCityLabel = currentTrip => (currentTrip?.destination || 'Destination not set').split(',')[0].trim() || currentTrip?.destination || 'Destination not set'
@@ -452,7 +458,8 @@ function NewTripPlan({ currentTrip }) {
     <div className="pageHeading setupPageHeading compactSetupHeading">
       <div>
         <span className="eyebrow">Current Plan</span>
-        <h1>No itinerary yet</h1>
+        <h1>{currentTrip.name || 'Untitled trip'}</h1>
+        <p>No itinerary yet</p>
       </div>
     </div>
     <section className="setupCompactPanel">

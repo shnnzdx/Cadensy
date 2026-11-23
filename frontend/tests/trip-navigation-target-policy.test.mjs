@@ -219,6 +219,56 @@ const resolveDestinationCases = [
     explain: ["return-target-rejected", "role-not-authorized", "restored-selection-accepted"],
   },
   {
+    id: "reachable-current-trip-route-beats-different-restored-selection",
+    category: "precedence",
+    input: {
+      accessState: "trip-session",
+      relevantTripsById: {
+        "t-mia": { membership: { role: "organizer", identityKind: "account" }, state: "planning" },
+        "t-smoke": { membership: { role: "organizer", identityKind: "account" }, state: "planning" },
+      },
+      intent: {
+        currentRoute: trip("t-smoke", "plan"),
+        restoredSelection: { tripId: "t-mia", preferredSection: "plan" },
+      },
+    },
+    expected: { disposition: "allow", destination: trip("t-smoke", "plan") },
+    explain: ["current-route-allowed"],
+  },
+  {
+    id: "inaccessible-current-trip-route-still-falls-back-to-restored-selection",
+    category: "precedence",
+    input: {
+      accessState: "trip-session",
+      relevantTripsById: {
+        "t-mia": { membership: { role: "organizer", identityKind: "account" }, state: "planning" },
+      },
+      intent: {
+        currentRoute: trip("t-foreign", "plan"),
+        restoredSelection: { tripId: "t-mia", preferredSection: "plan" },
+      },
+    },
+    expected: { disposition: "redirect", destination: trip("t-mia", "plan") },
+    explain: ["restored-selection-accepted"],
+  },
+  {
+    id: "organizer-only-current-route-for-participant-keeps-restored-fallback",
+    category: "precedence",
+    input: {
+      accessState: "trip-session",
+      relevantTripsById: {
+        "t-mia": { membership: { role: "participant", identityKind: "account" }, state: "planning" },
+        "t-smoke": { membership: { role: "participant", identityKind: "account" }, state: "planning" },
+      },
+      intent: {
+        currentRoute: trip("t-smoke", "members"),
+        restoredSelection: { tripId: "t-mia", preferredSection: "plan" },
+      },
+    },
+    expected: { disposition: "redirect", destination: trip("t-mia", "plan") },
+    explain: ["restored-selection-accepted"],
+  },
+  {
     id: "restored-selection-used-when-no-stronger-valid-intent-exists",
     category: "restored-selection",
     input: {
@@ -557,10 +607,10 @@ const invalidInputCases = [
 const unresolvedPolicyCells = [];
 
 test("phase 2 target-policy matrix defines the expected case inventory", () => {
-  assert.equal(resolveDestinationCases.length, 25);
+  assert.equal(resolveDestinationCases.length, 28);
   assert.equal(describeNavigationCases.length, 5);
   assert.equal(invalidInputCases.length, 5);
-  assert.equal(resolveDestinationCases.length + describeNavigationCases.length + invalidInputCases.length, 35);
+  assert.equal(resolveDestinationCases.length + describeNavigationCases.length + invalidInputCases.length, 38);
   assert.deepEqual(Object.keys(tripNavigationPolicy).sort(), [
     "describeNavigation",
     "resolveDestination",
@@ -580,6 +630,9 @@ test("phase 2 target-policy matrix freezes explicit precedence and cross-trip co
 
   for (const id of [
     "invalid-invite-loses-to-valid-restored-selection",
+    "reachable-current-trip-route-beats-different-restored-selection",
+    "inaccessible-current-trip-route-still-falls-back-to-restored-selection",
+    "organizer-only-current-route-for-participant-keeps-restored-fallback",
     "valid-return-target-beats-restored-selection",
     "organizer-only-return-target-rejected-for-participant-falls-back-to-restored-trip",
     "valid-invite-open-beats-valid-return-target-and-restored-selection",

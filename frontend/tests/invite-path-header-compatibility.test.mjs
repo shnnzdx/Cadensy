@@ -5,8 +5,6 @@ import test from "node:test";
 import { createSessionRuntime } from "../../shared/session-runtime/index.js";
 import { createInviteAttemptGate } from "../../trip/src/final/inviteCreation.js";
 
-const CURRENT_TRIP_SELECTOR = "return app.trips.find(item => item.id === tripId) || app.trip || trip || null";
-
 function createMemoryStorage() {
   const store = new Map();
   return {
@@ -78,8 +76,8 @@ test("FE-INVITE-1 production pins: route trip id is the invite target and X-Trip
     readFile(new URL("../../trip/src/final/inviteCreation.js", import.meta.url), "utf8"),
   ]);
 
-  assert.match(finalApp, /function useCurrentTrip\(\) \{[\s\S]*?return app\.trips\.find\(item => item\.id === tripId\) \|\| app\.trip \|\| trip \|\| null/);
-  assert.equal(CURRENT_TRIP_SELECTOR.includes("activeTripId"), false);
+  assert.match(finalApp, /function useCurrentTrip\(\) \{[\s\S]*?return selectDisplayedTrip\(\{/);
+  assert.doesNotMatch(finalApp, /return app\.trips\.find\(item => item\.id === tripId\) \|\| app\.trip \|\| trip \|\| null/);
   assert.match(finalApp, /function InvitePage\(\) \{[\s\S]*?const \{ tripId: routeTripId \} = useParams\(\)/);
   assert.match(finalApp, /app\.createInvite\(routeTripId\)/);
   assert.equal([...finalApp.matchAll(/app\.createInvite\(/g)].length, 1);

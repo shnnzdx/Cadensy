@@ -211,6 +211,10 @@ function resolveDestination(input, options = {}) {
 function shouldPreferCurrentRouteBeforeRestoration(input) {
   const route = input.intent.currentRoute;
   if (!route) return false;
+  // A reachable trip URL is the active trip. This runs only after that route
+  // has already been validated, so a missing membership or an organizer-only
+  // section still falls through to the existing redirect.
+  if (route.kind === "trip") return true;
   if (route.kind !== "home" && route.kind !== "create-trip" && route.kind !== "account") {
     return false;
   }
