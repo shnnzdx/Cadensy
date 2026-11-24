@@ -20,7 +20,7 @@ RELEASE_INPUT_HELPER_PATH = (
 )
 BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "artifact-backend-images.yml"
 RELEASE_WORKFLOW = REPOSITORY_ROOT / "AWS" / "archive" / "workflows" / "retired-release" / "release-runtime-off-backend.yml"
-MIGRATION_WORKFLOW = REPOSITORY_ROOT / "AWS" / "archive" / "workflows" / "retired-release" / "release-pr06b-schema-migration.yml"
+MIGRATION_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "cd01-pr06b-schema-migration.yml"
 
 spec = importlib.util.spec_from_file_location("cd01_prepare_task_definition", HELPER_PATH)
 assert spec and spec.loader
