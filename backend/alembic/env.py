@@ -21,6 +21,22 @@ if config.config_file_name is not None:
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 target_metadata = Base.metadata
 
+# cadensy_invite_cleanup_marker is Alembic-owned and intentionally not an ORM
+# model. create_all does not create it. Excluding it here keeps autogenerate
+# from proposing a drop after Rev 1. Cleanup tests must use an Alembic-built
+# database; they cannot see this table on a create_all schema.
+_ALEMBIC_ONLY_TABLES = frozenset({"cadensy_invite_cleanup_marker"})
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    del compare_to
+    if type_ == "table" and name in _ALEMBIC_ONLY_TABLES:
+        return False
+    table = getattr(obj, "table", None)
+    if table is not None and getattr(table, "name", None) in _ALEMBIC_ONLY_TABLES:
+        return False
+    return True
+
 
 def run_migrations_offline() -> None:
     """Run migrations without a live database connection."""
@@ -31,6 +47,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -51,6 +68,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             compare_type=True,
             compare_server_default=True,
+            include_object=include_object,
             # PR-06B.1A's concurrent-index checkpoint must not commit an
             # earlier revision without also recording that earlier revision.
             transaction_per_migration=True,

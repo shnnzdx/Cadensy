@@ -161,7 +161,7 @@ def test_pr06b1b_postgresql_migration_and_private_ownership_contract() -> None:
         inspector = inspect(engine)
         assert CONVERSATION_TABLES <= set(inspector.get_table_names())
         current = _run_alembic(url, "current").strip()
-        assert current.startswith("c8e1d4a90b27")
+        assert current.startswith("c0b2f9e5a6d3")
         assert CONVERSATION_REVISION in _run_alembic(url, "history")
         assert CONVERSATION_TABLES <= set(Base.metadata.tables)
         for table_name in CONVERSATION_TABLES:

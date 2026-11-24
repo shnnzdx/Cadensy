@@ -63,6 +63,7 @@ from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
 from ..domain.analytics.activation import InviteOpenContext
 from ..domain.trips import service as trip_service
+from ..observability.invite_access_log import install_invite_access_log_redaction
 from ..domain.trips import cover_service as trip_cover_service
 from ..observability.telemetry import (
     ChatRequestCompleted,
@@ -182,6 +183,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TripSync API", version="0.1.0", lifespan=lifespan)
+install_invite_access_log_redaction()
 
 app.add_middleware(
     CORSMiddleware,
@@ -732,6 +734,14 @@ class CommentRequest(BaseModel):
 
 class InviteJoinRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
+    email: str | None = Field(default=None, max_length=255)
+
+
+class PublicInviteTokenRequest(BaseModel):
+    """Body token for preview and join. The path form stays for older clients."""
+
+    token: str | None = Field(default=None, max_length=512)
+    display_name: str | None = Field(default=None, max_length=120)
     email: str | None = Field(default=None, max_length=255)
 
 
@@ -1603,12 +1613,30 @@ def _invite_open_context(db: Session, authorization: str | None) -> InviteOpenCo
     )
 
 
-@app.get("/api/invites/{token}")
-def get_invite(
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
+def _presented_invite_token(
+    body: PublicInviteTokenRequest | None,
+    header_token: str | None,
+) -> str:
+    candidate = (body.token or "").strip() if body is not None else ""
+    if not candidate:
+        candidate = (header_token or "").strip()
+    if not candidate:
+        raise HTTPException(422, "token is required")
+    return candidate
+
+
+def _preview_invite(
     token: str,
-    db: Session = Depends(get_session),
-    authorization: str | None = Header(default=None),
+    db: Session,
+    authorization: str | None,
+    response: Response,
 ) -> dict:
+    _no_store(response)
     try:
         preview = trip_service.invite_preview(
             db, token, opener=_invite_open_context(db, authorization)
@@ -1619,12 +1647,37 @@ def get_invite(
     return preview
 
 
+@app.post("/api/invites/preview")
+def preview_invite_body(
+    body: PublicInviteTokenRequest,
+    response: Response,
+    db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+    x_invite_token: str | None = Header(default=None, alias="X-Invite-Token"),
+) -> dict:
+    return _preview_invite(
+        _presented_invite_token(body, x_invite_token), db, authorization, response
+    )
+
+
+@app.get("/api/invites/{token}")
+def get_invite(
+    token: str,
+    response: Response,
+    db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    return _preview_invite(token, db, authorization, response)
+
+
 def _raise_public_invite(exc: trip_service.InviteNotFound) -> None:
     code = getattr(exc, "code", "invite_invalid")
     if code == "invite_revoked":
         raise HTTPException(410, "invite_revoked") from exc
     if code == "invite_expired":
         raise HTTPException(410, "invite_expired") from exc
+    if code == "invite_closed":
+        raise HTTPException(410, "invite_closed") from exc
     if code == "invite_invalid":
         raise HTTPException(404, "invite_invalid") from exc
     raise HTTPException(404, "Invite not found") from exc
@@ -2035,47 +2088,107 @@ def create_trip(
     }
 
 
+def _organizer_invite_payload(snapshot: trip_service.InviteSnapshot) -> dict:
+    body = snapshot.as_dict()
+    token = body.get("token")
+    if token:
+        frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
+        body["url"] = f"{frontend_base}/#/join/{token}"
+    return body
+
+
+def _raise_organizer_invite(exc: Exception) -> None:
+    if isinstance(exc, trip_service.InviteHmacUnavailable):
+        raise HTTPException(503, "invite_hmac_unavailable") from exc
+    if isinstance(exc, trip_service.InviteClosed):
+        raise HTTPException(409, "invite_closed") from exc
+    if isinstance(exc, trip_service.InviteWindowClosed):
+        raise HTTPException(409, "invite_window_expired") from exc
+    if isinstance(exc, trip_service.InviteNotReplaceable):
+        raise HTTPException(409, "invite_not_replaceable") from exc
+    if isinstance(exc, trip_service.InviteIdempotencyInvalid):
+        raise HTTPException(422, "idempotency_key_invalid") from exc
+    if isinstance(exc, trip_service.InviteConflict):
+        raise HTTPException(409, "invite_conflict") from exc
+    if isinstance(exc, trip_service.OrganizerRequired):
+        raise HTTPException(403, "Only the organizer can manage this trip invite") from exc
+    if isinstance(exc, trip_service.InviteNotFound):
+        detail = "Trip not found" if str(exc) == "Trip not found" else "Invite not found"
+        raise HTTPException(404, detail) from exc
+    raise exc
+
+
 @app.post("/api/trips/{trip_id}/invite")
 def create_invite(
     trip_id: str,
+    response: Response,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
 ) -> dict:
+    """Ensure an invite. Mints only when the trip has never created an HMAC invite."""
+
     _require_scoped_trip(db, me, trip_id)
+    _no_store(response)
     try:
-        created = trip_service.create_invite(db, trip_id, me)
-    except trip_service.OrganizerRequired as exc:
-        raise HTTPException(403, str(exc)) from exc
-    except trip_service.InviteNotFound as exc:
-        raise HTTPException(404, "Trip not found") from exc
+        snapshot = trip_service.ensure_invite(db, trip_id, me)
+    except (
+        trip_service.OrganizerRequired,
+        trip_service.InviteNotFound,
+        trip_service.InviteHmacUnavailable,
+        trip_service.InviteConflict,
+    ) as exc:
+        _raise_organizer_invite(exc)
     db.commit()
-    frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
-    return {
-        "id": created.invite.id,
-        "invite_id": created.invite.id,
-        "token": created.token,
-        "url": f"{frontend_base}/#/join/{created.token}",
-        "expires_at": (
-            created.invite.expires_at.isoformat() if created.invite.expires_at else None
-        ),
-    }
+    return _organizer_invite_payload(snapshot)
+
+
+@app.post("/api/trips/{trip_id}/invite/replace")
+def replace_invite(
+    trip_id: str,
+    response: Response,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    _no_store(response)
+    try:
+        snapshot = trip_service.replace_invite(db, trip_id, me, idempotency_key)
+    except (
+        trip_service.OrganizerRequired,
+        trip_service.InviteNotFound,
+        trip_service.InviteHmacUnavailable,
+        trip_service.InviteClosed,
+        trip_service.InviteWindowClosed,
+        trip_service.InviteNotReplaceable,
+        trip_service.InviteIdempotencyInvalid,
+        trip_service.InviteConflict,
+    ) as exc:
+        _raise_organizer_invite(exc)
+    db.commit()
+    return _organizer_invite_payload(snapshot)
 
 
 @app.get("/api/trips/{trip_id}/invite")
 def get_active_invite(
     trip_id: str,
+    response: Response,
     db: Session = Depends(get_session),
     me: TripMembership = Depends(current_membership),
 ) -> dict:
-    """Reusable invite metadata. The raw token is never returned again."""
+    """Retrieve the current invite. Never mints. Token only for active_hmac."""
 
     _require_scoped_trip(db, me, trip_id)
+    _no_store(response)
     try:
-        return trip_service.active_invite_metadata(db, trip_id, me)
-    except trip_service.OrganizerRequired as exc:
-        raise HTTPException(403, "Only the organizer can view this trip invite") from exc
-    except trip_service.InviteNotFound as exc:
-        raise HTTPException(404, "Invite not found") from exc
+        snapshot = trip_service.retrieve_invite(db, trip_id, me)
+    except (
+        trip_service.OrganizerRequired,
+        trip_service.InviteNotFound,
+        trip_service.InviteHmacUnavailable,
+    ) as exc:
+        _raise_organizer_invite(exc)
+    return _organizer_invite_payload(snapshot)
 
 
 @app.post("/api/trips/{trip_id}/activation-events")
@@ -2108,35 +2221,7 @@ def record_activation_share(
     return {"recorded": True}
 
 
-@app.post("/api/invites/{token}/join")
-def join_invite(
-    token: str,
-    body: InviteJoinRequest,
-    db: Session = Depends(get_session),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    if not body.display_name.strip():
-        raise HTTPException(422, "Display name is required")
-    if body.email is not None:
-        raise HTTPException(
-            409,
-            "account_join_requires_authenticated_session",
-        )
-    presented = _bearer_token(authorization)
-    guest_token = presented if auth_service.is_guest_token(presented) else None
-    try:
-        joined = protected_membership_join.join_guest_invite_under_trip_root(
-            session_factory=SessionLocal,
-            token=token,
-            display_name=body.display_name,
-            guest_token=guest_token,
-        )
-    except trip_service.InviteNotFound as exc:
-        _raise_public_invite(exc)
-    except protected_membership_join.GuestRejoinDenied as exc:
-        raise HTTPException(403, "invite_join_forbidden") from exc
-    except MembershipChangePendingDecision as exc:
-        raise HTTPException(409, "membership_change_pending_decision") from exc
+def _join_guest_response(joined) -> dict:
     response = {
         "membership_id": joined.membership.id,
         "trip_id": joined.trip_id,
@@ -2149,16 +2234,30 @@ def join_invite(
     return response
 
 
-@app.post("/api/invites/{token}/account-join")
-def account_join_invite(
-    token: str,
-    body: AccountInviteJoinRequest,
-    user: User = Depends(current_account_user),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """Join by a verified Account Session; request body supplies no identity."""
+def _join_guest(token: str, display_name: str, email: str | None, authorization: str | None) -> dict:
+    if not display_name.strip():
+        raise HTTPException(422, "Display name is required")
+    if email is not None:
+        raise HTTPException(409, "account_join_requires_authenticated_session")
+    presented = _bearer_token(authorization)
+    guest_token = presented if auth_service.is_guest_token(presented) else None
+    try:
+        joined = protected_membership_join.join_guest_invite_under_trip_root(
+            session_factory=SessionLocal,
+            token=token,
+            display_name=display_name,
+            guest_token=guest_token,
+        )
+    except trip_service.InviteNotFound as exc:
+        _raise_public_invite(exc)
+    except protected_membership_join.GuestRejoinDenied as exc:
+        raise HTTPException(403, "invite_join_forbidden") from exc
+    except MembershipChangePendingDecision as exc:
+        raise HTTPException(409, "membership_change_pending_decision") from exc
+    return _join_guest_response(joined)
 
-    del body
+
+def _join_account(token: str, user: User, authorization: str | None) -> dict:
     bearer = _bearer_token(authorization)
     if bearer is None:
         raise HTTPException(401, "Login required")
@@ -2187,6 +2286,55 @@ def account_join_invite(
         "role": joined.membership.role,
         "already_member": joined.already_member,
     }
+
+
+@app.post("/api/invites/join")
+def join_invite_body(
+    body: PublicInviteTokenRequest,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    x_invite_token: str | None = Header(default=None, alias="X-Invite-Token"),
+) -> dict:
+    _no_store(response)
+    token = _presented_invite_token(body, x_invite_token)
+    return _join_guest(token, body.display_name or "", body.email, authorization)
+
+
+@app.post("/api/invites/account-join")
+def account_join_invite_body(
+    body: PublicInviteTokenRequest,
+    response: Response,
+    user: User = Depends(current_account_user),
+    authorization: str | None = Header(default=None),
+    x_invite_token: str | None = Header(default=None, alias="X-Invite-Token"),
+) -> dict:
+    _no_store(response)
+    token = _presented_invite_token(body, x_invite_token)
+    return _join_account(token, user, authorization)
+
+
+@app.post("/api/invites/{token}/join")
+def join_invite(
+    token: str,
+    body: InviteJoinRequest,
+    db: Session = Depends(get_session),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    del db
+    return _join_guest(token, body.display_name, body.email, authorization)
+
+
+@app.post("/api/invites/{token}/account-join")
+def account_join_invite(
+    token: str,
+    body: AccountInviteJoinRequest,
+    user: User = Depends(current_account_user),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Join by a verified Account Session; request body supplies no identity."""
+
+    del body
+    return _join_account(token, user, authorization)
 
 
 @app.post("/api/invites/{invite_id}/revoke")

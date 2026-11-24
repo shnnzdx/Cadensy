@@ -201,7 +201,15 @@ def _cleanup_lifecycle_seed_data(test_engine):
 
 def _invite(engine, trip_id: str, token: str) -> None:
     with _factory(engine).begin() as db:
-        db.add(InviteLink(trip_id=trip_id, token_hash=auth.token_hash(token), is_primary=True))
+        db.add(
+            InviteLink(
+                trip_id=trip_id,
+                token_hash=auth.token_hash(token),
+                is_primary=True,
+                token_scheme="hmac_v1",
+                key_id=1,
+            )
+        )
 
 
 def _scope(seed):

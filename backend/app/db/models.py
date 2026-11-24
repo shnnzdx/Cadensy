@@ -142,6 +142,11 @@ class Trip(Base, TimestampMixin):
     planning_facts_revision: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0")
     )
+    # Set once by the first successful HMAC invite. Never backfilled.
+    first_invite_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invite_window_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Terminal early close. Later itinerary edits do not clear it.
+    final_plan_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     memberships: Mapped[list["TripMembership"]] = relationship(back_populates="trip")
 
@@ -211,6 +216,31 @@ class InviteLink(Base, TimestampMixin):
     __tablename__ = "invite_link"
     __table_args__ = (
         UniqueConstraint("id", "trip_id", name="uq_invite_link_id_trip"),
+        CheckConstraint(
+            "token_scheme IS NULL OR token_scheme IN ('hmac_v1', 'legacy_random')",
+            name="ck_invite_link_token_scheme",
+        ),
+        CheckConstraint(
+            "key_id IS NULL OR (key_id >= 1 AND key_id <= 4294967295)",
+            name="ck_invite_link_key_id_range",
+        ),
+        CheckConstraint(
+            "token_scheme IS DISTINCT FROM 'hmac_v1' OR key_id IS NOT NULL",
+            name="ck_invite_link_hmac_key_id",
+        ),
+        Index(
+            "ux_invite_link_one_unrevoked_per_trip",
+            "trip_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        Index(
+            "ux_invite_link_replace_idempotency",
+            "trip_id",
+            "creation_idempotency_key",
+            unique=True,
+            postgresql_where=text("creation_idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -219,6 +249,44 @@ class InviteLink(Base, TimestampMixin):
     is_primary: Mapped[bool] = mapped_column(Boolean, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # hmac_v1 rows are the only joinable invites. NULL is a pre-cutover row.
+    token_scheme: Mapped[str | None] = mapped_column(String(20))
+    key_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Binds one explicit replace to its Idempotency-Key. Not a secret.
+    creation_idempotency_key: Mapped[str | None] = mapped_column(String(128))
+
+
+class FinalPlanApproval(Base):
+    """One live final-plan approval per membership incarnation.
+
+    Staleness is derived: the row counts only when
+    ``bound_itinerary_revision`` equals ``plan.itinerary_revision``.
+    """
+
+    __tablename__ = "final_plan_approval"
+    __table_args__ = (
+        UniqueConstraint(
+            "trip_id", "membership_id", name="uq_final_plan_approval_trip_membership"
+        ),
+        ForeignKeyConstraint(
+            ["trip_id"],
+            ["trip.id"],
+            name="fk_final_plan_approval_trip",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["membership_id", "trip_id"],
+            ["trip_membership.id", "trip_membership.trip_id"],
+            name="fk_final_plan_approval_membership_same_trip",
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    trip_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    membership_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bound_itinerary_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class ActivationEvent(Base):
@@ -370,6 +438,10 @@ class Plan(Base, TimestampMixin):
     __tablename__ = "plan"
     __table_args__ = (
         CheckConstraint("revision >= 0", name="ck_plan_revision_nonnegative"),
+        CheckConstraint(
+            "itinerary_revision >= 0",
+            name="ck_plan_itinerary_revision_nonnegative",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -377,6 +449,11 @@ class Plan(Base, TimestampMixin):
     # This is deliberately dormant in B.1. Later write paths own the rule for
     # when it advances; the schema only guarantees a non-negative starting value.
     revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    # Approval epoch. Bumped only by the plan_item content trigger, never by
+    # application code assigning this column.
+    itinerary_revision: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0")
     )
     status: Mapped[str] = mapped_column(String(20), default="active")  # active | blocked
@@ -967,3 +1044,8 @@ class UpdateNotice(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text)
     can_object: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+from .itinerary_revision_trigger import register_itinerary_revision_ddl
+
+register_itinerary_revision_ddl(PlanItem.__table__, PlanChange.__table__)

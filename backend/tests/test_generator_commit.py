@@ -767,7 +767,7 @@ def test_real_protected_invite_join_during_detached_generator_work_stales_existi
         plan = Plan(trip_id=data.trip_id, currency="USD", revision=0)
         session.add(plan)
         invite_token = f"generator-{join_kind}-invite-{uuid4().hex}"
-        session.add(InviteLink(trip_id=data.trip_id, token_hash=auth_service.token_hash(invite_token), is_primary=True))
+        session.add(InviteLink(trip_id=data.trip_id, token_hash=auth_service.token_hash(invite_token), is_primary=True, token_scheme="hmac_v1", key_id=1))
         if join_kind == "account":
             joiner = User(
                 name="Generator account joiner",
@@ -1006,7 +1006,7 @@ def test_generator_commit_then_real_invite_join_advances_existing_plan_revision(
         plan = Plan(trip_id=data.trip_id, currency="USD", revision=0)
         session.add(plan)
         invite_token = f"generator-after-join-{uuid4().hex}"
-        session.add(InviteLink(trip_id=data.trip_id, token_hash=auth_service.token_hash(invite_token), is_primary=True))
+        session.add(InviteLink(trip_id=data.trip_id, token_hash=auth_service.token_hash(invite_token), is_primary=True, token_scheme="hmac_v1", key_id=1))
     generated = execute_protected_plan_generation(
         session_factory=factory, coordinator=_coordinator(factory), scope=_scope(data),
         credential=CredentialProof.from_bearer_token(data.token),

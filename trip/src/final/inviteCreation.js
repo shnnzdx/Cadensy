@@ -105,5 +105,8 @@ export function createInviteAttemptGate() {
     loadVerifiedInvite(args) {
       return this._verifiedInvite({ ...args, perform: args.readInvite })
     },
+    replaceVerifiedInvite(args) {
+      return this._verifiedInvite({ ...args, perform: args.replaceInvite })
+    },
   }
 }

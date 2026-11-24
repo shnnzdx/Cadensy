@@ -1396,10 +1396,15 @@ function InvitePage() {
     app.loadActiveInvite(routeTripId)
       .then(metadata => {
         if (cancelled) return
-        const token = readInviteLink(routeTripId, metadata.invite_id)
+        const recovered = metadata.status === 'active_hmac'
+          ? (metadata.token || readInviteLink(routeTripId, metadata.invite_id) || '')
+          : ''
+        if (metadata.status === 'active_hmac' && metadata.token) {
+          rememberInviteLink(routeTripId, metadata.invite_id, metadata.token)
+        }
         setInviteState({
           routeTripId,
-          invite: token ? { ...metadata, token } : { ...metadata, token: '' },
+          invite: { ...metadata, token: recovered },
           error: '',
         })
       })
@@ -1431,6 +1436,25 @@ function InvitePage() {
       showStoredInvite(nextInvite)
     } catch (err) {
       setInviteState({ routeTripId, invite: null, error: err.message || 'Could not create an invite link' })
+    } finally {
+      setLoadingInvite(false)
+    }
+  }
+  const replaceLink = async () => {
+    const confirmed = window.confirm('This revokes the shared link and does not extend the 180-day deadline. Continue?')
+    if (!confirmed) return
+    setLoadingInvite(true)
+    setCopyState('')
+    setShareDraft('')
+    try {
+      const nextInvite = await app.replaceInvite(routeTripId)
+      showStoredInvite(nextInvite)
+    } catch (err) {
+      setInviteState(current => ({
+        ...current,
+        routeTripId,
+        error: err.message || 'Could not replace the invite link',
+      }))
     } finally {
       setLoadingInvite(false)
     }
@@ -1482,6 +1506,17 @@ function InvitePage() {
     </div>
   }
   const currentTrip = model.trip
+  const inviteStatus = shownInvite?.status || ''
+  const closedInvite = inviteStatus === 'early_expired' || inviteStatus === 'window_expired'
+  const canCreateInvite = shownInvite?.can_create === true && !closedInvite
+  const canReplaceInvite = shownInvite?.can_replace === true && !closedInvite
+  const inviteHint = closedInvite
+    ? (inviteStatus === 'early_expired'
+      ? 'Final plan approved by the group. This invite stays closed.'
+      : 'This 180-day invite window has ended.')
+    : (canReplaceInvite
+      ? '生成新链接 revokes the link already shared and does not extend the 180-day deadline. The current link can be retrieved on another device.'
+      : 'Create a link when you are ready to invite people. After that, the same link can be retrieved on another device.')
   const manager = <div className="inviteManager">
     <TripCoverHero className="shareHero" trip={currentTrip}>
       <span className="eyebrow">Invite link</span>
@@ -1489,15 +1524,16 @@ function InvitePage() {
     </TripCoverHero>
     <section className="linkPanel">
       <div><span className="roleChip">{app.inviteCopied ? 'Link copied' : 'Ready to share'}</span><h2>{model.name}</h2><p>{model.destination} · {model.dates}</p></div>
-      <label>Invite link<textarea ref={inviteFieldRef} className="inviteLinkField" readOnly rows={3} value={shownLoading ? 'Loading link...' : shownError || shareFieldValue || '生成新链接后，链接会保存在这台设备上。'}/></label>
-      {!inviteUrl && !shownLoading && <p>这台浏览器里没有可复制的链接。</p>}
-      <p>「生成新链接」会停用已经分享出去的链接。链接只缓存在这台浏览器里，换浏览器或清除站点数据后需要重新生成。</p>
+      <label>Invite link<textarea ref={inviteFieldRef} className="inviteLinkField" readOnly rows={3} value={shownLoading ? 'Loading link...' : shownError || shareFieldValue || (canCreateInvite ? '生成新链接后，链接会显示在这里。' : inviteHint)}/></label>
+      {!inviteUrl && !shownLoading && !closedInvite && <p>{canCreateInvite ? '还没有邀请链接。' : '当前没有可复制的链接。'}</p>}
+      <p>{inviteHint}</p>
       <div className="copyActions">
-        <Button disabled={!inviteUrl} onClick={copyLink}>{copyState === 'copied' ? '已复制' : 'Copy link'}</Button>
-        <Button secondary disabled={!inviteUrl} onClick={copyWeChat}>复制微信分享</Button>
-        <Button ghost disabled={shownLoading} onClick={generateLink}>生成新链接</Button>
+        <Button disabled={!inviteUrl || closedInvite} onClick={copyLink}>{copyState === 'copied' ? '已复制' : 'Copy link'}</Button>
+        <Button secondary disabled={!inviteUrl || closedInvite} onClick={copyWeChat}>复制微信分享</Button>
+        {canCreateInvite && <Button ghost disabled={shownLoading} onClick={generateLink}>生成新链接</Button>}
+        {canReplaceInvite && <Button ghost disabled={shownLoading} onClick={replaceLink}>生成新链接</Button>}
         <Button secondary onClick={() => navigate(model.startPlanningHref)}>Start planning</Button>
-        {shownInvite?.token && <Button ghost onClick={revokeLink}>Revoke link</Button>}
+        {shownInvite?.token && !closedInvite && <Button ghost onClick={revokeLink}>Revoke link</Button>}
       </div>
       {copyState === 'copied' && <div className="copiedState"><strong>已复制</strong></div>}
       {copyState === 'failed' && <div className="copiedState copyFailure"><strong>复制失败，请手动选择链接</strong></div>}

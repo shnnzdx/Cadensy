@@ -31,6 +31,9 @@ export function validateInviteJoinResult(result, kind) {
 
 export function describeInviteJoinError(error) {
   const detail = error?.message || "";
+  if (detail === "invite_closed") {
+    return { kind: "expired", message: "This invite is closed because the final plan was approved." };
+  }
   if (detail === "invite_expired") {
     return { kind: "expired", message: "This invite link has expired. Ask the organizer for a new link." };
   }

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -79,6 +79,11 @@ def _create(db: Session, user: User | None = None):
 
 
 def _invite_row(db: Session, trip_id: str, raw: str) -> InviteLink:
+    db.execute(
+        update(InviteLink)
+        .where(InviteLink.trip_id == trip_id, InviteLink.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc), is_primary=False)
+    )
     invite = InviteLink(
         trip_id=trip_id,
         token_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),

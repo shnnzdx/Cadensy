@@ -8,6 +8,16 @@ This file summarizes the state recorded in the repository. It is not a fresh liv
 
 ## Contribution log
 
+### 2026-11-24 — Option C invite repository head
+
+- Repository Alembic head for this change is `c0b2f9e5a6d3` (Rev 1
+  `c0a1e8d4b5f2`, Rev 2 `c0b2f9e5a6d3`). Production was not migrated.
+  Production remains at the previously completed revision `c8e1d4a90b27`
+  until an Owner-approved migration, including the destructive
+  revoke-in-place cleanup in Rev 2.
+- HMAC key material is not created or injected by this change. Release
+  pipeline pins stay on `c8e1d4a90b27` until a separate PR.
+
 ### 2026-11-20 — P0 activation-funnel handoff refresh
 
 - The current source now records privacy-safe activation events, reusable

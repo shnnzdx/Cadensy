@@ -87,16 +87,7 @@ def _locked_invite(session: Session, trip: Trip, token: str) -> InviteLink:
         .execution_options(populate_existing=True)
         .with_for_update()
     )
-    if invite is None:
-        raise trips.InviteNotFound("invite_invalid")
-    if invite.revoked_at is not None:
-        raise trips.InviteRevoked("invite_revoked")
-    expires_at = invite.expires_at
-    if expires_at is not None and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at is not None and expires_at <= _now():
-        raise trips.InviteExpired("invite_expired")
-    return invite
+    return trips.assert_joinable(invite, trip)
 
 
 def _locked_memberships(session: Session, trip_id: str) -> list[TripMembership]:
