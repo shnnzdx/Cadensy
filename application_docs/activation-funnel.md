@@ -9,7 +9,10 @@ auto-apply. It is not a production analytics vendor and it does not send email.
 
 ## Storage
 
-Alembic revision `c8e1d4a90b27` revises `b7d3a1e9c642`.
+The activation-event revision is `c8e1d4a90b27` (revises `b7d3a1e9c642`).
+The repository head after Option C is `c0b2f9e5a6d3`. That head is not the
+production schema. Production migration, including Rev 2 revoke-in-place
+cleanup, has not been run.
 
 - Table `activation_event`: `id`, `event_name`, `trip_id`, `invite_id`,
   `membership_id`, `actor_kind` (`account`, `guest`, or `system`), `occurred_at`

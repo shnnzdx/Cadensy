@@ -60,6 +60,9 @@ def execute_protected_membership_remove(
         require_no_decision_window(session, context.trip.id)
         session.scalars(select(GuestSession).where(GuestSession.membership_id == target.id).order_by(GuestSession.id).execution_options(populate_existing=True).with_for_update()).all()
         trips.remove_membership(session, trip_id=context.trip.id, organizer=actor, membership_id=target.id)
+        from ..trips.final_plan import maybe_close_final_plan
+
+        maybe_close_final_plan(session, context.trip)
         return CommandResponse(200, {"removed": True})
 
     return durable._execute_with_session_mutation(

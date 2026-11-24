@@ -134,6 +134,9 @@ def execute_protected_membership_quarantine(
             invite.revoked_at = datetime.now(timezone.utc)
             invite.is_primary = False
         session.flush()
+        from ..trips.final_plan import maybe_close_final_plan
+
+        maybe_close_final_plan(session, context.trip)
         return CommandResponse(200, {"quarantined": True})
 
     return durable._execute_with_session_mutation(

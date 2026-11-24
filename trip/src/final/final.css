@@ -5579,3 +5579,10 @@ body,
 .inviteManager .copyActions{flex-wrap:wrap}
 .laterFields{display:grid;gap:14px;margin-top:8px}
 .laterFields summary{cursor:pointer;font-weight:750}
+.finalPlanPanel{margin:0 0 18px;padding:18px 20px;border:1px solid var(--line);border-radius:16px;background:#fff}
+.finalPlanPanel h2{margin:4px 0 8px;font-size:22px}
+.finalPlanRoster{list-style:none;padding:0;margin:12px 0;display:grid;gap:8px}
+.finalPlanRoster li{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-top:1px solid var(--line)}
+.finalPlanPanel button{border:0;border-radius:999px;padding:10px 16px;background:var(--text-primary);color:#fff}
+.finalPlanPanel button:disabled{opacity:.45;cursor:not-allowed}
+.finalPlanNotice{margin-top:12px;color:var(--text-primary)}

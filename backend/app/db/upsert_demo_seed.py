@@ -212,11 +212,6 @@ def _ensure_plan(db, trip_id: str) -> tuple[Plan, bool]:
         )
         db.add(plan)
         db.flush()
-    else:
-        plan.status = "active"
-        plan.blocked_reason = None
-        plan.estimated_total_per_person = 310.0
-        plan.currency = "USD"
     return plan, created
 
 
@@ -234,6 +229,13 @@ def _existing_items_map(db, plan_id: str) -> dict[tuple, PlanItem]:
 
 
 def _upsert_items(db, plan: Plan) -> tuple[int, int]:
+    # S-1a: lock every existing item in id order before mutating several rows.
+    db.scalars(
+        select(PlanItem)
+        .where(PlanItem.plan_id == plan.id)
+        .order_by(PlanItem.id)
+        .with_for_update()
+    ).all()
     existing = _existing_items_map(db, plan.id)
     created = 0
     updated = 0
@@ -328,6 +330,11 @@ def upsert_demo_seed() -> dict:
 
         plan, created_plan = _ensure_plan(db, trip.id)
         created_items, updated_items = _upsert_items(db, plan)
+        db.flush()
+        plan.status = "active"
+        plan.blocked_reason = None
+        plan.estimated_total_per_person = 310.0
+        plan.currency = "USD"
 
         db.commit()
         return {

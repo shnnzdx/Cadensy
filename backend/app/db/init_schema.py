@@ -1,9 +1,13 @@
 """Legacy schema initializer for compatibility verification only.
 
-New databases must use ``alembic upgrade head``.  This function remains for
-explicit, reviewed legacy-schema compatibility checks while existing databases
-are stamped into Alembic history.  It intentionally calls ``create_all()``
-only and never calls ``drop_all()`` or demo seed code.
+Production databases use ``alembic upgrade head``. This helper remains for
+reviewed legacy-schema checks. It calls ``create_all()`` for the baseline
+table list only and never calls ``drop_all()`` or demo seed code.
+
+A greenfield ``create_all`` of ``plan_item`` and ``plan_change`` installs the
+itinerary revision triggers through ``after_create``. This helper does not
+create ``final_plan_approval`` or ``cadensy_invite_cleanup_marker``; those
+are owned by Alembic (the marker is not an ORM model).
 """
 
 from __future__ import annotations

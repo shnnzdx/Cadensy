@@ -8,7 +8,7 @@ from threading import Thread
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.api import main as api
@@ -201,7 +201,20 @@ def _cleanup_lifecycle_seed_data(test_engine):
 
 def _invite(engine, trip_id: str, token: str) -> None:
     with _factory(engine).begin() as db:
-        db.add(InviteLink(trip_id=trip_id, token_hash=auth.token_hash(token), is_primary=True))
+        db.execute(
+            update(InviteLink)
+            .where(InviteLink.trip_id == trip_id, InviteLink.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc), is_primary=False)
+        )
+        db.add(
+            InviteLink(
+                trip_id=trip_id,
+                token_hash=auth.token_hash(token),
+                is_primary=True,
+                token_scheme="hmac_v1",
+                key_id=1,
+            )
+        )
 
 
 def _scope(seed):
@@ -556,22 +569,20 @@ def test_account_and_guest_join_routes_enforce_the_public_identity_contract(test
     factory = _factory(test_engine)
     monkeypatch.setattr(api, "SessionLocal", factory)
     monkeypatch.setattr(db_session, "SessionLocal", factory)
-    guest_invite = f"guest-route-{seed['trip']}"
-    account_invite = f"account-route-{seed['trip']}"
-    _invite(test_engine, seed["trip"], guest_invite)
-    _invite(test_engine, seed["trip"], account_invite)
+    invite = f"route-{seed['trip']}"
+    _invite(test_engine, seed["trip"], invite)
     api.app.dependency_overrides[api.get_session] = lambda: factory()
     try:
         with TestClient(api.app) as client:
             rejected = client.post(
-                f"/api/invites/{guest_invite}/join",
+                f"/api/invites/{invite}/join",
                 json={"display_name": "No Claim", "email": seed["account_email"]},
             )
             guest = client.post(
-                f"/api/invites/{guest_invite}/join", json={"display_name": "Guest Route"}
+                f"/api/invites/{invite}/join", json={"display_name": "Guest Route"}
             )
             account = client.post(
-                f"/api/invites/{account_invite}/account-join",
+                f"/api/invites/{invite}/account-join",
                 headers={"Authorization": f"Bearer {seed['account_token']}"},
                 json={},
             )

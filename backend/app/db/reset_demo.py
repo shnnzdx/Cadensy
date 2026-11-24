@@ -12,15 +12,17 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text, update
 
 from .models import (
     ChangeProposal,
     DecisionRound,
+    FinalPlanApproval,
     InviteLink,
     PlanChange,
     PlanItem,
     ProposalDecision,
+    Trip,
     TripMembership,
     UpdateNotice,
     Vote,
@@ -48,9 +50,18 @@ def reset() -> dict:
             )
         ).rowcount
         cleared["invite_link"] = db.execute(delete(InviteLink)).rowcount
+        cleared["final_plan_approval"] = db.execute(delete(FinalPlanApproval)).rowcount
+        db.execute(
+            update(Trip).values(
+                first_invite_created_at=None,
+                invite_window_ends_at=None,
+                final_plan_approved_at=None,
+            )
+        )
         db.flush()
 
-        # 行程条目恢复成种子里的样子。按创建顺序对上 ITEMS —— ID 不动。
+        # S-1a: lock item rows in id order, then rewrite them in created_at order.
+        db.scalars(select(PlanItem.id).order_by(PlanItem.id).with_for_update()).all()
         items = db.scalars(
             select(PlanItem).order_by(PlanItem.created_at, PlanItem.id)
         ).all()
@@ -71,6 +82,9 @@ def reset() -> dict:
             item.lng = lng
             item.photo_url = PHOTOS[index % len(PHOTOS)]
             item.source = "mock"
+        db.flush()
+        # The content trigger bumped itinerary_revision. The demo epoch starts at 0.
+        db.execute(text("UPDATE plan SET itinerary_revision = 0"))
 
         db.commit()
         return {"restored_items": len(items), "cleared": cleared}

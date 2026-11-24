@@ -19,10 +19,12 @@ from sqlalchemy import delete, select
 from .models import (
     ChangeProposal,
     DecisionRound,
+    FinalPlanApproval,
     Plan,
     PlanChange,
     PlanItem,
     ProposalDecision,
+    Trip,
     UpdateNotice,
     Vote,
 )
@@ -38,9 +40,13 @@ def clear() -> dict:
             db.flush()
 
         cleared["plan_item"] = db.execute(delete(PlanItem)).rowcount
+        cleared["final_plan_approval"] = db.execute(delete(FinalPlanApproval)).rowcount
         for plan in db.scalars(select(Plan)):
             plan.status = "active"
             plan.estimated_total_per_person = 0
+        # Clear the terminal approval flag only. Invite anchors stay.
+        for trip in db.scalars(select(Trip)):
+            trip.final_plan_approved_at = None
         db.commit()
         return cleared
 

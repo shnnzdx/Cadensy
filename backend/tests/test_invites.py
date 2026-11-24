@@ -352,17 +352,16 @@ def test_invite_page_reuses_active_invite_and_regenerate_revokes_the_old_one(
     listed = client.get(f"/api/trips/{trip.id}/invite", headers=headers)
 
     assert listed.status_code == 200
-    assert listed.json() == {
-        "invite_id": created["invite_id"],
-        "expires_at": created["expires_at"],
-        "created_at": listed.json()["created_at"],
-        "status": "active",
-    }
-    assert "token" not in listed.json()
-    assert created["token"] not in listed.text
+    body = listed.json()
+    assert body["invite_id"] == created["invite_id"]
+    assert body["expires_at"] == created["expires_at"]
+    assert body["status"] == "active_hmac"
+    assert body["token"] == created["token"]
+    assert body["can_replace"] is True
+    assert body["can_create"] is False
     expires_at = datetime.fromisoformat(created["expires_at"])
     remaining = expires_at - datetime.now(timezone.utc)
-    assert timedelta(days=29) < remaining < timedelta(days=31)
+    assert timedelta(days=179) < remaining < timedelta(days=181)
     assert (
         api_session.scalar(
             select(func.count())
@@ -372,11 +371,17 @@ def test_invite_page_reuses_active_invite_and_regenerate_revokes_the_old_one(
         == 1
     )
 
-    regenerated = client.post(f"/api/trips/{trip.id}/invite", headers=headers).json()
+    reused = client.post(f"/api/trips/{trip.id}/invite", headers=headers).json()
+    assert reused["invite_id"] == created["invite_id"]
+    assert reused["token"] == created["token"]
+    regenerated = client.post(
+        f"/api/trips/{trip.id}/invite/replace", headers=headers
+    ).json()
     old = client.get(f"/api/invites/{created['token']}")
     current = client.get(f"/api/trips/{trip.id}/invite", headers=headers)
 
     assert regenerated["invite_id"] != created["invite_id"]
+    assert regenerated["expires_at"] == created["expires_at"]
     assert old.status_code == 410
     assert old.json()["detail"] == "invite_revoked"
     assert "Chicago" not in old.text
@@ -407,9 +412,9 @@ def test_existing_invite_without_expiry_keeps_working(client: TestClient, api_se
 
     preview = client.get(f"/api/invites/{raw}")
 
-    assert preview.status_code == 200
-    assert preview.json()["name"] == "Chicago birthday"
-    assert "token" not in preview.json()
+    assert preview.status_code == 410
+    assert preview.json()["detail"] == "invite_revoked"
+    assert "name" not in preview.json()
 
 
 def test_guest_rejoin_with_the_same_session_is_idempotent(
@@ -547,10 +552,13 @@ def test_active_invite_metadata_stays_inside_its_trip(client: TestClient, api_se
     listed_b = client.get(f"/api/trips/{trip_b.id}/invite", headers=headers_b)
 
     assert foreign.status_code == 403
-    assert own.status_code == 404
+    assert own.status_code == 200
+    assert own.json()["status"] == "none"
+    assert "token" not in own.json()
     assert listed_b.status_code == 200
     assert listed_b.json()["invite_id"] == invite_b["invite_id"]
-    assert invite_b["token"] not in listed_b.text
+    assert listed_b.json()["token"] == invite_b["token"]
+    assert listed_b.json()["status"] == "active_hmac"
 
 
 def test_preference_budget_over_maximum_returns_400(client: TestClient, api_session: Session):

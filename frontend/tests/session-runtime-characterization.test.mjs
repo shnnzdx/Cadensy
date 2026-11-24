@@ -101,7 +101,11 @@ test("invite join separates Guest payloads from Account bearer adoption", async 
   assert.match(finalApp, /const joined = await app\.joinAccountInvite\(token\)/);
   assert.match(finalApp, /app\.adoptTechnicalTripContext\(\{\s*membershipId: joined\.membership_id,\s*tripId: joined\.trip_id,\s*\.\.\.\(isGuest \? \{ guestToken: joined\.guest_token \} : \{\}\),/s);
   assert.match(tripAppState, /body: JSON\.stringify\(guestJoinPayload\(displayName\)\)/);
-  assert.match(tripAppState, /accountRequestJson\(`\/api\/invites\/\$\{token\}\/account-join`, \{/);
+  assert.match(tripAppState, /pathRequest: value => accountRequestJson\(`\/api\/invites\/\$\{value\}\/account-join`, \{/);
+  assert.match(tripAppState, /bodyRequest: value => accountRequestJson\('\/api\/invites\/account-join', \{/);
+  assert.match(tripAppState, /validateInviteJoinResult\(joined, 'guest'\)/);
+  assert.match(tripAppState, /validateInviteJoinResult\(joined, 'account'\)/);
+  assert.doesNotMatch(tripAppState, /accountRequestJson\(`\/api\/invites\/\$\{value\}\/join`/);
 });
 
 test("phase 1 current logout delegates technical-session clear to session-runtime, preserves invite adoption caches, and keeps outer reset/navigation in TripAppState", async () => {

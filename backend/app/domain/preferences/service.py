@@ -177,6 +177,13 @@ def _validate_preference_budget(data: PreferenceData) -> None:
 def save_mine(
     db: Session, membership: TripMembership, data: PreferenceData
 ) -> dict:
+    # N-5a: trip KEY SHARE before any preference insert. Autoflush of a new
+    # Preference would otherwise take the membership KEY SHARE first.
+    db.scalar(
+        select(Trip.id)
+        .where(Trip.id == membership.trip_id)
+        .with_for_update(read=True, key_share=True)
+    )
     _validate_preference_budget(data)
     _validate_preference_dates(db, membership, data)
     pref = db.scalar(

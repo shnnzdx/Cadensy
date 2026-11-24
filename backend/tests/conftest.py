@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timedelta, timezone
+
+# Synthetic HMAC keyring for the disposable test process. 32 zero bytes,
+# unpadded base64url. Never a production secret.
+os.environ.setdefault(
+    "CADENSY_INVITE_HMAC_KEY",
+    '{"v":1,"active_key_id":1,"keys":{"1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}',
+)
 from pathlib import Path
 
 import pytest

@@ -245,7 +245,7 @@ def test_guest_invite_join_uses_trip_root_and_advances_both_revisions(test_engin
     seed = _seed(test_engine)
     token = "b2e-invite-token"
     with _factory(test_engine).begin() as db:
-        db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(token), is_primary=True))
+        db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(token), is_primary=True, token_scheme="hmac_v1", key_id=1))
     joined = join_invite_under_trip_root(
         session_factory=_factory(test_engine), token=token, display_name="New guest", email=None
     )
@@ -307,7 +307,7 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
                 password_hash=auth_service.hash_password("correct-horse"),
             )
             db.add(joiner)
-            db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
+            db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True, token_scheme="hmac_v1", key_id=1))
             db.flush()
             db.add(AuthSession(user_id=joiner.id, token_hash=auth_service.token_hash(joiner_token), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
             _seeded[-1] = (seed["trip"], (*_seeded[-1][1], joiner.id))
@@ -318,7 +318,7 @@ def test_every_b2e_writer_waits_on_the_real_postgresql_trip_root(test_engine, ca
     elif case == "guest_join":
         invite_token = f"guest-invite-{seed['trip']}"
         with factory.begin() as db:
-            db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
+            db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True, token_scheme="hmac_v1", key_id=1))
         operation = lambda: join_invite_under_trip_root(
             session_factory=factory, token=invite_token, display_name="Guest joiner", email=None
         )
@@ -389,7 +389,7 @@ def test_join_final_commit_failure_leaves_no_member_guest_or_revision_partial(te
     factory = _factory(test_engine)
     invite_token = f"rollback-invite-{seed['trip']}-{email or 'guest'}"
     with factory.begin() as db:
-        db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True))
+        db.add(InviteLink(trip_id=seed["trip"], token_hash=auth_service.token_hash(invite_token), is_primary=True, token_scheme="hmac_v1", key_id=1))
         if email:
             joiner_token = f"rollback-account-{seed['trip']}"
             joiner = User(name="Rollback account", email=f"rollback-{seed['trip']}@test.local", password_hash=auth_service.hash_password("correct-horse"))
@@ -546,7 +546,7 @@ def test_membership_routes_always_use_protected_transaction(test_engine, monkeyp
     legacy = _seed(test_engine)
     legacy_invite = f"http-protected-{legacy['trip']}"
     with factory.begin() as db:
-        db.add(InviteLink(trip_id=legacy["trip"], token_hash=auth_service.token_hash(legacy_invite), is_primary=True))
+        db.add(InviteLink(trip_id=legacy["trip"], token_hash=auth_service.token_hash(legacy_invite), is_primary=True, token_scheme="hmac_v1", key_id=1))
     with TestClient(api.app) as client:
         response = client.post(f"/api/invites/{legacy_invite}/join", json={"display_name": "Guest"})
     assert response.status_code == 200 and "guest_token" in response.json()

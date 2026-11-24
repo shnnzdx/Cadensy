@@ -7,11 +7,10 @@ the side effects required when a user creates a new trip.
 from __future__ import annotations
 
 import hashlib
-import secrets
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...db.models import InviteLink, Plan, PlanItem, Trip, TripMembership, User
@@ -19,7 +18,6 @@ from .. import auth as auth_service
 from ..analytics.activation import (
     InviteOpenContext,
     record_client_share,
-    record_invite_created,
     record_invite_opened,
     record_trip_created,
 )
@@ -29,39 +27,39 @@ from ..membership_policy import (
 )
 from ..places.service import normalize_destination
 from . import cover_service
+from .invite_hmac import InviteHmacUnavailable
+from .invite_lifecycle import (
+    InviteSnapshot,
+    InviteClosed,
+    InviteConflict,
+    InviteExpired,
+    InviteJoinClosed,
+    InviteIdempotencyInvalid,
+    InviteNotFound,
+    InviteNotReplaceable,
+    InviteRevoked,
+    InviteWindowClosed,
+    OrganizerRequired,
+    assert_joinable,
+    ensure_invite,
+    replace_invite,
+    retrieve_invite,
+    revoke_invite_row,
+    share_is_refused,
+)
 
 
 class GuestTripAccessDenied(Exception):
     """Guests do not have an account-level dashboard or creator identity."""
 
 
-class OrganizerRequired(Exception):
-    """Only the trip organizer can manage invite links."""
-
-
 class MembershipRemovalDenied(Exception):
     """Membership removal is invalid for this actor or target."""
 
 
-class InviteNotFound(Exception):
-    """Public invite lookup failed. ``code`` is safe to return to the client."""
-
-    code = "invite_invalid"
-
-
-class InviteRevoked(InviteNotFound):
-    """The token existed and was revoked. Do not include trip details."""
-
-    code = "invite_revoked"
-
-
-class InviteExpired(InviteNotFound):
-    """The token existed and is past expires_at. Do not include trip details."""
-
-    code = "invite_expired"
-
-
-INVITE_TTL = timedelta(days=30)
+INVITE_WINDOW = timedelta(days=180)
+# Retained name for older imports. The product window is 180 days.
+INVITE_TTL = INVITE_WINDOW
 
 
 MAX_COVER_FETCHES_PER_DASHBOARD_REQUEST = 4
@@ -256,10 +254,6 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _require_organizer(db: Session, trip_id: str, membership: TripMembership) -> None:
     if (
         membership.trip_id != trip_id
@@ -276,79 +270,27 @@ class CreatedInvite:
 
 
 def create_invite(db: Session, trip_id: str, organizer: TripMembership) -> CreatedInvite:
-    _require_organizer(db, trip_id, organizer)
-    if db.get(Trip, trip_id) is None:
-        raise InviteNotFound("Trip not found")
+    """Compatibility wrapper. Prefer ensure_invite; this still returns a token."""
 
-    issued_at = _now()
-    db.execute(
-        update(InviteLink)
-        .where(InviteLink.trip_id == trip_id, InviteLink.revoked_at.is_(None))
-        .values(revoked_at=issued_at, is_primary=False)
-    )
-    token = secrets.token_urlsafe(32)
-    invite = InviteLink(
-        trip_id=trip_id,
-        token_hash=_token_hash(token),
-        is_primary=True,
-        expires_at=issued_at + INVITE_TTL,
-    )
-    db.add(invite)
-    db.flush()
-    record_invite_created(
-        db, trip_id=trip_id, invite_id=invite.id, membership_id=organizer.id
-    )
-    return CreatedInvite(invite=invite, token=token)
-
-
-def _classify_invite(invite: InviteLink | None) -> InviteLink:
+    snapshot = ensure_invite(db, trip_id, organizer)
+    if not snapshot.token or snapshot.invite_id is None:
+        raise InviteNotFound("Invite not found")
+    invite = db.get(InviteLink, snapshot.invite_id)
     if invite is None:
-        raise InviteNotFound("invite_invalid")
-    if invite.revoked_at is not None:
-        raise InviteRevoked("invite_revoked")
-    expires_at = invite.expires_at
-    if expires_at is not None and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at is not None and expires_at <= _now():
-        raise InviteExpired("invite_expired")
-    return invite
+        raise InviteNotFound("Invite not found")
+    return CreatedInvite(invite=invite, token=snapshot.token)
 
 
 def _valid_invite(db: Session, token: str) -> InviteLink:
     invite = db.scalar(select(InviteLink).where(InviteLink.token_hash == _token_hash(token)))
-    return _classify_invite(invite)
+    trip = db.get(Trip, invite.trip_id) if invite is not None else None
+    return assert_joinable(invite, trip)
 
 
 def active_invite_metadata(db: Session, trip_id: str, organizer: TripMembership) -> dict:
-    """Return the reusable active invite without the raw token.
+    """Organizer retrieve. Does not mint. Token is present only for active_hmac."""
 
-    Pre-existing unrevoked links stay valid until the organizer generates a
-    new one. When more than one is still active, the primary or newest is
-    the one the page reuses.
-    """
-
-    _require_organizer(db, trip_id, organizer)
-    if db.get(Trip, trip_id) is None:
-        raise InviteNotFound("Trip not found")
-    now = _now()
-    invite = db.scalar(
-        select(InviteLink)
-        .where(
-            InviteLink.trip_id == trip_id,
-            InviteLink.revoked_at.is_(None),
-            or_(InviteLink.expires_at.is_(None), InviteLink.expires_at > now),
-        )
-        .order_by(InviteLink.is_primary.desc(), InviteLink.created_at.desc())
-        .limit(1)
-    )
-    if invite is None:
-        raise InviteNotFound("Invite not found")
-    return {
-        "invite_id": invite.id,
-        "expires_at": invite.expires_at.isoformat() if invite.expires_at else None,
-        "created_at": invite.created_at.isoformat() if invite.created_at else None,
-        "status": "active",
-    }
+    return retrieve_invite(db, trip_id, organizer).as_dict()
 
 
 def invite_preview(
@@ -408,7 +350,8 @@ def record_organizer_share_event(
 
     _require_organizer(db, trip_id, organizer)
     invite = db.get(InviteLink, invite_id)
-    if invite is None or invite.trip_id != trip_id or invite.revoked_at is not None:
+    trip = db.get(Trip, trip_id)
+    if invite is None or invite.trip_id != trip_id or share_is_refused(invite, trip):
         raise InviteNotFound("Invite not found")
     record_client_share(
         db,
@@ -420,13 +363,7 @@ def record_organizer_share_event(
 
 
 def revoke_invite(db: Session, invite_id: str, organizer: TripMembership) -> None:
-    invite = db.get(InviteLink, invite_id)
-    if invite is None:
-        raise InviteNotFound("Invite not found")
-    _require_organizer(db, invite.trip_id, organizer)
-    invite.revoked_at = _now()
-    invite.is_primary = False
-    db.flush()
+    revoke_invite_row(db, invite_id, organizer)
 
 
 def remove_membership(
