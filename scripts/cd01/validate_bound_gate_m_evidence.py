@@ -1,29 +1,31 @@
 """Bind a backend release to one successful Gate M run.
 
-The release workflow downloads the Gate M run, jobs, and logs, then reads the
-migration task's CloudWatch stream. This checker only evaluates those local
-artifacts. It does not call GitHub or AWS.
+The release workflow downloads the Gate M run, jobs, and logs, then pages
+through that migration task's CloudWatch stream until ``nextForwardToken``
+is unchanged. This checker only evaluates those local artifacts. It does not
+call GitHub or AWS.
 
-A run is accepted only when all of the following hold:
+Accepted evidence is:
 
-- the run is a successful manual dispatch of the active Gate M workflow on main;
-- the migration job and its bounded migration step succeeded;
-- the logs record ``SOURCE_SHA`` as the commit being released;
-- the logs record the schema-verifier digest supplied for that commit;
-- the logs and CloudWatch stream both record Alembic head
-  ``expected_alembic_head``, including
-  ``Running upgrade b7d3a1e9c642 -> <expected_alembic_head>``.
+- a successful manual dispatch of the active Gate M workflow on main;
+- a successful migration job and bounded-migration step in the jobs payload;
+- every env-dump ``SOURCE_SHA`` equal to the commit being released;
+- every env-dump ``MIGRATION_DIGEST`` equal to the schema-verifier digest;
+- exactly one task ARN;
+- CloudWatch whose last Alembic upgrade line is
+  ``Running upgrade b7d3a1e9c642 -> <expected head>``.
 
-The workflow run's ``head_sha`` is the ref selected at dispatch. Gate M checks
-out ``inputs.source_sha``, which is the commit being released. Those values
-differed for historical run 45046230145 (``head_sha`` ``05d92ca7…``, migrated
-source ``bb4791fc…``). Binding only ``head_sha`` would treat the dispatch ref
-as the migrated commit, so the commit binding is the logged ``SOURCE_SHA``.
+GitHub's step log keeps ``echo "- Git commit: ${SOURCE_SHA}"`` and
+``echo "- Verified final revision: ${PR06B_ALEMBIC_HEAD}"`` unexpanded. Those
+lines, ``test "${exit_code}" = "0"``, and ``status=verified-pr06b-head`` are
+static script text and are not evidence. The values that do appear are the
+    per-step env dump (timestamp, three spaces, ``KEY: value``) and the task ARN
+substituted into the summary script.
 
-Missing files, a different commit, a different digest, or a different revision
-fail closed. ``BUILD_ALEMBIC_HEAD`` and ``APPROVED_ALEMBIC_HEAD`` stay
-``c8e1d4a90b27`` in this change. A later schema head has to update those pins
-and this ``b7d3a1e9c642`` predecessor together before a release.
+``BUILD_ALEMBIC_HEAD``, ``APPROVED_ALEMBIC_HEAD``, and Gate M
+``PR06B_ALEMBIC_HEAD`` stay ``c8e1d4a90b27``. The upgrade predecessor stays
+``b7d3a1e9c642``. Production is already at that head, so a backend release can
+bind only to the existing Gate M run until a later head has its own run.
 """
 
 from __future__ import annotations
@@ -38,8 +40,24 @@ from pathlib import Path
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ALEMBIC_HEAD_RE = re.compile(r"^[0-9a-f]{12}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ENV_DUMP_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    # Job 137281368161 places three spaces between "Z" and the key:
+    # the log-field separator plus the env block's two-space indent.
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+Z {3}"
+    r"(?P<key>[A-Z][A-Z0-9_]*): (?P<value>.*)$"
+)
 TASK_ARN_RE = re.compile(
-    r"arn:aws:ecs:us-east-1:448678332746:task/tripsync-cluster/[0-9a-f]{32}"
+    r"(?<![0-9A-Za-z])"
+    r"arn:aws:ecs:us-east-1:448678332746:task/tripsync-cluster/"
+    r"([0-9a-f]{32})"
+    r"(?![0-9a-f])"
+)
+ALEMBIC_LOG_PREFIX = r"(?:INFO  \[alembic\.runtime\.migration\] )?"
+UPGRADE_LINE_RE = re.compile(
+    rf"^{ALEMBIC_LOG_PREFIX}"
+    r"Running upgrade (?P<start>[0-9a-f]{12}) -> (?P<target>[0-9a-f]{12})"
+    r"(?:,.*)?$"
 )
 GATE_M_WORKFLOW_PATH = ".github/workflows/cd01-pr06b-schema-migration.yml"
 GATE_M_JOB_NAME = "Execute one approved PR-06B schema migration"
@@ -65,41 +83,127 @@ def load_github_logs(logs_dir: Path) -> str:
         _fail("Gate M log directory is empty.")
     parts: list[str] = []
     for path in sorted(files):
-        parts.append(path.read_text(encoding="utf-8", errors="replace"))
+        parts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
     return "\n".join(parts)
+
+
+def env_dump_values(logs: str, key: str) -> list[str]:
+    """Return values from GitHub Actions env-dump lines for one key.
+
+    Only ``<timestamp>Z`` followed by three spaces and ``KEY: value`` counts.
+    Unexpanded script text and other free-text echoes are ignored.
+    """
+
+    values: list[str] = []
+    for line in logs.splitlines():
+        match = ENV_DUMP_RE.fullmatch(line.rstrip("\r"))
+        if match and match.group("key") == key:
+            values.append(match.group("value"))
+    return values
+
+
+def migration_task_arns_from_logs(logs: str) -> list[str]:
+    """Return the distinct bounded migration task ARNs in the log text."""
+
+    return sorted(set(TASK_ARN_RE.findall(logs)))
 
 
 def migration_task_arn_from_logs(logs: str) -> str:
     """Return the single migration task ARN recorded by Gate M."""
 
-    found = sorted(set(TASK_ARN_RE.findall(logs)))
+    found = migration_task_arns_from_logs(logs)
     if len(found) != 1:
         _fail("Gate M logs must contain exactly one migration task ARN.")
-    task_arn = found[0]
-    if f"Migration task: {task_arn}" not in logs:
-        _fail("Gate M logs must record the migration task ARN in the evidence summary.")
-    return task_arn
+    return (
+        "arn:aws:ecs:us-east-1:448678332746:task/tripsync-cluster/"
+        + found[0]
+    )
 
 
-def cloudwatch_messages_from_payload(payload: object) -> list[str]:
-    """Accept the ``aws logs get-log-events`` JSON shape."""
+def merge_cloudwatch_pages(pages: object) -> list[str]:
+    """Concatenate CloudWatch pages after ``nextForwardToken`` stabilizes.
 
-    if not isinstance(payload, dict):
-        _fail("Gate M CloudWatch evidence is missing.")
-    events = payload.get("events")
-    if not isinstance(events, list) or not events:
-        _fail("Gate M CloudWatch evidence is missing.")
+    A read is complete only when a later page returns the same
+    ``nextForwardToken`` that was used to request it, and that page is the
+    last page. A single page, a token that never repeats, or pages after the
+    token has already stabilized fail closed.
+    """
+
+    if not isinstance(pages, list) or len(pages) < 2:
+        _fail(
+            "Gate M CloudWatch pagination did not reach an unchanged nextForwardToken."
+        )
     messages: list[str] = []
-    for event in events:
-        if not isinstance(event, dict) or not isinstance(event.get("message"), str):
+    previous_token: str | None = None
+    stabilized = False
+    for index, page in enumerate(pages):
+        if not isinstance(page, dict):
             _fail("Gate M CloudWatch evidence is malformed.")
-        messages.append(event["message"])
+        token = page.get("nextForwardToken")
+        events = page.get("events")
+        if not isinstance(token, str) or not token:
+            _fail("Gate M CloudWatch page is missing nextForwardToken.")
+        if not isinstance(events, list):
+            _fail("Gate M CloudWatch evidence is malformed.")
+        for event in events:
+            if not isinstance(event, dict) or not isinstance(event.get("message"), str):
+                _fail("Gate M CloudWatch evidence is malformed.")
+            messages.append(event["message"])
+        if previous_token is not None and token == previous_token:
+            if index != len(pages) - 1:
+                _fail(
+                    "Gate M CloudWatch pagination continued after the token stabilized."
+                )
+            stabilized = True
+            break
+        previous_token = token
+    if not stabilized:
+        _fail(
+            "Gate M CloudWatch pagination did not reach an unchanged nextForwardToken."
+        )
+    if not messages:
+        _fail("Gate M CloudWatch evidence is missing.")
     return messages
 
 
-def _require_same_values(values: list[str], expected: str, message: str) -> None:
-    if not values or any(value != expected for value in values):
-        _fail(message)
+def _require_exact_env_values(
+    logs: str,
+    key: str,
+    expected: str,
+    value_pattern: re.Pattern[str],
+    missing: str,
+    mismatch: str,
+) -> None:
+    values = env_dump_values(logs, key)
+    if not values:
+        _fail(missing)
+    for value in values:
+        if value_pattern.fullmatch(value) is None or value != expected:
+            _fail(mismatch)
+
+
+def _cloudwatch_revision_is_bound(
+    messages: list[str],
+    *,
+    start_revision: str,
+    expected_alembic_head: str,
+) -> None:
+    upgrades: list[tuple[str, str]] = []
+    for raw in messages:
+        line = raw.strip()
+        if "Running downgrade" in line:
+            _fail("Gate M CloudWatch evidence contains a downgrade.")
+        if "Running upgrade" not in line:
+            continue
+        match = UPGRADE_LINE_RE.fullmatch(line)
+        if match is None:
+            _fail("Gate M CloudWatch upgrade line is not an anchored Alembic message.")
+        upgrades.append((match.group("start"), match.group("target")))
+    if not upgrades:
+        _fail("Gate M CloudWatch evidence is not bound to the expected Alembic revision.")
+    start, target = upgrades[-1]
+    if start != start_revision or target != expected_alembic_head:
+        _fail("Gate M CloudWatch evidence is not bound to the expected Alembic revision.")
 
 
 def validate_bound_gate_m_evidence(
@@ -132,29 +236,24 @@ def validate_bound_gate_m_evidence(
         _fail("Gate M run did not execute the active schema-migration workflow.")
     if SHA_RE.fullmatch(str(run.get("head_sha") or "")) is None:
         _fail("Gate M run head SHA is missing.")
-
     if not isinstance(github_logs, str) or not github_logs.strip():
         _fail("Gate M logs are missing.")
-    _require_same_values(
-        re.findall(r"SOURCE_SHA: ([0-9a-f]{40})", github_logs),
+
+    _require_exact_env_values(
+        github_logs,
+        "SOURCE_SHA",
         source_sha,
+        SHA_RE,
+        "Gate M logs are missing an env-dump SOURCE_SHA.",
         "Gate M logs are not bound to the commit being released.",
     )
-    _require_same_values(
-        re.findall(r"Git commit: ([0-9a-f]{40})", github_logs),
-        source_sha,
-        "Gate M evidence summary is not bound to the commit being released.",
-    )
-    if f"MIGRATION_DIGEST: {migration_digest}" not in github_logs:
-        _fail("Gate M logs are not bound to the schema-verifier digest being released.")
-    if "Status: verified-pr06b-head" not in github_logs:
-        _fail("Gate M logs are missing the verified-head status.")
-    if 'test "${exit_code}" = "0"' not in github_logs:
-        _fail("Gate M logs are missing the migration exit-code check.")
-    _require_same_values(
-        re.findall(r"Verified final revision: ([0-9a-f]{12})", github_logs),
-        expected_alembic_head,
-        "Gate M logs are not bound to the expected Alembic revision.",
+    _require_exact_env_values(
+        github_logs,
+        "MIGRATION_DIGEST",
+        migration_digest,
+        DIGEST_RE,
+        "Gate M logs are missing an env-dump MIGRATION_DIGEST.",
+        "Gate M logs are not bound to the schema-verifier digest being released.",
     )
 
     jobs_list = jobs.get("jobs") if isinstance(jobs, dict) else None
@@ -181,15 +280,11 @@ def validate_bound_gate_m_evidence(
         _fail("Gate M migration job did not succeed.")
 
     task_arn = migration_task_arn_from_logs(github_logs)
-    if not cloudwatch_messages:
-        _fail("Gate M CloudWatch evidence is missing.")
-    upgrade_line = (
-        f"Running upgrade {UPGRADE_START_REVISION} -> {expected_alembic_head}"
+    _cloudwatch_revision_is_bound(
+        cloudwatch_messages,
+        start_revision=UPGRADE_START_REVISION,
+        expected_alembic_head=expected_alembic_head,
     )
-    if upgrade_line not in "\n".join(cloudwatch_messages):
-        _fail(
-            "Gate M CloudWatch evidence is not bound to the expected Alembic revision."
-        )
     return task_arn
 
 
@@ -227,7 +322,9 @@ def main(argv: list[str] | None = None) -> None:
         missing = [name for name, value in required.items() if not value]
         if missing:
             _fail("Bound Gate M evidence is incomplete: " + ", ".join(missing) + ".")
-        cloudwatch_payload = _load_json(args.cloudwatch_json, "Gate M CloudWatch evidence")
+        payload = _load_json(args.cloudwatch_json, "Gate M CloudWatch evidence")
+        if not isinstance(payload, dict) or not isinstance(payload.get("pages"), list):
+            _fail("Gate M CloudWatch evidence must be paginated pages.")
         validate_bound_gate_m_evidence(
             source_sha=args.source_sha,
             expected_alembic_head=args.expected_alembic_head,
@@ -235,7 +332,7 @@ def main(argv: list[str] | None = None) -> None:
             run=_load_json(args.run_json, "Gate M run evidence"),
             jobs=_load_json(args.jobs_json, "Gate M job evidence"),
             github_logs=logs,
-            cloudwatch_messages=cloudwatch_messages_from_payload(cloudwatch_payload),
+            cloudwatch_messages=merge_cloudwatch_pages(payload["pages"]),
         )
     except ContractError as exc:
         raise SystemExit(f"Bound Gate M evidence check failed: {exc}") from exc

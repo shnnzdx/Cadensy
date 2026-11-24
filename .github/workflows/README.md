@@ -27,7 +27,7 @@ Only workflows that remain valid CI, artifact, release, or production-operation 
 - Artifact workflows publish immutable-addressed build outputs; they do not update ECS, run migrations, or change data.
 - Artifact workflows re-check changed build inputs before requesting the protected `Main` environment. `docs/`, `application_docs/`, `AI_enhanced/`, `AWS/`, Markdown, tests, and workflow-only changes never receive AWS credentials or push ECR images; a workflow-only rebuild is manual and controlled.
 - Release workflows are separate because their approval, rollback, and evidence contracts differ. Do not combine them into one unrestricted shell job.
-- Gate M stays `workflow_dispatch` only, on `main`, with the protected `Main` environment. Backend release evidence must be a successful Gate M run for the same source commit, schema-verifier digest, and `APPROVED_ALEMBIC_HEAD`. A historical run for a different commit or revision does not qualify.
+- Gate M stays `workflow_dispatch` only, on `main`, with the protected `Main` environment. Backend release evidence must be a successful Gate M run whose env dump matches the source commit and schema-verifier digest, with CloudWatch proving the upgrade to `APPROVED_ALEMBIC_HEAD`. A historical run for a different commit or revision does not qualify.
 - Data operations remain separate from release operations so an account repair or demo purge cannot inherit deployment permissions accidentally.
 - All AWS mutation workflows must be dispatched from `main` and use the protected `Main` environment where specified.
 

@@ -195,18 +195,47 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${schema_evidence_run_id}/logs" \
             --output /tmp/gate-m-logs.zip
           unzip -q /tmp/gate-m-logs.zip -d /tmp/gate-m-logs
-          # The dispatch ref is run.head_sha. The migrated commit is the
-          # SOURCE_SHA recorded in the Gate M logs. Require that commit, the
-          # schema-verifier digest, and APPROVED_ALEMBIC_HEAD. A historical
-          # run for any other commit or revision fails closed.
+          # Bind to env-dump SOURCE_SHA and MIGRATION_DIGEST, one task ARN,
+          # and the CloudWatch upgrade to APPROVED_ALEMBIC_HEAD. Summary
+          # echoes stay unexpanded in the job log and are not evidence.
           migration_task_arn="$(python scripts/cd01/validate_bound_gate_m_evidence.py --emit-task-arn --logs-dir /tmp/gate-m-logs)"
-          [[ "${migration_task_arn}" =~ ^arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task/${ECS_CLUSTER}/[0-9a-f]{32}$ ]]
           migration_task_id="${migration_task_arn##*/}"
-          aws logs get-log-events \
-            --log-group-name "${BACKEND_LOG_GROUP}" \
-            --log-stream-name "ecs/${CONTAINER_NAME}/${migration_task_id}" \
-            --start-from-head \
-            --output json > /tmp/gate-m-cloudwatch.json
+          [[ "${migration_task_id}" =~ ^[0-9a-f]{32}$ ]]
+          expected_migration_task_arn="arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task/${ECS_CLUSTER}/${migration_task_id}"
+          [[ "${migration_task_arn}" == "${expected_migration_task_arn}" ]]
+          echo '[]' > /tmp/gate-m-cloudwatch-pages.json
+          token=""
+          page_count=0
+          while true; do
+            page_count=$((page_count + 1))
+            if [[ "${page_count}" -gt 20 ]]; then
+              echo '::error::Gate M CloudWatch pagination did not reach an unchanged nextForwardToken.'
+              exit 1
+            fi
+            if [[ -z "${token}" ]]; then
+              aws logs get-log-events \
+                --log-group-name "${BACKEND_LOG_GROUP}" \
+                --log-stream-name "ecs/${CONTAINER_NAME}/${migration_task_id}" \
+                --start-from-head \
+                --output json > /tmp/gate-m-cloudwatch-page.json
+            else
+              aws logs get-log-events \
+                --log-group-name "${BACKEND_LOG_GROUP}" \
+                --log-stream-name "ecs/${CONTAINER_NAME}/${migration_task_id}" \
+                --start-from-head \
+                --next-token "${token}" \
+                --output json > /tmp/gate-m-cloudwatch-page.json
+            fi
+            jq -e 'type == "object" and (.events | type == "array") and (.nextForwardToken | type == "string" and length > 0)' /tmp/gate-m-cloudwatch-page.json >/dev/null
+            jq --slurpfile page /tmp/gate-m-cloudwatch-page.json '. + $page' /tmp/gate-m-cloudwatch-pages.json > /tmp/gate-m-cloudwatch-pages.next.json
+            mv /tmp/gate-m-cloudwatch-pages.next.json /tmp/gate-m-cloudwatch-pages.json
+            next="$(jq -r '.nextForwardToken' /tmp/gate-m-cloudwatch-page.json)"
+            if [[ -n "${token}" && "${next}" == "${token}" ]]; then
+              break
+            fi
+            token="${next}"
+          done
+          jq -n --slurpfile pages /tmp/gate-m-cloudwatch-pages.json '{pages: $pages[0]}' > /tmp/gate-m-cloudwatch.json
           python scripts/cd01/validate_bound_gate_m_evidence.py \
             --source-sha "${SOURCE_SHA}" \
             --expected-alembic-head "${APPROVED_ALEMBIC_HEAD}" \
@@ -215,9 +244,11 @@ jobs:
             --jobs-json /tmp/gate-m-jobs.json \
             --logs-dir /tmp/gate-m-logs \
             --cloudwatch-json /tmp/gate-m-cloudwatch.json
-          echo "current_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
-          echo "schema_evidence_run_id=${schema_evidence_run_id}" >> "${GITHUB_OUTPUT}"
-          echo "gate_m_task_arn=${migration_task_arn}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "current_task_definition=${current_task_definition}"
+            echo "schema_evidence_run_id=${schema_evidence_run_id}"
+            echo "gate_m_task_arn=${migration_task_arn}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Run a read-only c8 schema preflight in an isolated task
         id: schema
