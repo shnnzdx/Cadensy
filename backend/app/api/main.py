@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
@@ -62,6 +63,7 @@ from ..domain.plans import manual_items
 from ..domain.places import geoapify
 from ..domain.preferences import service as pref_service
 from ..domain.analytics.activation import InviteOpenContext
+from ..domain.trips import final_plan as final_plan_service
 from ..domain.trips import service as trip_service
 from ..observability.invite_access_log import install_invite_access_log_redaction
 from ..domain.trips import cover_service as trip_cover_service
@@ -735,6 +737,11 @@ class CommentRequest(BaseModel):
 class InviteJoinRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     email: str | None = Field(default=None, max_length=255)
+
+
+class FinalPlanApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    itinerary_revision: int = Field(ge=0)
 
 
 class PublicInviteTokenRequest(BaseModel):
@@ -2189,6 +2196,61 @@ def get_active_invite(
     ) as exc:
         _raise_organizer_invite(exc)
     return _organizer_invite_payload(snapshot)
+
+
+def _raise_final_plan(exc: Exception) -> None:
+    if isinstance(exc, final_plan_service.FinalPlanNotParticipant):
+        status = 404 if str(exc) == "Trip not found" else 403
+        raise HTTPException(status, str(exc)) from exc
+    if isinstance(exc, final_plan_service.FinalPlanClosed):
+        raise HTTPException(409, "invite_closed") from exc
+    if isinstance(exc, final_plan_service.FinalPlanStale):
+        raise HTTPException(409, "itinerary_revision_stale") from exc
+    raise exc
+
+
+@app.get("/api/trips/{trip_id}/final-plan")
+def get_final_plan(
+    trip_id: str,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+) -> dict:
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        return final_plan_service.read_final_plan(db, trip_id, me)
+    except final_plan_service.FinalPlanNotParticipant as exc:
+        _raise_final_plan(exc)
+
+
+@app.post("/api/trips/{trip_id}/final-plan/approve")
+def approve_final_plan(
+    trip_id: str,
+    body: FinalPlanApproveRequest,
+    db: Session = Depends(get_session),
+    me: TripMembership = Depends(current_membership),
+):
+    _require_scoped_trip(db, me, trip_id)
+    try:
+        payload = final_plan_service.approve_final_plan(
+            db, trip_id, me, body.itinerary_revision
+        )
+    except final_plan_service.FinalPlanNotReady as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "final_plan_not_ready",
+                "reasons": exc.reasons,
+                "message": exc.message,
+            },
+        )
+    except (
+        final_plan_service.FinalPlanNotParticipant,
+        final_plan_service.FinalPlanClosed,
+        final_plan_service.FinalPlanStale,
+    ) as exc:
+        _raise_final_plan(exc)
+    db.commit()
+    return payload
 
 
 @app.post("/api/trips/{trip_id}/activation-events")

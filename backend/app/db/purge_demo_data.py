@@ -15,6 +15,7 @@ from .models import (
     AuthSession,
     ChangeProposal,
     DecisionRound,
+    FinalPlanApproval,
     InviteLink,
     MemberConstraint,
     MemberConstraintPrivate,
@@ -144,6 +145,9 @@ def purge_demo_data() -> dict:
             ),
             "preference": _delete_by_ids(
                 db, Preference, Preference.trip_membership_id, membership_ids
+            ),
+            "final_plan_approval": _delete_by_ids(
+                db, FinalPlanApproval, FinalPlanApproval.trip_id, trip_ids
             ),
             "plan_item": _delete_by_ids(db, PlanItem, PlanItem.id, item_ids),
             "plan": _delete_by_ids(db, Plan, Plan.id, plan_ids),

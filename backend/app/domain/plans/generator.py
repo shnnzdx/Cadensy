@@ -284,6 +284,7 @@ def generate_plan(db: Session, trip_id: str, organizer: TripMembership) -> Gener
         )
 
     items = _write_items(db, plan, tuple(draft))
+    plan.currency = trip.currency
     plan.status = "active"
     plan.blocked_reason = None
     plan.needs_refresh = False
@@ -325,7 +326,8 @@ def _trip_has_items(db: Session, trip_id: str) -> bool:
 def _plan_for_trip(db: Session, trip: Trip) -> Plan:
     plan = db.scalar(select(Plan).where(Plan.trip_id == trip.id).order_by(Plan.created_at))
     if plan is not None:
-        plan.currency = trip.currency
+        # Currency is assigned only after items are written. Updating it
+        # first would row-lock the plan before the item trigger's trip lock.
         return plan
     plan = Plan(trip_id=trip.id, currency=trip.currency)
     db.add(plan)
@@ -1738,6 +1740,9 @@ def _write_items(
     plan: Plan,
     draft: tuple[DraftItem, ...],
 ) -> tuple[PlanItem, ...]:
+    """Insert new items. S-1a: this path is used under the generator's trip
+    FOR UPDATE. A KEY SHARE trip lock would not serialize two multi-item writers.
+    """
     items: list[PlanItem] = []
     for item in draft:
         poi = item.poi

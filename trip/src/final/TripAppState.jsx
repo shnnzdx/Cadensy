@@ -446,6 +446,7 @@ export function TripAppProvider({ children }) {
       }
       const error = new Error(message)
       error.status = response.status
+      error.body = body
       if (invalidationCause) {
         error.invalidationCause = invalidationCause
       }
@@ -930,6 +931,17 @@ export function TripAppProvider({ children }) {
 
   const revokeInvite = useCallback(async inviteId => {
     return requestJson(`/api/invites/${inviteId}/revoke`, { method: 'POST' })
+  }, [requestJson])
+
+  const loadFinalPlan = useCallback(async tripId => {
+    return requestJson(`/api/trips/${tripId}/final-plan`)
+  }, [requestJson])
+
+  const approveFinalPlan = useCallback(async (tripId, itineraryRevision) => {
+    return requestJson(`/api/trips/${tripId}/final-plan/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ itinerary_revision: itineraryRevision }),
+    })
   }, [requestJson])
 
   const getInvite = useCallback(async token => {
@@ -1438,6 +1450,8 @@ export function TripAppProvider({ children }) {
     reportInviteShare,
     invalidateInviteCreation,
     revokeInvite,
+    loadFinalPlan,
+    approveFinalPlan,
     getInvite,
     joinInvite,
     joinAccountInvite,
@@ -1469,7 +1483,7 @@ export function TripAppProvider({ children }) {
     preferencesSubmittedFor,
     submitPreferencesFor: tripId => setPreferencesSubmittedFor(current => current.includes(tripId) ? current : [...current, tripId]),
     notify,
-  }), [createTrip, activeProposal, activeProposals, activeRound, activeRounds, activeTripId, addPlanItem, adoptTechnicalTripContext, baseUpdates, castVote, chatWithTrip, classify, createInvite, replaceInvite, loadActiveInvite, reportInviteShare, invalidateInviteCreation, currentUser, days, decisionResolved, durableConversationClient, error, getAccountProfile, getInvite, hasAccountSession, inviteCopied, joinAccountInvite, joinInvite, loading, logout, membershipId, notices, objectToNotice, personalUpdates, planBlockedReason, planNeedsRefresh, planId, loadMembers, loadComments, loadChangeLog, addComment, readInviteAdoption, setItemBooked, generatePlan, remindMember, extendRound, escalateProposal, resolveDeadlock, loadMyPreferences, preferences, preferencesSubmittedFor, refreshAll, restoredTripId, saveMyPreferences, addConstraint, updateConstraint, deleteConstraint, resetDemo, resolveProposal, revokeInvite, searchReplacementPlaces, submitChange, trip, trips, tripSummaries, tripSummariesStatus, updateFilter, withdrawProposal])
+  }), [createTrip, activeProposal, activeProposals, activeRound, activeRounds, activeTripId, addPlanItem, adoptTechnicalTripContext, baseUpdates, castVote, chatWithTrip, classify, createInvite, replaceInvite, loadActiveInvite, reportInviteShare, invalidateInviteCreation, currentUser, days, decisionResolved, durableConversationClient, error, getAccountProfile, getInvite, hasAccountSession, inviteCopied, joinAccountInvite, joinInvite, loading, logout, membershipId, notices, objectToNotice, personalUpdates, planBlockedReason, planNeedsRefresh, planId, loadMembers, loadComments, loadChangeLog, addComment, readInviteAdoption, setItemBooked, generatePlan, remindMember, extendRound, escalateProposal, resolveDeadlock, loadMyPreferences, preferences, preferencesSubmittedFor, refreshAll, restoredTripId, saveMyPreferences, addConstraint, updateConstraint, deleteConstraint, resetDemo, resolveProposal, revokeInvite, loadFinalPlan, approveFinalPlan, searchReplacementPlaces, submitChange, trip, trips, tripSummaries, tripSummariesStatus, updateFilter, withdrawProposal])
 
   if (!currentUser) {
     const isJoinRoute = window.location.hash.startsWith('#/join/')

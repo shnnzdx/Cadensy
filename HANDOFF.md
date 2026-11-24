@@ -17,6 +17,12 @@ This file summarizes the state recorded in the repository. It is not a fresh liv
   revoke-in-place cleanup in Rev 2.
 - HMAC key material is not created or injected by this change. Release
   pipeline pins stay on `c8e1d4a90b27` until a separate PR.
+- Final plan approval is `GET /api/trips/{trip_id}/final-plan` and
+  `POST /api/trips/{trip_id}/final-plan/approve`. Readiness is a read of
+  the active plan, its items, open decision rounds, and pending change
+  proposals. Early close follows G-1 and stays closed after later
+  itinerary edits. The decision engine and the join-during-active-decision
+  409 are unchanged.
 
 ### 2026-11-20 — P0 activation-funnel handoff refresh
 

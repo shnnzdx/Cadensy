@@ -7,6 +7,7 @@ import { resolveTripCover, tripCoverImageUrlForVariant } from '../trip-cover.js'
 import { serializeWorkspaceRoute } from '../../../../shared/trip-navigation-route/index.js'
 import { useAssistantChangeRequestFlow } from './useAssistantChangeRequestFlow.js'
 import { usePlanInteractionRuntime } from './usePlanInteractionRuntime.js'
+import FinalPlanApprovalPanel from './FinalPlanApprovalPanel.jsx'
 import { addStopWarningText, extendRoundFailureNotice, generateItineraryErrorText } from '../tripContextClientError.js'
 import { selectDisplayedTrip } from '../route-trip-selection.js'
 
@@ -855,6 +856,7 @@ function LoadedPlanFeature({ currentTrip, onCommand }) {
   <div className={cx('planSplit', !view.drawerItem && 'withMap', view.drawerItem && 'withAssistant')}>
     <section className="planMainPane">
       <div className="pageHeading planHeading"><div className="planSummaryIntro"><span className="eyebrow">{tripCityLabel(currentTrip)}</span><h1>{currentTrip.name || 'Untitled trip'}</h1><p>{currentTrip.dates || 'Dates not set'}</p><div className="planSummaryStats"><span><b>{view.days.length}</b> days</span><span><b>{view.days.reduce((total, day) => total + day.items.length, 0)}</b> stops</span><span><b>{view.days.reduce((total, day) => total + day.items.filter(item => !item.isMeal).length, 0)}</b> activities</span><span><b>{view.days.reduce((total, day) => total + day.items.filter(item => item.isMeal).length, 0)}</b> meals</span></div></div><div className="planHeadingActions"><button type="button" className="btn askCadensyBtn" onClick={actions.openGlobalAssistant}>Ask Cadensy about this trip</button></div><div className="planCollaboratorStrip"><span>Collaborators</span><div className="collaboratorMeta"><div className="collaboratorAvatars"><i>{app.currentUser?.initials || 'You'}</i>{(currentTrip.people || 1) > 1 && <i className="collaboratorCount">+{(currentTrip.people || 1) - 1}</i>}</div><span className="collaboratorMemberCount">{currentTrip.people || 1} {(currentTrip.people || 1) === 1 ? 'member' : 'members'}</span></div>{isOrganizer && <Link to={tripHref(currentTrip.id, 'members')}>Manage members →</Link>}</div></div>
+      <FinalPlanApprovalPanel tripId={currentTrip.id} app={app}/>
       {app.loading.initial && <div className="planNotice"><span>…</span><div><strong>Loading trip data</strong><p>Fetching the current plan from the backend.</p></div></div>}
       {app.error && <div className="planNotice"><span>!</span><div><strong>Backend request failed</strong><p>{app.error}</p></div><button type="button" onClick={app.refreshAll}>Retry</button></div>}
       {app.planNeedsRefresh && <div className="planNotice planRefreshNotice"><span>↻</span><div><strong>Preferences updated</strong><p>Your current plan was generated using earlier preferences and has not been changed. Future replans and change proposals will use the latest planning inputs.</p></div><Link to={tripHref(currentTrip.id, 'preferences')}>Review →</Link></div>}
