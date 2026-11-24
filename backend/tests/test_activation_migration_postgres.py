@@ -148,7 +148,8 @@ def test_activation_migration_upgrade_downgrade_and_privacy_constraint():
         _run_alembic(url, "upgrade", "head")
         with engine.begin() as connection:
             version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == ACTIVATION_REVISION
+        assert version == "c0b2f9e5a6d3"
+        assert ACTIVATION_REVISION in _run_alembic(url, "history")
     finally:
         engine.dispose()
         _drop_database(url)

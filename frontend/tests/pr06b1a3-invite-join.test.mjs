@@ -114,7 +114,11 @@ test("PR-06B.1A.3 wires the public and Account endpoints through separate UI act
   assert.doesNotMatch(finalApp, /email:\s*email\.trim\(\)/);
   assert.match(finalApp, /use a separate browser session so your Account session is not replaced/);
   assert.match(state, /body: JSON\.stringify\(guestJoinPayload\(displayName\)\)/);
-  assert.match(state, /accountRequestJson\(`\/api\/invites\/\$\{token\}\/account-join`, \{/);
+  assert.match(state, /pathRequest: value => accountRequestJson\(`\/api\/invites\/\$\{value\}\/account-join`, \{/);
+  assert.match(state, /bodyRequest: value => accountRequestJson\('\/api\/invites\/account-join', \{/);
+  assert.match(state, /validateInviteJoinResult\(joined, 'guest'\)/);
+  assert.match(state, /validateInviteJoinResult\(joined, 'account'\)/);
+  assert.doesNotMatch(state, /accountRequestJson\(`\/api\/invites\/\$\{value\}\/join`/);
   assert.match(state, /clearMembershipScopedState\(\)/);
   assert.match(login, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);
   assert.match(signup, /const resolvedNext = isSafeInternalReturnPath\(requestedNext\) \?\? "\/trip";/);

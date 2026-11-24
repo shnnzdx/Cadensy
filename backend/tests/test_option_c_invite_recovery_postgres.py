@@ -397,6 +397,13 @@ def test_concurrent_ensure_yields_one_active_invite(test_engine):
             .where(InviteLink.trip_id == trip_id, InviteLink.revoked_at.is_(None))
         )
     assert count == 1
+    with factory.begin() as db:
+        db.execute(text("DELETE FROM activation_event WHERE trip_id = :trip"), {"trip": trip_id})
+        db.execute(text("DELETE FROM invite_link WHERE trip_id = :trip"), {"trip": trip_id})
+        db.execute(text("DELETE FROM trip_membership WHERE trip_id = :trip"), {"trip": trip_id})
+        user_id = db.scalar(select(Trip.created_by_user_id).where(Trip.id == trip_id))
+        db.execute(text("DELETE FROM trip WHERE id = :trip"), {"trip": trip_id})
+        db.execute(text("DELETE FROM user_account WHERE id = :user"), {"user": user_id})
 
 
 def test_alembic_upgrade_cleanup_rerun_and_downgrade_refusals():
