@@ -1,7 +1,7 @@
 # Activation Funnel
 
 Status: current contract
-Last reviewed: 2026-11-18
+Last reviewed: 2026-11-24
 
 This is the P0 measurement contract for trip creation, invites, joins, first
 preferences, the first generated plan, settled group decisions, and notice
@@ -177,9 +177,9 @@ The production schema migration completed on 2026-11-22 from
 `b7d3a1e9c642` to `c8e1d4a90b27`. Backend and frontend promotion remain
 separate owner-gated operations:
 
-- `AWS/archive/workflows/retired-release/release-pr06b-schema-migration.yml` preserves the completed historical migration contract.
-- `.github/workflows/release-pydantic-backend.yml` (`APPROVED_ALEMBIC_HEAD`) is the active Pydantic-preserving backend release gate.
-- `.github/workflows/artifact-backend-images.yml` (`BUILD_ALEMBIC_HEAD`) publishes the immutable candidate images.
+- `.github/workflows/cd01-pr06b-schema-migration.yml` is the active Gate M workflow. It runs only by `workflow_dispatch` on `main` after the protected `Main` environment approval, and it does not update ECS service tasks.
+- `.github/workflows/release-pydantic-backend.yml` (`APPROVED_ALEMBIC_HEAD`, currently `c8e1d4a90b27`) promotes a backend image only when the Gate M env dump recorded that release's `source_sha` and schema-verifier digest, and CloudWatch shows `Running upgrade b7d3a1e9c642 -> c8e1d4a90b27`. Production is already at `c8e1d4a90b27`, so a backend release can bind only to the existing Gate M run for source `bb4791fcf17a5678b72fea19c42169bbeb75d732` until a later Alembic head has its own Gate M run.
+- `.github/workflows/artifact-backend-images.yml` (`BUILD_ALEMBIC_HEAD`, currently `c8e1d4a90b27`) publishes the immutable candidate images. A new Alembic head has to update this pin, `APPROVED_ALEMBIC_HEAD`, and Gate M `PR06B_ALEMBIC_HEAD` together before release.
 
 A production rollout still needs the existing backup and maintenance-window
 evidence and a separate owner-gated execution, in this order:

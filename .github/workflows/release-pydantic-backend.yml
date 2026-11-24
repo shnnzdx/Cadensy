@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       schema_migration_evidence_ref:
-        description: Successful historical Gate M GitHub Actions run URL for the current schema
+        description: Successful Gate M run URL for this source_sha, schema-verifier digest, and APPROVED_ALEMBIC_HEAD
         required: true
         type: string
       expected_current_task_definition_arn:
@@ -53,6 +53,7 @@ env:
   CONTAINER_NAME: tripsync-backend
   APPROVED_ALEMBIC_HEAD: c8e1d4a90b27
   PRODUCTION_API_BASE_URL: https://app.cadensy.top
+  BACKEND_LOG_GROUP: /ecs/tripsync-backend
 
 jobs:
   assert-approval-gate:
@@ -143,7 +144,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.APPROVED_AWS_REGION }}
 
-      - name: Verify provenance, Pydantic baseline, and historical schema evidence
+      - name: Verify provenance, Pydantic baseline, and bound Gate M evidence
         id: current
         shell: bash
         env:
@@ -182,15 +183,72 @@ jobs:
             --header "Accept: application/vnd.github+json" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${schema_evidence_run_id}" \
             > /tmp/gate-m-run.json
-          jq -e '.event == "workflow_dispatch" and .conclusion == "success" and .head_branch == "main" and .path == ".github/workflows/cd01-pr06b-schema-migration.yml"' /tmp/gate-m-run.json >/dev/null
           curl --fail --silent --show-error \
             --header "Authorization: Bearer ${GH_TOKEN}" \
             --header "Accept: application/vnd.github+json" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${schema_evidence_run_id}/jobs?per_page=100" \
             > /tmp/gate-m-jobs.json
-          jq -e '.jobs | any(.[]; .name == "Execute one approved PR-06B schema migration" and .conclusion == "success" and any(.steps[]?; .name == "Run bounded migration and read-only catalog verification" and .conclusion == "success"))' /tmp/gate-m-jobs.json >/dev/null
-          echo "current_task_definition=${current_task_definition}" >> "${GITHUB_OUTPUT}"
-          echo "schema_evidence_run_id=${schema_evidence_run_id}" >> "${GITHUB_OUTPUT}"
+          mkdir -p /tmp/gate-m-logs
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${schema_evidence_run_id}/logs" \
+            --output /tmp/gate-m-logs.zip
+          unzip -q /tmp/gate-m-logs.zip -d /tmp/gate-m-logs
+          # Bind to env-dump SOURCE_SHA and MIGRATION_DIGEST, one task ARN,
+          # and the CloudWatch upgrade to APPROVED_ALEMBIC_HEAD. Summary
+          # echoes stay unexpanded in the job log and are not evidence.
+          migration_task_arn="$(python scripts/cd01/validate_bound_gate_m_evidence.py --emit-task-arn --logs-dir /tmp/gate-m-logs)"
+          migration_task_id="${migration_task_arn##*/}"
+          [[ "${migration_task_id}" =~ ^[0-9a-f]{32}$ ]]
+          expected_migration_task_arn="arn:aws:ecs:${APPROVED_AWS_REGION}:${APPROVED_AWS_ACCOUNT_ID}:task/${ECS_CLUSTER}/${migration_task_id}"
+          [[ "${migration_task_arn}" == "${expected_migration_task_arn}" ]]
+          echo '[]' > /tmp/gate-m-cloudwatch-pages.json
+          token=""
+          page_count=0
+          while true; do
+            page_count=$((page_count + 1))
+            if [[ "${page_count}" -gt 20 ]]; then
+              echo '::error::Gate M CloudWatch pagination did not reach an unchanged nextForwardToken.'
+              exit 1
+            fi
+            if [[ -z "${token}" ]]; then
+              aws logs get-log-events \
+                --log-group-name "${BACKEND_LOG_GROUP}" \
+                --log-stream-name "ecs/${CONTAINER_NAME}/${migration_task_id}" \
+                --start-from-head \
+                --output json > /tmp/gate-m-cloudwatch-page.json
+            else
+              aws logs get-log-events \
+                --log-group-name "${BACKEND_LOG_GROUP}" \
+                --log-stream-name "ecs/${CONTAINER_NAME}/${migration_task_id}" \
+                --start-from-head \
+                --next-token "${token}" \
+                --output json > /tmp/gate-m-cloudwatch-page.json
+            fi
+            jq -e 'type == "object" and (.events | type == "array") and (.nextForwardToken | type == "string" and length > 0)' /tmp/gate-m-cloudwatch-page.json >/dev/null
+            jq --slurpfile page /tmp/gate-m-cloudwatch-page.json '. + $page' /tmp/gate-m-cloudwatch-pages.json > /tmp/gate-m-cloudwatch-pages.next.json
+            mv /tmp/gate-m-cloudwatch-pages.next.json /tmp/gate-m-cloudwatch-pages.json
+            next="$(jq -r '.nextForwardToken' /tmp/gate-m-cloudwatch-page.json)"
+            if [[ -n "${token}" && "${next}" == "${token}" ]]; then
+              break
+            fi
+            token="${next}"
+          done
+          jq -n --slurpfile pages /tmp/gate-m-cloudwatch-pages.json '{pages: $pages[0]}' > /tmp/gate-m-cloudwatch.json
+          python scripts/cd01/validate_bound_gate_m_evidence.py \
+            --source-sha "${SOURCE_SHA}" \
+            --expected-alembic-head "${APPROVED_ALEMBIC_HEAD}" \
+            --migration-digest "${SCHEMA_VERIFIER_DIGEST}" \
+            --run-json /tmp/gate-m-run.json \
+            --jobs-json /tmp/gate-m-jobs.json \
+            --logs-dir /tmp/gate-m-logs \
+            --cloudwatch-json /tmp/gate-m-cloudwatch.json
+          {
+            echo "current_task_definition=${current_task_definition}"
+            echo "schema_evidence_run_id=${schema_evidence_run_id}"
+            echo "gate_m_task_arn=${migration_task_arn}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Run a read-only c8 schema preflight in an isolated task
         id: schema
@@ -311,7 +369,7 @@ jobs:
             echo "- Application source commit: ${SOURCE_SHA}"
             echo "- Runtime image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${RUNTIME_DIGEST}"
             echo "- Schema-verifier image: ${APPROVED_AWS_ACCOUNT_ID}.dkr.ecr.${APPROVED_AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${SCHEMA_VERIFIER_DIGEST}"
-            echo "- Historical schema migration evidence: ${SCHEMA_MIGRATION_EVIDENCE_REF}"
+            echo "- Gate M evidence bound to ${SOURCE_SHA} at ${APPROVED_ALEMBIC_HEAD}: ${SCHEMA_MIGRATION_EVIDENCE_REF}"
             echo "- Schema status: ${{ steps.schema.outputs.status }} (read-only preflight task ${{ steps.schema.outputs.task }})"
             echo "- Pydantic rollback baseline: ${ROLLBACK_TASK_DEFINITION_ARN}"
             echo "- New Pydantic task definition: ${{ steps.taskdef.outputs.arn }}"
